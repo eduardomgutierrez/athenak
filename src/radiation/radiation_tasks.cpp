@@ -62,7 +62,11 @@ void Radiation::AssembleRadTasks(std::map<std::string, std::shared_ptr<TaskList>
     id.rad_calcop = tl["stagen"]->AddTask(&Radiation::CalcOpacityNurates, this, id.mhd_ct);
     id.rad_coupl = tl["stagen"]->AddTask(&Radiation::RadFluidCoupling,this,id.rad_calcop);
 #else
-    id.rad_coupl = tl["stagen"]->AddTask(&Radiation::RadFluidCoupling,this,id.mhd_ct);
+    if (!multi_freq) {
+      id.rad_coupl = tl["stagen"]->AddTask(&Radiation::RadFluidCoupling,this,id.mhd_ct);
+    } else {
+      id.rad_coupl = tl["stagen"]->AddTask(&Radiation::MultiFreqRadFluidCoupling,this,id.mhd_ct);
+    }
 #endif
     id.rad_resti = tl["stagen"]->AddTask(&Radiation::RestrictI, this, id.rad_coupl);
     id.rad_sendi = tl["stagen"]->AddTask(&Radiation::SendI, this, id.rad_resti);
@@ -108,7 +112,11 @@ void Radiation::AssembleRadTasks(std::map<std::string, std::shared_ptr<TaskList>
     id.rad_calcop = tl["stagen"]->AddTask(&Radiation::CalcOpacityNurates, this, id.hyd_src);
     id.rad_coupl = tl["stagen"]->AddTask(&Radiation::RadFluidCoupling,this,id.rad_calcop);
 #else
-    id.rad_coupl = tl["stagen"]->AddTask(&Radiation::RadFluidCoupling,this,id.hyd_src);
+    if (!multi_freq) {
+      id.rad_coupl = tl["stagen"]->AddTask(&Radiation::RadFluidCoupling,this,id.hyd_src);
+    } else {
+      id.rad_coupl = tl["stagen"]->AddTask(&Radiation::MultiFreqRadFluidCoupling,this,id.hyd_src);
+    }
 #endif
     id.rad_resti = tl["stagen"]->AddTask(&Radiation::RestrictI, this, id.rad_coupl);
     id.rad_sendi = tl["stagen"]->AddTask(&Radiation::SendI, this, id.rad_resti);
@@ -147,7 +155,11 @@ void Radiation::AssembleRadTasks(std::map<std::string, std::shared_ptr<TaskList>
     id.rad_calcop = tl["stagen"]->AddTask(&Radiation::CalcOpacityNurates, this, id.rad_src);
     id.rad_coupl = tl["stagen"]->AddTask(&Radiation::RadFluidCoupling,this,id.rad_calcop);
 #else
-    id.rad_coupl = tl["stagen"]->AddTask(&Radiation::RadFluidCoupling,this,id.rad_src);
+    if (!multi_freq) {
+      id.rad_coupl = tl["stagen"]->AddTask(&Radiation::RadFluidCoupling,this,id.rad_src);
+    } else {
+      id.rad_coupl = tl["stagen"]->AddTask(&Radiation::MultiFreqRadFluidCoupling,this,id.rad_src);
+    }
 #endif
     id.rad_resti = tl["stagen"]->AddTask(&Radiation::RestrictI, this, id.rad_coupl);
     id.rad_sendi = tl["stagen"]->AddTask(&Radiation::SendI, this, id.rad_resti);
