@@ -578,7 +578,7 @@ class EOSCompOSE : public EOSPolicyInterface, public LogPolicy, public SupportsE
         x1_tmp[1] = x1[1] + (dx1[1]*fac_cut);
 
         // check if the next step calculation had problems
-        if (isnan(x1_tmp[0])) {
+        if (std::isnan(x1_tmp[0])) {
           ierr = 1;
           return ierr;
         }
@@ -649,7 +649,7 @@ class EOSCompOSE : public EOSPolicyInterface, public LogPolicy, public SupportsE
     Real Y[MAX_SPECIES] = {0.0};
     Y[0] = x[1];
 
-    if (isnan(T)) {
+    if (std::isnan(T)) {
       ierr = 1;
       return ierr;
     }
@@ -658,7 +658,7 @@ class EOSCompOSE : public EOSPolicyInterface, public LogPolicy, public SupportsE
     Real eta = mu_l/T;
     Real eta2 = eta*eta;
 
-    if (isnan(eta)) {
+    if (std::isnan(eta)) {
       ierr = 1;
       return ierr;
     }
@@ -718,7 +718,7 @@ class EOSCompOSE : public EOSPolicyInterface, public LogPolicy, public SupportsE
     deta_dT  = (dmu_l_dT - eta )/T; // [1/MeV] TODO: Check
     deta_dYe = dmu_l_dYe/T;      // [-]
 
-    if (isnan(deta_dT)||isnan(deta_dYe)||isnan(de_dT)||isnan(de_dYe)) {
+    if (std::isnan(deta_dT)||std::isnan(deta_dYe)||std::isnan(de_dT)||std::isnan(de_dYe)) {
       ierr = 1;
     } else {
       ierr = 0;
