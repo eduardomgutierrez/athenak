@@ -16,6 +16,10 @@
 #include "parameter_input.hpp"
 #include "tasklist/task_list.hpp"
 #include "bvals/bvals.hpp"
+#include "config.hpp"
+#if ENABLE_NURATES
+#include "radiation_nurates.hpp"
+#endif
 
 // forward declarations
 class EquationOfState;
@@ -48,6 +52,7 @@ struct RadiationTaskIDs {
   TaskID rad_src;
   TaskID mhd_src;
   TaskID hyd_src;
+  TaskID rad_calcop;   // nurates opacity calculation
   TaskID rad_coupl;
   TaskID rad_resti;
   TaskID hyd_restu;
@@ -94,10 +99,25 @@ class Radiation {
   bool is_mhd_enabled;
   bool are_units_enabled;
 
-  // Radiation coupling term parameters
+  // bns_nurates opacity library
+  bool use_nurates = false;
+#if ENABLE_NURATES
+  NuratesParams nurates_params;
+  Real nurates_baryon_mass = 1.0;    // baryon mass in code units (for Ye update)
+  DvceArray5D<Real> nurates_eta_0;   // number emissivity    [nspecies, nk, nj, ni]
+  DvceArray5D<Real> nurates_eta_1;   // energy emissivity
+  DvceArray5D<Real> nurates_abs_0;   // number absorption opacity
+  DvceArray5D<Real> nurates_abs_1;   // energy absorption opacity
+  DvceArray5D<Real> nurates_scat_1;  // energy scattering opacity
+#endif
+
+  // Radiation source term parameters
   bool rad_source;          // flag to enable/disable radiation source term
   bool fixed_fluid;         // flag to enable/disable fluid integration
   bool affect_fluid;        // flag to enable/disable feedback of rad field on fluid
+  bool evolve_ye;           // update fluid electron fraction from neutrino sources
+  Real source_Ye_min;       // minimum allowed Ye for matter source update
+  Real source_Ye_max;       // maximum allowed Ye for matter source update
   Real arad;                // radiation constant
   Real kappa_a;             // constant Rosseland mean absorption coefficient
   Real kappa_s;             // constant scattering coefficient
@@ -105,8 +125,13 @@ class Radiation {
   bool power_opacity;       // flag to enable Kramer's law opacity for kappa_a
   bool is_compton_enabled;  // flag to enable/disable compton
 
-  // radiation source term (i.e., beam)
+  // Extra physics (i.e., other srcterms)
   SourceTerms *psrc = nullptr;
+
+  // Multi-species / multi-frequency (gray: nspecies=1, nfreq=1, multi_freq=false)
+  int nspecies = 1;
+  bool multi_freq = false;
+  int nfreq = 1;
 
   // Angular mesh
   bool rotate_geo;                    // rotate geodesic mesh
@@ -157,6 +182,12 @@ class Radiation {
   TaskStatus RKUpdate(Driver *d, int stage);
   TaskStatus RadSrcTerms(Driver *d, int stage);
   TaskStatus RadFluidCoupling(Driver *d, int stage);
+#if ENABLE_NURATES
+  TaskStatus RadFluidCouplingNurates(Driver *d, int stage);
+  TaskStatus CalcOpacityNurates(Driver *d, int stage);
+  template <class EOSPolicy, class ErrorPolicy>
+  TaskStatus CalcOpacityNurates_(Driver *d, int stage);
+#endif
   TaskStatus RestrictI(Driver *d, int stage);
   TaskStatus SendI(Driver *d, int stage);
   TaskStatus RecvI(Driver *d, int stage);

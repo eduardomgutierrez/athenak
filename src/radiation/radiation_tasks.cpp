@@ -13,6 +13,7 @@
 
 #include "athena.hpp"
 #include "globals.hpp"
+#include "config.hpp"
 #include "parameter_input.hpp"
 #include "geodesic-grid/geodesic_grid.hpp"
 #include "tasklist/task_list.hpp"
@@ -36,7 +37,7 @@ void Radiation::AssembleRadTasks(std::map<std::string, std::shared_ptr<TaskList>
   mhd::MHD *pmhd = pmy_pack->pmhd;
 
   // construct task list depending on enabled physics modules and radiation parameters
-  if (pmhd != nullptr && !(fixed_fluid)) {  // radiation magnetohydrodynamics
+  if (pmhd != nullptr && !(fixed_fluid) && pmy_pack->pdyngr == nullptr) {  // radiation magnetohydrodynamics
     // assemble "before_stagen" task list
     id.rad_irecv = tl["before_stagen"]->AddTask(&Radiation::InitRecv, this, none);
     id.mhd_irecv = tl["before_stagen"]->AddTask(&mhd::MHD::InitRecv, pmhd, none);
@@ -57,7 +58,12 @@ void Radiation::AssembleRadTasks(std::map<std::string, std::shared_ptr<TaskList>
     id.mhd_sende = tl["stagen"]->AddTask(&mhd::MHD::SendE, pmhd, id.mhd_efld);
     id.mhd_recve = tl["stagen"]->AddTask(&mhd::MHD::RecvE, pmhd, id.mhd_sende);
     id.mhd_ct    = tl["stagen"]->AddTask(&mhd::MHD::CT, pmhd, id.mhd_recve);
+#if ENABLE_NURATES
+    id.rad_calcop = tl["stagen"]->AddTask(&Radiation::CalcOpacityNurates, this, id.mhd_ct);
+    id.rad_coupl = tl["stagen"]->AddTask(&Radiation::RadFluidCoupling,this,id.rad_calcop);
+#else
     id.rad_coupl = tl["stagen"]->AddTask(&Radiation::RadFluidCoupling,this,id.mhd_ct);
+#endif
     id.rad_resti = tl["stagen"]->AddTask(&Radiation::RestrictI, this, id.rad_coupl);
     id.rad_sendi = tl["stagen"]->AddTask(&Radiation::SendI, this, id.rad_resti);
     id.rad_recvi = tl["stagen"]->AddTask(&Radiation::RecvI, this, id.rad_sendi);
@@ -67,7 +73,8 @@ void Radiation::AssembleRadTasks(std::map<std::string, std::shared_ptr<TaskList>
     id.mhd_restb = tl["stagen"]->AddTask(&mhd::MHD::RestrictB, pmhd, id.mhd_recvu);
     id.mhd_sendb = tl["stagen"]->AddTask(&mhd::MHD::SendB, pmhd, id.mhd_restb);
     id.mhd_recvb = tl["stagen"]->AddTask(&mhd::MHD::RecvB, pmhd, id.mhd_sendb);
-    id.bcs       = tl["stagen"]->AddTask(&Radiation::ApplyPhysicalBCs,this,id.mhd_recvb);
+    id.bcs       = tl["stagen"]->AddTask(
+                                    &Radiation::ApplyPhysicalBCs, this, id.mhd_recvb);
     id.rad_prol  = tl["stagen"]->AddTask(&Radiation::Prolongate, this, id.bcs);
     id.mhd_prol  = tl["stagen"]->AddTask(&mhd::MHD::Prolongate, pmhd, id.rad_prol);
     id.mhd_c2p   = tl["stagen"]->AddTask(&mhd::MHD::ConToPrim, pmhd, id.mhd_prol);
@@ -81,7 +88,7 @@ void Radiation::AssembleRadTasks(std::map<std::string, std::shared_ptr<TaskList>
     id.mhd_crecv = tl["after_stagen"]->AddTask(
                                           &mhd::MHD::ClearRecv, pmhd, id.mhd_csend);
 
-  } else if (phyd != nullptr && !(fixed_fluid)) {  // radiation hydrodynamics
+  } else if (phyd != nullptr && !(fixed_fluid) && pmy_pack->pdyngr == nullptr) {  // radiation hydrodynamics
     // assemble "before_stagen" task list
     id.rad_irecv = tl["before_stagen"]->AddTask(&Radiation::InitRecv, this, none);
     id.hyd_irecv = tl["before_stagen"]->AddTask(&hydro::Hydro::InitRecv, phyd, none);
@@ -92,20 +99,25 @@ void Radiation::AssembleRadTasks(std::map<std::string, std::shared_ptr<TaskList>
     id.rad_sendf = tl["stagen"]->AddTask(&Radiation::SendFlux, this, id.rad_flux);
     id.rad_recvf = tl["stagen"]->AddTask(&Radiation::RecvFlux, this, id.rad_sendf);
     id.rad_rkupdt= tl["stagen"]->AddTask(&Radiation::RKUpdate, this, id.rad_recvf);
-    id.rad_src   = tl["stagen"]->AddTask(&Radiation::RadSrcTerms, this, id.rad_rkupdt);
-    id.hyd_flux  = tl["stagen"]->AddTask(&hydro::Hydro::Fluxes, phyd, id.rad_src);
+    id.hyd_flux  = tl["stagen"]->AddTask(&hydro::Hydro::Fluxes, phyd, id.rad_rkupdt);
     id.hyd_sendf = tl["stagen"]->AddTask(&hydro::Hydro::SendFlux, phyd, id.hyd_flux);
     id.hyd_recvf = tl["stagen"]->AddTask(&hydro::Hydro::RecvFlux, phyd, id.hyd_sendf);
     id.hyd_rkupdt= tl["stagen"]->AddTask(&hydro::Hydro::RKUpdate,phyd,id.hyd_recvf);
     id.hyd_src   = tl["stagen"]->AddTask(&hydro::Hydro::HydroSrcTerms,phyd,id.hyd_rkupdt);
+#if ENABLE_NURATES
+    id.rad_calcop = tl["stagen"]->AddTask(&Radiation::CalcOpacityNurates, this, id.hyd_src);
+    id.rad_coupl = tl["stagen"]->AddTask(&Radiation::RadFluidCoupling,this,id.rad_calcop);
+#else
     id.rad_coupl = tl["stagen"]->AddTask(&Radiation::RadFluidCoupling,this,id.hyd_src);
+#endif
     id.rad_resti = tl["stagen"]->AddTask(&Radiation::RestrictI, this, id.rad_coupl);
     id.rad_sendi = tl["stagen"]->AddTask(&Radiation::SendI, this, id.rad_resti);
     id.rad_recvi = tl["stagen"]->AddTask(&Radiation::RecvI, this, id.rad_sendi);
     id.hyd_restu = tl["stagen"]->AddTask(&hydro::Hydro::RestrictU, phyd, id.rad_recvi);
     id.hyd_sendu = tl["stagen"]->AddTask(&hydro::Hydro::SendU, phyd, id.hyd_restu);
     id.hyd_recvu = tl["stagen"]->AddTask(&hydro::Hydro::RecvU, phyd, id.hyd_sendu);
-    id.bcs       = tl["stagen"]->AddTask(&Radiation::ApplyPhysicalBCs,this,id.hyd_recvu);
+    id.bcs       = tl["stagen"]->AddTask(
+                                    &Radiation::ApplyPhysicalBCs, this, id.hyd_recvu);
     id.rad_prol  = tl["stagen"]->AddTask(&Radiation::Prolongate, this, id.bcs);
     id.hyd_prol  = tl["stagen"]->AddTask(&hydro::Hydro::Prolongate, phyd, id.rad_prol);
     id.hyd_c2p   = tl["stagen"]->AddTask(&hydro::Hydro::ConToPrim, phyd, id.hyd_prol);
@@ -131,7 +143,12 @@ void Radiation::AssembleRadTasks(std::map<std::string, std::shared_ptr<TaskList>
     id.rad_recvf = tl["stagen"]->AddTask(&Radiation::RecvFlux, this, id.rad_sendf);
     id.rad_rkupdt= tl["stagen"]->AddTask(&Radiation::RKUpdate, this, id.rad_recvf);
     id.rad_src   = tl["stagen"]->AddTask(&Radiation::RadSrcTerms, this, id.rad_rkupdt);
+#if ENABLE_NURATES
+    id.rad_calcop = tl["stagen"]->AddTask(&Radiation::CalcOpacityNurates, this, id.rad_src);
+    id.rad_coupl = tl["stagen"]->AddTask(&Radiation::RadFluidCoupling,this,id.rad_calcop);
+#else
     id.rad_coupl = tl["stagen"]->AddTask(&Radiation::RadFluidCoupling,this,id.rad_src);
+#endif
     id.rad_resti = tl["stagen"]->AddTask(&Radiation::RestrictI, this, id.rad_coupl);
     id.rad_sendi = tl["stagen"]->AddTask(&Radiation::SendI, this, id.rad_resti);
     id.rad_recvi = tl["stagen"]->AddTask(&Radiation::RecvI, this, id.rad_sendi);
@@ -155,15 +172,16 @@ void Radiation::AssembleRadTasks(std::map<std::string, std::shared_ptr<TaskList>
 //  receive status flags to waiting (with or without MPI) for Radiation variables.
 
 TaskStatus Radiation::InitRecv(Driver *pdrive, int stage) {
+  int &nfreq_ = nfreq;
   // post receives for I
-  TaskStatus tstat = pbval_i->InitRecv(prgeo->nangles);
+  TaskStatus tstat = pbval_i->InitRecv(nspecies*nfreq_*prgeo->nangles);
   if (tstat != TaskStatus::complete) return tstat;
 
   // do not post receives for fluxes when stage < 0 (i.e. ICs)
   if (stage >= 0) {
     // with SMR/AMR, post receives for fluxes of I
     if (pmy_pack->pmesh->multilevel) {
-      tstat = pbval_i->InitFluxRecv(prgeo->nangles);
+      tstat = pbval_i->InitFluxRecv(nspecies*nfreq_*prgeo->nangles);
       if (tstat != TaskStatus::complete) return tstat;
     }
   }
@@ -183,12 +201,12 @@ TaskStatus Radiation::CopyCons(Driver *pdrive, int stage) {
     // hydro and MHD (if enabled)
     hydro::Hydro *phyd = pmy_pack->phydro;
     mhd::MHD *pmhd = pmy_pack->pmhd;
-    if (pmhd != nullptr) {
+    if (pmhd != nullptr && pmy_pack->pdyngr == nullptr) {
       Kokkos::deep_copy(DevExeSpace(), pmhd->u1, pmhd->u0);
       Kokkos::deep_copy(DevExeSpace(), pmhd->b1.x1f, pmhd->b0.x1f);
       Kokkos::deep_copy(DevExeSpace(), pmhd->b1.x2f, pmhd->b0.x2f);
       Kokkos::deep_copy(DevExeSpace(), pmhd->b1.x3f, pmhd->b0.x3f);
-    } else if (phyd != nullptr) {
+    } else if (phyd != nullptr && pmy_pack->pdyngr == nullptr) {
       Kokkos::deep_copy(DevExeSpace(), phyd->u1, phyd->u0);
     }
   }
@@ -225,7 +243,7 @@ TaskStatus Radiation::RecvFlux(Driver *pdrive, int stage) {
 
 //----------------------------------------------------------------------------------------
 //! \fn TaskList Radiation::RadSrcTerms
-//! \brief Wrapper task list function to apply source terms to radaition field
+//! \brief Wrapper task list function to apply source terms to radiation field
 
 TaskStatus Radiation::RadSrcTerms(Driver *pdrive, int stage) {
   Real beta_dt = (pdrive->beta[stage-1])*(pmy_pack->pmesh->dt);
@@ -242,6 +260,7 @@ TaskStatus Radiation::RadSrcTerms(Driver *pdrive, int stage) {
 }
 
 //----------------------------------------------------------------------------------------
+
 //! \fn TaskStatus Radiation::RestrictI
 //! \brief Wrapper task list function to restrict conserved vars
 
@@ -285,10 +304,10 @@ TaskStatus Radiation::ApplyPhysicalBCs(Driver *pdrive, int stage) {
   // physical BCs on (M)HD
   hydro::Hydro *phyd = pmy_pack->phydro;
   mhd::MHD *pmhd = pmy_pack->pmhd;
-  if (pmhd != nullptr) {
+  if (pmhd != nullptr && pmy_pack->pdyngr == nullptr) {
     pmhd->pbval_u->HydroBCs((pmy_pack), (pmhd->pbval_u->u_in), pmhd->u0);
     pmhd->pbval_b->BFieldBCs((pmy_pack), (pmhd->pbval_b->b_in), pmhd->b0);
-  } else if (phyd != nullptr) {
+  } else if (phyd != nullptr && pmy_pack->pdyngr == nullptr) {
     phyd->pbval_u->HydroBCs((pmy_pack), (phyd->pbval_u->u_in), phyd->u0);
   }
 

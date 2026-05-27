@@ -117,6 +117,8 @@ template <typename T>
 using DvceArray5D = Kokkos::View<T *****, LayoutWrapper, DevMemSpace>;
 template <typename T>
 using DvceArray6D = Kokkos::View<T ******, LayoutWrapper, DevMemSpace>;
+template <typename T>
+using DvceArray7D = Kokkos::View<T *******, LayoutWrapper, DevMemSpace>;
 
 // template declarations for construction of Kokkos::View on host
 template <typename T>
@@ -129,6 +131,8 @@ template <typename T>
 using HostArray4D = Kokkos::View<T ****, LayoutWrapper, HostMemSpace>;
 template <typename T>
 using HostArray5D = Kokkos::View<T *****, LayoutWrapper, HostMemSpace>;
+template <typename T>
+using HostArray6D = Kokkos::View<T ******, LayoutWrapper, HostMemSpace>;
 
 // template declarations for construction of Kokkos::DualViews
 template <typename T>

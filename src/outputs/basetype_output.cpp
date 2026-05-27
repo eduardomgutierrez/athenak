@@ -24,6 +24,7 @@
 #include "mhd/mhd.hpp"
 #include "dyn_grmhd/dyn_grmhd.hpp"
 #include "coordinates/adm.hpp"
+#include "radiation/radiation.hpp"
 #include "z4c/tmunu.hpp"
 #include "z4c/z4c.hpp"
 #include "srcterms/srcterms.hpp"

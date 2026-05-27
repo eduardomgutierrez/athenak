@@ -22,6 +22,10 @@
 #include "geodesic-grid/geodesic_grid.hpp"
 #include "units/units.hpp"
 #include "radiation/radiation.hpp"
+#include "config.hpp"
+#if ENABLE_NURATES
+#include "geodesic-grid/gauss_legendre.hpp"
+#endif
 
 namespace radiation {
 //----------------------------------------------------------------------------------------
@@ -43,7 +47,8 @@ Radiation::Radiation(MeshBlockPack *ppack, ParameterInput *pin) :
     na("na",1,1,1,1,1,1),
     norm_to_tet("norm_to_tet",1,1,1,1,1,1) {
   // Check for general relativity
-  if (!(pmy_pack->pcoord->is_general_relativistic)) {
+  if (!(pmy_pack->pcoord->is_general_relativistic) &&
+      !(pmy_pack->pcoord->is_dynamical_relativistic)) {
     std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
       << std::endl << "Radiation requires general relativity" << std::endl;
     std::exit(EXIT_FAILURE);
@@ -72,11 +77,12 @@ Radiation::Radiation(MeshBlockPack *ppack, ParameterInput *pin) :
   // Set radiation coupling parameters including scattering and absorption opacities,
   // radiation constant, and source term behavior.
   if (rad_source) {
-    kappa_s = pin->GetReal("radiation","kappa_s");
+    // kappa_s/kappa_a/kappa_p are unused when use_nurates=true; default to 0.
+    kappa_s = pin->GetOrAddReal("radiation","kappa_s",0.0);
     power_opacity = pin->GetOrAddBoolean("radiation","power_opacity",false);
     if (!(power_opacity)) {
-      kappa_a = pin->GetReal("radiation","kappa_a");
-      kappa_p = pin->GetReal("radiation","kappa_p");
+      kappa_a = pin->GetOrAddReal("radiation","kappa_a",0.0);
+      kappa_p = pin->GetOrAddReal("radiation","kappa_p",0.0);
     }
     is_compton_enabled = pin->GetOrAddBoolean("radiation","compton",false);
     if (is_compton_enabled && !(are_units_enabled)) {
@@ -92,6 +98,9 @@ Radiation::Radiation(MeshBlockPack *ppack, ParameterInput *pin) :
       arad = pin->GetReal("radiation","arad");
     }
     affect_fluid = pin->GetOrAddBoolean("radiation","affect_fluid",true);
+    evolve_ye = pin->GetOrAddBoolean("radiation","evolve_ye",true);
+    source_Ye_min = pin->GetOrAddReal("radiation", "source_Ye_min", 0.0);
+    source_Ye_max = pin->GetOrAddReal("radiation", "source_Ye_max", 0.6);
   }
 
   // Check for fluid evolution
@@ -107,6 +116,7 @@ Radiation::Radiation(MeshBlockPack *ppack, ParameterInput *pin) :
   rotate_geo = pin->GetOrAddBoolean("radiation","rotate_geo",true);
   angular_fluxes = pin->GetOrAddBoolean("radiation","angular_fluxes",true);
   n_0_floor = pin->GetOrAddReal("radiation","n_0_floor",0.1);
+  nspecies = pin->GetOrAddInteger("radiation","nspecies",1);
   prgeo = new GeodesicGrid(nlevel, rotate_geo, angular_fluxes);
 
   // Total number of MeshBlocks on this rank to be used in array dimensioning
@@ -139,7 +149,7 @@ Radiation::Radiation(MeshBlockPack *ppack, ParameterInput *pin) :
   int ncells1 = indcs.nx1 + 2*(indcs.ng);
   int ncells2 = (indcs.nx2 > 1)? (indcs.nx2 + 2*(indcs.ng)) : 1;
   int ncells3 = (indcs.nx3 > 1)? (indcs.nx3 + 2*(indcs.ng)) : 1;
-  Kokkos::realloc(i0,nmb,prgeo->nangles,ncells3,ncells2,ncells1);
+  Kokkos::realloc(i0,nmb,nspecies*nfreq*prgeo->nangles,ncells3,ncells2,ncells1);
   }
 
   // allocate memory for conserved variables on coarse mesh
@@ -148,12 +158,12 @@ Radiation::Radiation(MeshBlockPack *ppack, ParameterInput *pin) :
     int nccells1 = indcs.cnx1 + 2*(indcs.ng);
     int nccells2 = (indcs.cnx2 > 1)? (indcs.cnx2 + 2*(indcs.ng)) : 1;
     int nccells3 = (indcs.cnx3 > 1)? (indcs.cnx3 + 2*(indcs.ng)) : 1;
-    Kokkos::realloc(coarse_i0,nmb,prgeo->nangles,nccells3,nccells2,nccells1);
+    Kokkos::realloc(coarse_i0,nmb,nspecies*nfreq*prgeo->nangles,nccells3,nccells2,nccells1);
   }
 
   // allocate boundary buffers for conserved (cell-centered) variables
   pbval_i = new MeshBoundaryValuesCC(ppack, pin, false);
-  pbval_i->InitializeBuffers(prgeo->nangles);
+  pbval_i->InitializeBuffers(nspecies*nfreq*prgeo->nangles);
 
   // for time-evolving problems, continue to construct methods, allocate arrays
   if (evolution_t.compare("stationary") != 0) {
@@ -192,14 +202,72 @@ Radiation::Radiation(MeshBlockPack *ppack, ParameterInput *pin) :
     int ncells1 = indcs.nx1 + 2*(indcs.ng);
     int ncells2 = (indcs.nx2 > 1)? (indcs.nx2 + 2*(indcs.ng)) : 1;
     int ncells3 = (indcs.nx3 > 1)? (indcs.nx3 + 2*(indcs.ng)) : 1;
-    Kokkos::realloc(i1,      nmb,prgeo->nangles,ncells3,ncells2,ncells1);
-    Kokkos::realloc(iflx.x1f,nmb,prgeo->nangles,ncells3,ncells2,ncells1);
-    Kokkos::realloc(iflx.x2f,nmb,prgeo->nangles,ncells3,ncells2,ncells1);
-    Kokkos::realloc(iflx.x3f,nmb,prgeo->nangles,ncells3,ncells2,ncells1);
+    Kokkos::realloc(i1,      nmb,nspecies*nfreq*prgeo->nangles,ncells3,ncells2,ncells1);
+    Kokkos::realloc(iflx.x1f,nmb,nspecies*nfreq*prgeo->nangles,ncells3,ncells2,ncells1);
+    Kokkos::realloc(iflx.x2f,nmb,nspecies*nfreq*prgeo->nangles,ncells3,ncells2,ncells1);
+    Kokkos::realloc(iflx.x3f,nmb,nspecies*nfreq*prgeo->nangles,ncells3,ncells2,ncells1);
     if (angular_fluxes) {
-      Kokkos::realloc(divfa,nmb,prgeo->nangles,ncells3,ncells2,ncells1);
+      Kokkos::realloc(divfa,nmb,nspecies*nfreq*prgeo->nangles,ncells3,ncells2,ncells1);
     }
   }
+
+#if ENABLE_NURATES
+  // Initialize bns_nurates library (optional)
+  use_nurates = pin->GetOrAddBoolean("radiation", "use_nurates", false);
+  if (use_nurates) {
+    // reaction flags
+    nurates_params.use_abs_em          = pin->GetOrAddBoolean("bns_nurates","use_abs_em",true);
+    nurates_params.use_pair            = pin->GetOrAddBoolean("bns_nurates","use_pair",true);
+    nurates_params.use_brem            = pin->GetOrAddBoolean("bns_nurates","use_brem",true);
+    nurates_params.use_iso             = pin->GetOrAddBoolean("bns_nurates","use_iso",true);
+    nurates_params.use_inelastic_scatt = pin->GetOrAddBoolean("bns_nurates","use_inelastic_scatt",false);
+    // correction flags
+    nurates_params.use_WM_ab           = pin->GetOrAddBoolean("bns_nurates","use_WM_ab",false);
+    nurates_params.use_WM_sc           = pin->GetOrAddBoolean("bns_nurates","use_WM_sc",false);
+    nurates_params.use_dU              = pin->GetOrAddBoolean("bns_nurates","use_dU",false);
+    nurates_params.use_dm_eff          = pin->GetOrAddBoolean("bns_nurates","use_dm_eff",false);
+    nurates_params.use_NN_medium_corr  = pin->GetOrAddBoolean("bns_nurates","use_NN_medium_corr",false);
+    nurates_params.neglect_blocking    = pin->GetOrAddBoolean("bns_nurates","neglect_blocking",false);
+    nurates_params.use_decay           = pin->GetOrAddBoolean("bns_nurates","use_decay",false);
+    nurates_params.use_BRT_brem        = pin->GetOrAddBoolean("bns_nurates","use_BRT_brem",false);
+    nurates_params.use_equilibrium_distribution =
+        pin->GetOrAddBoolean("bns_nurates","use_equilibrium_distribution",true);
+    // floors
+    nurates_params.nb_min      = pin->GetOrAddReal("bns_nurates","nb_min",1.0e-12);
+    nurates_params.temp_min_mev = pin->GetOrAddReal("bns_nurates","temp_min_mev",0.01);
+
+    // 1d Gauss-Legendre quadrature
+    nurates_params.quad_nx = pin->GetOrAddInteger("bns_nurates","quad_nx",6);
+    nurates_params.quadrature.nx   = nurates_params.quad_nx;
+    nurates_params.quadrature.dim  = 1;
+    nurates_params.quadrature.type = kGauleg;
+    nurates_params.quadrature.x1   = 0.;
+    nurates_params.quadrature.x2   = 1.;
+    GaussLegendre(&nurates_params.quadrature);
+
+    // 2d quadrature (same number of points as 1d unless overridden)
+    nurates_params.quad_nx_2 = pin->GetOrAddInteger("bns_nurates","quad_nx_2",-1);
+    if (nurates_params.quad_nx_2 < 0) {
+      nurates_params.quad_nx_2 = nurates_params.quad_nx;
+    }
+    nurates_params.quadrature_2.nx   = nurates_params.quad_nx_2;
+    nurates_params.quadrature_2.dim  = 1;
+    nurates_params.quadrature_2.type = kGauleg;
+    nurates_params.quadrature_2.x1   = 0.;
+    nurates_params.quadrature_2.x2   = 1.;
+    GaussLegendre(&nurates_params.quadrature_2);
+
+    // allocate per-species opacity arrays [nmb, nspecies, nk, nj, ni]
+    int ncells1 = indcs.nx1 + 2*(indcs.ng);
+    int ncells2 = (indcs.nx2 > 1)? (indcs.nx2 + 2*(indcs.ng)) : 1;
+    int ncells3 = (indcs.nx3 > 1)? (indcs.nx3 + 2*(indcs.ng)) : 1;
+    Kokkos::realloc(nurates_eta_0,  nmb, nspecies, ncells3, ncells2, ncells1);
+    Kokkos::realloc(nurates_eta_1,  nmb, nspecies, ncells3, ncells2, ncells1);
+    Kokkos::realloc(nurates_abs_0,  nmb, nspecies, ncells3, ncells2, ncells1);
+    Kokkos::realloc(nurates_abs_1,  nmb, nspecies, ncells3, ncells2, ncells1);
+    Kokkos::realloc(nurates_scat_1, nmb, nspecies, ncells3, ncells2, ncells1);
+  }
+#endif
 }
 
 //----------------------------------------------------------------------------------------
