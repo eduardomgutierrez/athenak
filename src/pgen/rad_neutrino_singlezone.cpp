@@ -77,11 +77,6 @@ void SingleZoneImpl(Mesh *pmesh, ParameterInput *pin, const bool restart) {
   int nang = pmbp->prad->prgeo->nangles;
   int nspecies = pmbp->prad->nspecies;
   int nfreq = pmbp->prad->nfreq;
-  if (nfreq != 1) {
-    std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
-              << "rad_neutrino_singlezone requires gray (nfreq=1) radiation" << std::endl;
-    std::exit(EXIT_FAILURE);
-  }
 
   Real rho = pin->GetReal("problem", "rho");
   Real temp = pin->GetReal("problem", "temp");
@@ -97,8 +92,6 @@ void SingleZoneImpl(Mesh *pmesh, ParameterInput *pin, const bool restart) {
           ->eos.ps.GetEOSMutable();
   Real mb = eos.GetBaryonMass();
   Real nb = rho/mb;
-  Real y[1] = {ye};
-  Real press = eos.GetPressure(nb, temp, y);
 
   auto &w0 = pmbp->pmhd->w0;
   auto &b0 = pmbp->pmhd->b0;
@@ -106,11 +99,12 @@ void SingleZoneImpl(Mesh *pmesh, ParameterInput *pin, const bool restart) {
   par_for("pgen_neutrino_singlezone_mhd", DevExeSpace(), 0, nmb1, 0, n3 - 1, 0,
           n2 - 1, 0, n1 - 1,
           KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
+            Real ye_ = ye;
             w0(m, IDN, k, j, i) = rho;
             w0(m, IVX, k, j, i) = wlor*vx;
             w0(m, IVY, k, j, i) = wlor*vy;
             w0(m, IVZ, k, j, i) = wlor*vz;
-            w0(m, IPR, k, j, i) = press;
+            w0(m, IPR, k, j, i) = eos.GetPressure(nb, temp, &ye_);
             w0(m, IYF, k, j, i) = ye;
 
             bcc0(m, IBX, k, j, i) = 0.0;
@@ -158,20 +152,23 @@ void SingleZoneImpl(Mesh *pmesh, ParameterInput *pin, const bool restart) {
                        norm_to_tet(m,3,2,k,j,i)*wlor*vy +
                        norm_to_tet(m,3,3,k,j,i)*wlor*vz;
 
+            Real erad_freq = erad/static_cast<Real>(nfreq);
             for (int isp = 0; isp < nspecies; ++isp) {
-              for (int n = 0; n < nang; ++n) {
-                Real un_t = u_tet[1]*nh_c.d_view(n,1) +
-                            u_tet[2]*nh_c.d_view(n,2) +
-                            u_tet[3]*nh_c.d_view(n,3);
-                Real n0_f = u_tet[0]*nh_c.d_view(n,0) - un_t;
-                Real n0 = tet_c(m,0,0,k,j,i);
-                Real n_0 = 0.0;
-                for (int d = 0; d < 4; ++d) {
-                  n_0 += tetcov_c(m,d,0,k,j,i)*nh_c.d_view(n,d);
+              for (int ifr = 0; ifr < nfreq; ++ifr) {
+                for (int n = 0; n < nang; ++n) {
+                  Real un_t = u_tet[1]*nh_c.d_view(n,1) +
+                              u_tet[2]*nh_c.d_view(n,2) +
+                              u_tet[3]*nh_c.d_view(n,3);
+                  Real n0_f = u_tet[0]*nh_c.d_view(n,0) - un_t;
+                  Real n0 = tet_c(m,0,0,k,j,i);
+                  Real n_0 = 0.0;
+                  for (int d = 0; d < 4; ++d) {
+                    n_0 += tetcov_c(m,d,0,k,j,i)*nh_c.d_view(n,d);
+                  }
+                  int nn = (isp*nfreq + ifr)*nang + n;
+                  i0(m, nn, k, j, i) =
+                      n0*n_0*(erad_freq/(4.0*M_PI))/SQR(SQR(n0_f));
                 }
-                int nn = isp*nang + n;  // nfreq=1 guaranteed above
-                i0(m, nn, k, j, i) =
-                    n0*n_0*(erad/(4.0*M_PI))/SQR(SQR(n0_f));
               }
             }
           });

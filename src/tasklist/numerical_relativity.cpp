@@ -42,6 +42,8 @@ PhysicsDependency NumericalRelativity::NeedsPhysics(TaskName task) {
     return Phys_MHD;
   } else if (task < Z4c_NTASKS) {
     return Phys_Z4c;
+  } else if (task < Rad_NTASKS) {
+    return Phys_Rad;
   } else {
     return Phys_None;
   }
@@ -55,6 +57,8 @@ bool NumericalRelativity::DependencyAvailable(PhysicsDependency dep) {
       return pmy_pack->pdyngr != nullptr;
     case Phys_Z4c:
       return pmy_pack->pz4c != nullptr;
+    case Phys_Rad:
+      return pmy_pack->prad != nullptr;
     default:
       std::cout << "NumericalRelativity: Unknown dependency\n";
   }

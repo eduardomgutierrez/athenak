@@ -163,20 +163,6 @@ void MeshBlockPack::AddPhysics(ParameterInput *pin) {
     pionn = nullptr;
   }
 
-  // (5) RADIATION
-  // Create radiation physics module.  Create tasklist only if <adm> block is not present
-  // (Valencia formulation). When both radiation and dynamical GR are enabled, radiation
-  // tasks are integrated into the NumericalRelativity task list.
-  if (pin->DoesBlockExist("radiation")) {
-    prad = new radiation::Radiation(this, pin);
-    nphysics++;
-    if (!(pin->DoesBlockExist("adm"))) {
-      prad->AssembleRadTasks(tl_map);
-    }
-  } else {
-    prad = nullptr;
-  }
-
   // (6) TURBULENCE DRIVER
   // This is a special module to drive turbulence in hydro, MHD, or both. Cannot be
   // included as a source term since it requires evolving force array via O-U process.
@@ -191,8 +177,9 @@ void MeshBlockPack::AddPhysics(ParameterInput *pin) {
     pturb = nullptr;
   }
 
-  // (7) Z4c and ADM
+  // (6) Z4c and ADM
   // Create Z4c and ADM physics module.
+  // Constructed before radiation so that pdyngr is available in the Radiation constructor.
   if (pin->DoesBlockExist("z4c")) {
     pz4c = new z4c::Z4c(this, pin);
     padm = new adm::ADM(this, pin);
@@ -214,8 +201,7 @@ void MeshBlockPack::AddPhysics(ParameterInput *pin) {
       padm = nullptr;
     }
   }
-
-  // (8) Dynamical Spacetime and Matter (MHD TODO)
+  // (6) Dynamical Spacetime and Matter
   if ((pin->DoesBlockExist("z4c") || pin->DoesBlockExist("adm")) &&
       (pin->DoesBlockExist("hydro")) ) {
     std::cout << "Dynamical metric and hydro not compatible; use MHD instead  "
@@ -228,6 +214,20 @@ void MeshBlockPack::AddPhysics(ParameterInput *pin) {
     ptmunu = new Tmunu(this, pin);
   }
 
+  // (7) RADIATION
+  // Create radiation physics module.  Create tasklist only if <adm> block is not present (Valencia formulation).
+  // When both radiation and dynamical GR are enabled, radiation tasks are integrated into the NumericalRelativity task list.
+  if (pin->DoesBlockExist("radiation")) {
+    prad = new radiation::Radiation(this, pin);
+    nphysics++;
+    if (!(pin->DoesBlockExist("adm"))) {
+      prad->AssembleRadTasks(tl_map);
+    }
+  } else {
+    prad = nullptr;
+  }
+
+  // (8) Numerical Relativity task assembly
   if (pz4c != nullptr || padm != nullptr) {
     pnr = new numrel::NumericalRelativity(this, pin);
     pnr->AssembleNumericalRelativityTasks(tl_map);

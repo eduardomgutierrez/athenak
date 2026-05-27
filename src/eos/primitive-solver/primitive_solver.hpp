@@ -25,6 +25,8 @@
 #include "ps_error.hpp"
 #include "ps_types.hpp"
 
+using std::isfinite;
+
 namespace Primitive {
 
 template<typename EOSPolicy, typename ErrorPolicy>

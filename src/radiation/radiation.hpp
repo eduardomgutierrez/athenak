@@ -103,12 +103,16 @@ class Radiation {
   bool use_nurates = false;
 #if ENABLE_NURATES
   NuratesParams nurates_params;
+  bool nurates_debug_opacity = false;
   Real nurates_baryon_mass = 1.0;    // baryon mass in code units (for Ye update)
   DvceArray5D<Real> nurates_eta_0;   // number emissivity    [nspecies, nk, nj, ni]
   DvceArray5D<Real> nurates_eta_1;   // energy emissivity
   DvceArray5D<Real> nurates_abs_0;   // number absorption opacity
   DvceArray5D<Real> nurates_abs_1;   // energy absorption opacity
   DvceArray5D<Real> nurates_scat_1;  // energy scattering opacity
+  DvceArray6D<Real> nurates_eta_1_freq;   // [nmb, nspecies, nfreq, nk, nj, ni]
+  DvceArray6D<Real> nurates_abs_1_freq;
+  DvceArray6D<Real> nurates_scat_1_freq;
 #endif
 
   // Radiation source term parameters
@@ -124,14 +128,16 @@ class Radiation {
   Real kappa_p;             // Planck - Rosseland mean coefficient
   bool power_opacity;       // flag to enable Kramer's law opacity for kappa_a
   bool is_compton_enabled;  // flag to enable/disable compton
+  bool correct_radsrc_velocity;
+  bool correct_radsrc_opacity;
+  Real dfloor_opacity;
+  Real dens_trunc_max;
+  Real tau_truncation;
+  Real sigmoid_residual;
 
   // Extra physics (i.e., other srcterms)
+  bool beam_source;        // flag to enable/disable user beam source masks
   SourceTerms *psrc = nullptr;
-
-  // Multi-species / multi-frequency (gray: nspecies=1, nfreq=1, multi_freq=false)
-  int nspecies = 1;
-  bool multi_freq = false;
-  int nfreq = 1;
 
   // Angular mesh
   bool rotate_geo;                    // rotate geodesic mesh
@@ -139,7 +145,11 @@ class Radiation {
   Real n_0_floor;                     // floor on n_0
   GeodesicGrid *prgeo = nullptr;      // pointer to radiation angular mesh
 
-  // Multi-frequency radiation
+  // Radiation particle type
+  bool is_neutrino = false;    // true for neutrino transport, false for photon (default)
+
+  // Multi-frequency, multi-species radiation
+  int nspecies = 1;            // number of radiation species (1 for photons, 3-4 for neutrinos)
   bool multi_freq = false;
   int nfreq = 1;               // for multi-frequency, nfreq >= 3
   int flag_fscale;             // 0: linear, 1: log, 2: customize
@@ -188,6 +198,7 @@ class Radiation {
   DvceArray5D<Real> i1;         // intensity at intermediate step
   DvceFaceFld5D<Real> iflx;     // spatial fluxes on zone faces
   DvceArray5D<Real> divfa;      // angular flux divergence + frequency flux divergence (if applicable)
+  DvceArray5D<bool> beam_mask;  // boolean mask used for beam source term
   Real dtnew;
 
   // reconstruction method
@@ -226,6 +237,9 @@ class Radiation {
 
   // Multi-frequency radiation
   TaskStatus MultiFreqRadFluidCoupling(Driver *d, int stage);
+#if ENABLE_NURATES
+  TaskStatus MultiFreqRadFluidCouplingNurates(Driver *d, int stage);
+#endif
 
  private:
   MeshBlockPack* pmy_pack;  // ptr to MeshBlockPack containing this Radiation

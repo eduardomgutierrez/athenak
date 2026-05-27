@@ -33,7 +33,8 @@ TaskStatus Radiation::RKUpdate(Driver *pdriver, int stage) {
   int &ks = indcs.ks, &ke = indcs.ke;
   int &nfreq_ = nfreq;
   int &nang_  = prgeo->nangles;
-  int nfr_ang1 = nfreq_*nang_ - 1;
+  int &nspecies_ = nspecies;
+  int nfr_ang1 = nspecies_*nfreq_*nang_ - 1;
   int nmb1  = pmy_pack->nmb_thispack - 1;
   auto &mbsize  = pmy_pack->pmb->mb_size;
 

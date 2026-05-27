@@ -3,8 +3,8 @@
 // Copyright(C) 2020 James M. Stone <jmstone@ias.edu> and the Athena code team
 // Licensed under the 3-clause BSD License (the "LICENSE")
 //========================================================================================
-//! \file rad_relax.cpp
-//  \brief thermal relaxation test
+//! \file rad_compton_therm.cpp
+//  \brief Compton thermalization test
 
 // C++ headers
 
@@ -15,19 +15,23 @@
 #include "eos/eos.hpp"
 #include "geodesic-grid/geodesic_grid.hpp"
 #include "hydro/hydro.hpp"
+#include "mhd/mhd.hpp"
+#include "dyn_grmhd/dyn_grmhd.hpp"
 #include "driver/driver.hpp"
 #include "radiation/radiation.hpp"
 #include "radiation/radiation_multi_freq.hpp"
 
 //----------------------------------------------------------------------------------------
 //! \fn void MeshBlock::UserProblem(ParameterInput *pin)
-//  \brief Sets initial conditions for GR radiation relaxation test
+//  \brief Sets initial conditions for GR radiation Compton thermalization test
 
 void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   MeshBlockPack *pmbp = pmy_mesh_->pmb_pack;
 
   // return if restart
   if (restart) return;
+
+  bool use_dyngr = (pmbp->pdyngr != nullptr);
 
   // capture variables for kernel
   auto &indcs = pmy_mesh_->mb_indcs;
@@ -55,23 +59,45 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   Real dens = pin->GetReal("problem", "dens");
   Real tgas = pin->GetReal("problem", "tgas");
   Real trad = pin->GetReal("problem", "trad");
-  Real gamma_adi = pin->GetOrAddReal("hydro", "gamma", 5.0/3);
   Real a_rad = pin->GetOrAddReal("radiation", "arad", 1.0);
 
+  // fluid and radiation variables
+  DvceArray5D<Real> w0, u0;
+  Real gm1;
+  if (pmbp->phydro != nullptr) {
+    w0 = pmbp->phydro->w0;
+    u0 = pmbp->phydro->u0;
+    gm1 = pmbp->phydro->peos->eos_data.gamma - 1.0;
+  } else {
+    w0 = pmbp->pmhd->w0;
+    u0 = pmbp->pmhd->u0;
+    gm1 = pmbp->pmhd->peos->eos_data.gamma - 1.0;
+  }
+
   // set primitive variables
-  auto &w0 = pmbp->phydro->w0;
-  par_for("pgen_rad_relax",DevExeSpace(),0,nmb1,0,(n3-1),0,(n2-1),0,(n1-1),
+  par_for("pgen_rad_compton_therm",DevExeSpace(),0,nmb1,0,(n3-1),0,(n2-1),0,(n1-1),
   KOKKOS_LAMBDA(int m, int k, int j, int i) {
     w0(m,IDN,k,j,i) = dens;
     w0(m,IVX,k,j,i) = 0.0;
     w0(m,IVY,k,j,i) = 0.0;
     w0(m,IVZ,k,j,i) = 0.0;
-    w0(m,IEN,k,j,i) = dens*tgas/(gamma_adi-1);  // assumes that gm1=1
+    if (use_dyngr) {
+      w0(m,IEN,k,j,i) = dens*tgas;
+    } else {
+      w0(m,IEN,k,j,i) = dens*tgas/gm1;
+    }
   });
 
   // Convert primitives to conserved
-  auto &u0 = pmbp->phydro->u0;
-  pmbp->phydro->peos->PrimToCons(w0, u0, 0, (n1-1), 0, (n2-1), 0, (n3-1));
+  if (use_dyngr) {
+    pmbp->padm->SetADMVariables(pmbp);
+    pmbp->pdyngr->PrimToConInit(0, (n1-1), 0, (n2-1), 0, (n3-1));
+  } else if (pmbp->phydro != nullptr) {
+    pmbp->phydro->peos->PrimToCons(w0, u0, 0, (n1-1), 0, (n2-1), 0, (n3-1));
+  } else {
+    pmbp->pmhd->peos->PrimToCons(w0, pmbp->pmhd->bcc0, u0,
+                                  0, (n1-1), 0, (n2-1), 0, (n3-1));
+  }
 
   auto &norm_to_tet_ = pmbp->prad->norm_to_tet;
   auto &nh_c_ = pmbp->prad->nh_c;

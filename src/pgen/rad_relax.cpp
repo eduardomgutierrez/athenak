@@ -15,6 +15,8 @@
 #include "eos/eos.hpp"
 #include "geodesic-grid/geodesic_grid.hpp"
 #include "hydro/hydro.hpp"
+#include "mhd/mhd.hpp"
+#include "dyn_grmhd/dyn_grmhd.hpp"
 #include "driver/driver.hpp"
 #include "radiation/radiation.hpp"
 #include "radiation/radiation_multi_freq.hpp"
@@ -28,6 +30,8 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
 
   // return if restart
   if (restart) return;
+
+  bool use_dyngr = (pmbp->pdyngr != nullptr);
 
   // capture variables for kernel
   auto &indcs = pmy_mesh_->mb_indcs;
@@ -59,7 +63,14 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   Real lf = 1.0/sqrt(1.0-(SQR(v1)));
 
   // set primitive variables
-  auto &w0 = pmbp->phydro->w0;
+  DvceArray5D<Real> w0, u0;
+  if (pmbp->phydro != nullptr) {
+    w0 = pmbp->phydro->w0;
+    u0 = pmbp->phydro->u0;
+  } else {
+    w0 = pmbp->pmhd->w0;
+    u0 = pmbp->pmhd->u0;
+  }
   par_for("pgen_rad_relax",DevExeSpace(),0,nmb1,0,(n3-1),0,(n2-1),0,(n1-1),
   KOKKOS_LAMBDA(int m, int k, int j, int i) {
     w0(m,IDN,k,j,i) = 1.0;
@@ -70,8 +81,17 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   });
 
   // Convert primitives to conserved
-  auto &u0 = pmbp->phydro->u0;
-  pmbp->phydro->peos->PrimToCons(w0, u0, 0, (n1-1), 0, (n2-1), 0, (n3-1));
+  if (use_dyngr) {
+    pmbp->padm->SetADMVariables(pmbp);
+    pmbp->pdyngr->PrimToConInit(0, (n1-1), 0, (n2-1), 0, (n3-1));
+  } else {
+    if (pmbp->phydro != nullptr) {
+      pmbp->phydro->peos->PrimToCons(w0, u0, 0, (n1-1), 0, (n2-1), 0, (n3-1));
+    } else {
+      pmbp->pmhd->peos->PrimToCons(w0, pmbp->pmhd->bcc0, u0,
+                                  0, (n1-1), 0, (n2-1), 0, (n3-1));
+    }
+  }
 
   auto &norm_to_tet_ = pmbp->prad->norm_to_tet;
   auto &nh_c_ = pmbp->prad->nh_c;

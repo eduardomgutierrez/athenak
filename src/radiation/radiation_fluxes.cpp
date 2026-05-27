@@ -36,9 +36,10 @@ TaskStatus Radiation::CalculateFluxes(Driver *pdriver, int stage) {
   int &ks = indcs.ks, &ke = indcs.ke;
   int &nfrq = nfreq;
   int &nang  = prgeo->nangles;
+  int &nsp   = nspecies;
   int nang1 = nang - 1;
   int nfreq1 = nfrq - 1;
-  int nfr_ang1 = nfrq*nang - 1;
+  int nfr_ang1 = nsp*nfrq*nang - 1;
   int nmb1 = pmy_pack->nmb_thispack - 1;
 
   const auto &recon_method_ = recon_method;
@@ -283,10 +284,13 @@ TaskStatus Radiation::CalculateFluxes(Driver *pdriver, int stage) {
     auto &nnu_coeff_ = nnu_coeff;
 
     int order_freq_fluxes = 0;
+    int nsp_ang1 = nsp*nang - 1;
     if (!angular_fluxes) Kokkos::deep_copy(divfa_, 0);
 
-    par_for("rflux_freq",DevExeSpace(),0,nmb1,0,nang1,ks,ke,js,je,is,ie,
-    KOKKOS_LAMBDA(int m, int iang, int k, int j, int i) {
+    par_for("rflux_freq",DevExeSpace(),0,nmb1,0,nsp_ang1,ks,ke,js,je,is,ie,
+    KOKKOS_LAMBDA(int m, int sa, int k, int j, int i) {
+      int isp  = sa / nang;
+      int iang = sa - isp*nang;
 
       // extract spatial position
       Real &x1min = size.d_view(m).x1min;
@@ -347,8 +351,9 @@ TaskStatus Radiation::CalculateFluxes(Driver *pdriver, int stage) {
                + tetcov_c_(m,2,0,k,j,i)*nh_c_.d_view(iang,2) + tetcov_c_(m,3,0,k,j,i)*nh_c_.d_view(iang,3);
 
       // estimate inu at nu_tet[nfreq-1] assuming blackbody tail
+      int sp_off = isp*nfrq*nang;  // species offset into combined index
       Real &nu_e = nu_tet(nfreq1);
-      int ne = getFreqAngIndex(nfreq1, iang, nang);
+      int ne = sp_off + getFreqAngIndex(nfreq1, iang, nang);
       Real ir_cm_star_e = SQR(SQR(n0_cm))*i0_(m,ne,k,j,i)/(n0*n_0);
       Real teff = GetEffTemperature(ir_cm_star_e, n0_cm*nu_e, arad_);
       Real inu_e = fmax(BBSpectrum(n0_cm*nu_e, teff, arad_)/(4*M_PI)/SQR(SQR(n0_cm)), 0.0);
@@ -358,8 +363,8 @@ TaskStatus Radiation::CalculateFluxes(Driver *pdriver, int stage) {
       for (int ifr=1; ifr <= nfreq1; ++ifr) {
         Real &nu_fm1 = nu_tet(ifr-1);
         Real &nu_f   = nu_tet(ifr);
-        int nf = getFreqAngIndex(ifr, iang, nang);
-        int nfm1 = getFreqAngIndex(ifr-1, iang, nang);
+        int nf = sp_off + getFreqAngIndex(ifr, iang, nang);
+        int nfm1 = sp_off + getFreqAngIndex(ifr-1, iang, nang);
         Real inu_fm1h = i0_(m,nfm1,k,j,i)/(n0*n_0)/(nu_f-nu_fm1);
         Real nu_fm1h = (nu_f + nu_fm1) / 2;
 
@@ -391,7 +396,7 @@ TaskStatus Radiation::CalculateFluxes(Driver *pdriver, int stage) {
           if (ifr > 1) {
             Real &nu_fm2 = nu_tet(ifr-2);
             Real nu_fm3h = (nu_fm1 + nu_fm2) / 2;
-            int nfm2 = getFreqAngIndex(ifr-2, iang, nang);
+            int nfm2 = sp_off + getFreqAngIndex(ifr-2, iang, nang);
             inu_fm3h = i0_(m,nfm2,k,j,i)/(n0*n_0)/(nu_fm1-nu_fm2);
             nu_fm3h = (nu_fm1 + nu_fm2) / 2;
           } // endif (ifr > 1)
@@ -401,7 +406,7 @@ TaskStatus Radiation::CalculateFluxes(Driver *pdriver, int stage) {
           if (ifr < nfreq1-1) {
             Real &nu_fp2 = nu_tet(ifr+2);
             Real nu_fp3h = (nu_fp2 + nu_fp1) / 2;
-            int nfp1 = getFreqAngIndex(ifr+1, iang, nang);
+            int nfp1 = sp_off + getFreqAngIndex(ifr+1, iang, nang);
             inu_fp3h = i0_(m,nfp1,k,j,i)/(n0*n_0)/(nu_fp2-nu_fp1);
             nu_fp3h = (nu_fp2 + nu_fp1) / 2;
           } // endif (ifr < nfreq1-1)

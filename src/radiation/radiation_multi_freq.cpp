@@ -18,9 +18,12 @@
 #include "units/units.hpp"
 #include "radiation.hpp"
 #include "radiation_multi_freq.hpp"
+#include "dyn_grmhd/dyn_grmhd.hpp"
 
 #include "radiation/radiation_tetrad.hpp"
 #include "radiation/radiation_opacities.hpp"
+
+using std::isfinite;
 
 namespace radiation {
 
@@ -86,6 +89,10 @@ TaskStatus Radiation::MultiFreqRadFluidCoupling(Driver *pdriver, int stage) {
     return TaskStatus::complete;
   }
 
+#if ENABLE_NURATES
+  if (use_nurates) { return MultiFreqRadFluidCouplingNurates(pdriver, stage); }
+#endif
+
   // Extract indices, size data, hydro/mhd/units flags, and coupling flags
   auto &indcs = pmy_pack->pmesh->mb_indcs;
   int &is = indcs.is, &ie = indcs.ie;
@@ -94,6 +101,7 @@ TaskStatus Radiation::MultiFreqRadFluidCoupling(Driver *pdriver, int stage) {
   int nmb1 = pmy_pack->nmb_thispack - 1;
   int &nang = prgeo->nangles;
   int &nfrq = nfreq;
+  int nsp_ = nspecies;
   const int nang1 = nang - 1;
   const int nfreq1 = nfrq - 1;
   const int nfr_ang = nang*nfrq;
@@ -101,6 +109,7 @@ TaskStatus Radiation::MultiFreqRadFluidCoupling(Driver *pdriver, int stage) {
   auto &nu_tet = freq_grid;
   bool &is_hydro_enabled_ = is_hydro_enabled;
   bool &is_mhd_enabled_ = is_mhd_enabled;
+  bool is_dyngr = (pmy_pack->pdyngr != nullptr);
   bool &are_units_enabled_ = are_units_enabled;
   bool &is_compton_enabled_ = is_compton_enabled;
   bool &fixed_fluid_ = fixed_fluid;
@@ -177,7 +186,10 @@ TaskStatus Radiation::MultiFreqRadFluidCoupling(Driver *pdriver, int stage) {
 
   // Call ConsToPrim over active zones prior to source term application
   if (!(fixed_fluid_)) {
-    if (is_hydro_enabled_) {
+    if (is_dyngr) {
+      // EG: FIX
+      pmy_pack->pdyngr->ConToPrimBC(is, ie, js, je, ks, ke);
+    } else if (is_hydro_enabled_) {
       pmy_pack->phydro->peos->ConsToPrim(u0_,w0_,false,is,ie,js,je,ks,ke);
     } else if (is_mhd_enabled_) {
       auto &b0_ = pmy_pack->pmhd->b0;
@@ -191,7 +203,9 @@ TaskStatus Radiation::MultiFreqRadFluidCoupling(Driver *pdriver, int stage) {
                   + ScrArray2D<Real>::shmem_size(nang, nfrq) * 2
                   + ScrArray1D<Real>::shmem_size(nfr_ang)
                   + ScrArray1D<Real>::shmem_size(nang) * 4
-                  + ScrArray1D<Real>::shmem_size(nfrq) * 5;
+                  + ScrArray1D<Real>::shmem_size(nsp_*nfrq) * 5;
+
+  // Per-species scratch is handled by sizing sum_a/b, chi_p/r, jr_cm_old to nsp_*nfrq
 
   if (is_compton_enabled_) {
     scr_size += ScrArray1D<Real>::shmem_size(nfrq) * 7;
@@ -210,11 +224,12 @@ TaskStatus Radiation::MultiFreqRadFluidCoupling(Driver *pdriver, int stage) {
     ScrArray1D<Real> ir_cm_grey(member.team_scratch(scr_level), nang);
     ScrArray1D<Real> n_0_iang(member.team_scratch(scr_level), nang);
     ScrArray1D<Real> n0_cm_iang(member.team_scratch(scr_level), nang);
-    ScrArray1D<Real> jr_cm_old(member.team_scratch(scr_level), nfrq);
-    ScrArray1D<Real> chi_p(member.team_scratch(scr_level), nfrq);
-    ScrArray1D<Real> chi_r(member.team_scratch(scr_level), nfrq);
-    ScrArray1D<Real> sum_a(member.team_scratch(scr_level), nfrq);
-    ScrArray1D<Real> sum_b(member.team_scratch(scr_level), nfrq);
+    ScrArray1D<Real> jr_cm_old(member.team_scratch(scr_level), nsp_*nfrq);
+    ScrArray1D<Real> chi_p(member.team_scratch(scr_level), nsp_*nfrq);
+    ScrArray1D<Real> chi_r(member.team_scratch(scr_level), nsp_*nfrq);
+    ScrArray1D<Real> sum_a(member.team_scratch(scr_level), nsp_*nfrq);
+    ScrArray1D<Real> sum_b(member.team_scratch(scr_level), nsp_*nfrq);
+    // Per-species scratch is handled by sizing sum_a/b, chi_p/r, jr_cm_old to nsp_*nfrq
     ScrArray1D<Real> komp_mat_u, komp_mat_c, komp_mat_d, komp_coeff;
     ScrArray1D<Real> coeff_delta, jr_cm_new, n_soln;
     if (is_compton_enabled_) {
@@ -244,6 +259,10 @@ TaskStatus Radiation::MultiFreqRadFluidCoupling(Driver *pdriver, int stage) {
     Real glower[4][4], gupper[4][4];
     ComputeMetricAndInverse(x1v,x2v,x3v,flat,spin,glower,gupper);
     Real alpha = sqrt(-1.0/gupper[0][0]);
+    Real beta_u[3];
+    beta_u[0] = SQR(alpha)*gupper[0][1];
+    beta_u[1] = SQR(alpha)*gupper[0][2];
+    beta_u[2] = SQR(alpha)*gupper[0][3];
 
     // fluid state
     Real &wdn = w0_(m,IDN,k,j,i);
@@ -254,6 +273,9 @@ TaskStatus Radiation::MultiFreqRadFluidCoupling(Driver *pdriver, int stage) {
 
     // derived quantities
     Real pgas = gm1*wen;
+    if (is_dyngr) {
+      pgas = wen;
+    }
     Real tgas = pgas/wdn;
     Real q = glower[1][1]*wvx*wvx + 2.0*glower[1][2]*wvx*wvy + 2.0*glower[1][3]*wvx*wvz
            + glower[2][2]*wvy*wvy + 2.0*glower[2][3]*wvy*wvz
@@ -297,95 +319,89 @@ TaskStatus Radiation::MultiFreqRadFluidCoupling(Driver *pdriver, int stage) {
       ir_cm_grey(iang) = 0;
     } // endfor iang
 
-    // frequency-dependent coefficients
-    // TODO: implement a better default opacity function for multi-frequency radiation
-    Real chi_abs, chi_s, chi_pmr;
-    OpacityFunction(wdn, den_unit, tgas, temp_unit, l_unit,
-                    gm1, mu_molecular, power_opacity_, coeff_r, coeff_pmr,
-                    kappa_a_, kappa_s_, kappa_p_, chi_abs, chi_s, chi_pmr);
-
-    if (test_only_compton_therm_) {
-      chi_abs = 0.0;
-      chi_pmr = 0.0;
-      chi_s = 0.0;
-    }
-
-    for (int ifr=0; ifr<=nfreq1; ++ifr) {
-      // opacities
-      // TODO: interpolate frequency-dependent opacity table
-      chi_p(ifr) = chi_pmr + chi_abs;
-      chi_r(ifr) = chi_abs;
-
-      // initialize coefficients for later use when solving temperature update
-      sum_a(ifr) = 0;
-      sum_b(ifr) = 0;
-      jr_cm_old(ifr) = 0;
-    } // endfor ifr
-
-    // Step 1: map intensity from fluid-frame to coordinate-frame frequency bins
+    // Map intensity and compute implicit coefficients for each species
+    Real chi_s_sp[4];  // per-species scattering opacity
     Real &nu_e = nu_tet(nfreq1); // last tetrad-frame frequency
-    for (int n=0; n<=nfr_ang-1; ++n) {
-      // frequency and angle indices
-      int ifr, iang;
-      getFreqAngIndices(n, nang, ifr, iang);
+    for (int isp=0; isp<nsp_; ++isp) {
+      int sp_off = isp * nfr_ang;
+      int cf_off = isp * nfrq;
 
-      // variables for frame transformation
-      Real &n_0 = n_0_iang(iang);
-      Real &n0_cm = n0_cm_iang(iang);
+      // frequency-dependent coefficients for this species
+      Real chi_abs, chi_s_val, chi_pmr;
+      OpacityFunction(wdn, den_unit, tgas, temp_unit, l_unit,
+                      gm1, mu_molecular, power_opacity_, coeff_r, coeff_pmr,
+                      kappa_a_, kappa_s_, kappa_p_, chi_abs, chi_s_val, chi_pmr);
+      chi_s_sp[isp] = chi_s_val;
 
-      // compute mapped intensity
-      Real ir_cm_f = MapIntensity(ifr, nu_tet, i0_, m, k, j, i, iang,
-                                  n0_cm, n0, n_0, arad_, order, limiter,
-                                  matrix_map, false);
-      ir_cm_n(n) = ir_cm_f;
+      if (test_only_compton_therm_) {
+        chi_abs = 0.0;
+        chi_pmr = 0.0;
+        chi_s_sp[isp] = 0.0;
+      }
 
-      // sum for normalization
-      fac_norm(iang) += SQR(SQR(n0_cm))*i0_(m,n,k,j,i)/(n0*n_0);
-      ir_cm_grey(iang) += ir_cm_f;
+      for (int ifr=0; ifr<=nfreq1; ++ifr) {
+        chi_p(cf_off+ifr) = chi_pmr + chi_abs;
+        chi_r(cf_off+ifr) = chi_abs;
+        sum_a(cf_off+ifr) = 0;
+        sum_b(cf_off+ifr) = 0;
+        jr_cm_old(cf_off+ifr) = 0;
+      }
 
-    } // endfor n
+      // initialize per-species temporaries
+      for (int iang=0; iang<=nang1; ++iang) {
+        fac_norm(iang) = 0;
+        ir_cm_grey(iang) = 0;
+      }
 
-    // compute normalization factors
-    for (int iang=0; iang<=nang1; ++iang) {
-      fac_norm(iang) *= 1./ir_cm_grey(iang);
-      ir_cm_grey(iang) = 0.; // reset for assignment after normalization
-    } // endfor iang
+      // Step 1: map intensity for this species
+      for (int n=0; n<=nfr_ang-1; ++n) {
+        int ifr, iang;
+        getFreqAngIndices(n, nang, ifr, iang);
+        Real &n_0 = n_0_iang(iang);
+        Real &n0_cm = n0_cm_iang(iang);
+        Real ir_cm_f = MapIntensity(ifr, nu_tet, i0_, m, k, j, i, iang,
+                                    n0_cm, n0, n_0, arad_, order, limiter,
+                                    matrix_map, false, sp_off, nang);
+        ir_cm_n(n) = ir_cm_f;
+        fac_norm(iang) += SQR(SQR(n0_cm))*i0_(m,sp_off+n,k,j,i)/(n0*n_0);
+        ir_cm_grey(iang) += ir_cm_f;
+      }
 
-    // compute normalized quantities
-    for (int n=0; n<=nfr_ang-1; ++n) {
-      // frequency and angle indices
-      int ifr, iang;
-      getFreqAngIndices(n, nang, ifr, iang);
+      // compute normalization factors
+      for (int iang=0; iang<=nang1; ++iang) {
+        fac_norm(iang) *= 1./ir_cm_grey(iang);
+        ir_cm_grey(iang) = 0.;
+      }
 
-      // variables for frame transformation
-      Real &n0_cm = n0_cm_iang(iang);
-
-      // normalization
-      ir_cm_n(n) *= fac_norm(iang);
-      Real &ir_cm_f = ir_cm_n(n);
-
-      // set coefficients for solving temperature update
-      Real &chf_p=chi_p(ifr), &chf_r=chi_r(ifr), &chf_s=chi_s;
-      Real chf_f = chf_r + chf_s;
-      Real domega_cm = solid_angles_.d_view(iang)/SQR(n0_cm);
-      domega_cm /= wght_sum; // normalize fluid-frame weight
-      sum_a(ifr) += n0/(n0+n0_cm*chf_f*dt_)*ir_cm_f*domega_cm/(4*M_PI);
-      sum_b(ifr) += n0_cm*dt_/(n0+n0_cm*chf_f*dt_)*domega_cm/(4*M_PI);
-      jr_cm_old(ifr) += ir_cm_f*domega_cm/(4*M_PI);
-      ir_cm_grey(iang) += ir_cm_f; // used in guessing gas temperature
-    } // endfor n
+      // compute normalized quantities and implicit coefficients
+      Real &chi_s = chi_s_sp[isp];
+      for (int n=0; n<=nfr_ang-1; ++n) {
+        int ifr, iang;
+        getFreqAngIndices(n, nang, ifr, iang);
+        Real &n0_cm = n0_cm_iang(iang);
+        ir_cm_n(n) *= fac_norm(iang);
+        Real &ir_cm_f = ir_cm_n(n);
+        Real &chf_p=chi_p(cf_off+ifr), &chf_r=chi_r(cf_off+ifr);
+        Real chf_f = chf_r + chi_s;
+        Real domega_cm = solid_angles_.d_view(iang)/SQR(n0_cm);
+        domega_cm /= wght_sum;
+        sum_a(cf_off+ifr) += n0/(n0+n0_cm*chf_f*dt_)*ir_cm_f*domega_cm/(4*M_PI);
+        sum_b(cf_off+ifr) += n0_cm*dt_/(n0+n0_cm*chf_f*dt_)*domega_cm/(4*M_PI);
+        jr_cm_old(cf_off+ifr) += ir_cm_f*domega_cm/(4*M_PI);
+        ir_cm_grey(iang) += ir_cm_f;
+      }
+    } // endfor isp (Phase 1)
 
 
     // Step 2: compute source terms and solve gas temperature update
     bool guess_grey_tgas = true;
     Real tgas_new = tgas;
 
-    // make initial guess of gas temperature
-    if (guess_grey_tgas) {
+    // make initial guess of gas temperature (grey guess only for single species)
+    if (guess_grey_tgas && nsp_ == 1) {
       Real jr_cm_old_grey=0, eps_sum=0;
       Real chi_p_grey=0, chi_r_grey=0;
       for (int ifr=0; ifr<=nfreq1; ++ifr) {
-        // compute coefficients
         Real eps_f = ComputeEmissivity(nu_tet, ifr, tgas_new, arad_);
         jr_cm_old_grey += jr_cm_old(ifr);
         chi_p_grey += eps_f*chi_p(ifr);
@@ -395,14 +411,14 @@ TaskStatus Radiation::MultiFreqRadFluidCoupling(Driver *pdriver, int stage) {
 
       chi_p_grey = chi_p_grey/eps_sum;
       chi_r_grey = eps_sum/chi_r_grey;
-      Real chi_f_grey = chi_r_grey + chi_s;
+      Real chi_f_grey = chi_r_grey + chi_s_sp[0];
 
       Real sum_a_grey=0, sum_b_grey=0;
       for (int iang=0; iang<=nang1; ++iang) {
         Real &n_0 = n_0_iang(iang);
         Real &n0_cm = n0_cm_iang(iang);
         Real domega_cm = solid_angles_.d_view(iang)/SQR(n0_cm);
-        domega_cm /= wght_sum; // normalize fluid-frame weight
+        domega_cm /= wght_sum;
         sum_a_grey += n0/(n0+n0_cm*chi_f_grey*dt_)*ir_cm_grey(iang)*domega_cm/(4*M_PI);
         sum_b_grey += n0_cm*dt_/(n0+n0_cm*chi_f_grey*dt_)*domega_cm/(4*M_PI);
       }
@@ -411,7 +427,6 @@ TaskStatus Radiation::MultiFreqRadFluidCoupling(Driver *pdriver, int stage) {
       Real coeff4 = gm1/wdn*arad_ * sum_b_grey*chi_p_grey/denom_;
       Real coeff0 = 4*M_PI*gm1/wdn * (sum_a_grey/denom_ - jr_cm_old_grey) - tgas;
 
-      // solve polynomial
       if (fabs(coeff4) > 1.0e-20) {
         bool flag = FourthPolyRoot(coeff4, coeff0, tgas_new);
         if (!(flag) || !(isfinite(tgas_new))) {
@@ -420,67 +435,89 @@ TaskStatus Radiation::MultiFreqRadFluidCoupling(Driver *pdriver, int stage) {
       } else tgas_new = -coeff0;
     } // endif guess_grey_tgas
 
-    // iterate to find temperature update
+    // iterate to find temperature update (summing over all species)
     int num_itr_max = 100; Real tol = 1e-12;
-    for (int m=1; m<=num_itr_max; ++m) {
-      // compute Newton-Raphson coefficients
+    for (int m_iter=1; m_iter<=num_itr_max; ++m_iter) {
       Real f_tar=0, df_tar=0;
-      for (int ifr=0; ifr<=nfreq1; ++ifr) {
-        // compute coefficients
+      for (int idx=0; idx<nsp_*nfrq; ++idx) {
+        int isp = idx / nfrq;
+        int ifr = idx - isp*nfrq;
         Real eps_f = ComputeEmissivity(nu_tet, ifr, tgas_new, arad_);
         Real deps_f = ComputeEmDerivative(nu_tet, ifr, tgas_new, arad_);
-        Real &j0f_old = jr_cm_old(ifr);
-        Real &sum_fa = sum_a(ifr), &sum_fb = sum_b(ifr);
-        Real &chf_p=chi_p(ifr), &chf_r=chi_r(ifr), &chf_s=chi_s;
+        Real &j0f_old = jr_cm_old(idx);
+        Real &sum_fa = sum_a(idx), &sum_fb = sum_b(idx);
+        Real &chf_p=chi_p(idx), &chf_r=chi_r(idx);
+        Real &chf_s=chi_s_sp[isp];
         Real chf_f = chf_r + chf_s;
         Real denom_ = 1.-sum_fb*(chf_f-chf_p);
         f_tar += (sum_fa + sum_fb*chf_p*eps_f)/denom_ - j0f_old;
         df_tar += sum_fb*chf_p/denom_ * deps_f;
-      } // endfor ifr
+      }
       f_tar = wdn/gm1*(tgas_new-tgas) + 4*M_PI*f_tar;
       df_tar = wdn/gm1 + 4*M_PI*df_tar;
       Real diff_temp = -f_tar/df_tar;
 
-      // update temperature
       tgas_new += diff_temp;
 
       if (fabs(diff_temp/tgas_new) < tol) break;
-
-    } // endfor m
+    } // endfor m_iter
     bool badcell=false;
     if (!(isfinite(tgas_new)) || (tgas_new < 0)) badcell = true;
 
-    // Step 3: update intensity and fluid variables
+    // Step 3: update intensity and fluid variables per species
     if (!(badcell)) {
-      // Step 4: update frequency-dependent intensity in the fluid frame
-      for (int n=0; n<=nfr_ang-1; ++n) {
-        // frequency and angle indices
-        int ifr, iang;
-        getFreqAngIndices(n, nang, ifr, iang);
+      Real m_old[4] = {0.0}; Real m_new[4] = {0.0};
+      for (int isp=0; isp<nsp_; ++isp) {
+        int sp_off = isp * nfr_ang;
+        int cf_off = isp * nfrq;
+        Real &chi_s = chi_s_sp[isp];
 
-        // variables for frame transformation
-        Real &n_0 = n_0_iang(iang);
-        Real &n0_cm = n0_cm_iang(iang);
+        // Re-map intensity for this species
+        for (int iang=0; iang<=nang1; ++iang) {
+          fac_norm(iang) = 0;
+          ir_cm_grey(iang) = 0;
+        }
+        for (int n=0; n<=nfr_ang-1; ++n) {
+          int ifr, iang;
+          getFreqAngIndices(n, nang, ifr, iang);
+          Real &n_0 = n_0_iang(iang);
+          Real &n0_cm = n0_cm_iang(iang);
+          Real ir_cm_f = MapIntensity(ifr, nu_tet, i0_, m, k, j, i, iang,
+                                      n0_cm, n0, n_0, arad_, order, limiter,
+                                      matrix_map, false, sp_off, nang);
+          ir_cm_n(n) = ir_cm_f;
+          fac_norm(iang) += SQR(SQR(n0_cm))*i0_(m,sp_off+n,k,j,i)/(n0*n_0);
+          ir_cm_grey(iang) += ir_cm_f;
+        }
+        for (int iang=0; iang<=nang1; ++iang) {
+          fac_norm(iang) *= 1./ir_cm_grey(iang);
+        }
+        for (int n=0; n<=nfr_ang-1; ++n) {
+          int ifr, iang;
+          getFreqAngIndices(n, nang, ifr, iang);
+          ir_cm_n(n) *= fac_norm(iang);
+        }
 
-        // compute coefficients
-        Real eps_f = ComputeEmissivity(nu_tet, ifr, tgas_new, arad_);
-        Real &sum_fa = sum_a(ifr), &sum_fb = sum_b(ifr);
-        Real &chf_p=chi_p(ifr), &chf_r=chi_r(ifr), &chf_s=chi_s;
-        Real chf_f = chf_r + chf_s;
-        Real denom_ = 1.-sum_fb*(chf_f-chf_p);
-        Real jr_cm_ = (sum_fa + sum_fb*chf_p*eps_f) / denom_;
-
-        // update fluid-frame intensity
-        Real p1_ = n0/(n0+n0_cm*chf_f*dt_) * ir_cm_n(n);
-        Real p2_ = n0_cm*dt_/(n0+n0_cm*chf_f*dt_);
-        p2_ *= chf_p*eps_f + (chf_f-chf_p)*jr_cm_;
-        ir_cm_update(iang,ifr) = p1_+p2_;
-
-      } // endfor n
+        // Step 4: update frequency-dependent intensity in the fluid frame
+        for (int n=0; n<=nfr_ang-1; ++n) {
+          int ifr, iang;
+          getFreqAngIndices(n, nang, ifr, iang);
+          Real &n_0 = n_0_iang(iang);
+          Real &n0_cm = n0_cm_iang(iang);
+          Real eps_f = ComputeEmissivity(nu_tet, ifr, tgas_new, arad_);
+          Real &sum_fa = sum_a(cf_off+ifr), &sum_fb = sum_b(cf_off+ifr);
+          Real &chf_p=chi_p(cf_off+ifr), &chf_r=chi_r(cf_off+ifr);
+          Real chf_f = chf_r + chi_s;
+          Real denom_ = 1.-sum_fb*(chf_f-chf_p);
+          Real jr_cm_ = (sum_fa + sum_fb*chf_p*eps_f) / denom_;
+          Real p1_ = n0/(n0+n0_cm*chf_f*dt_) * ir_cm_n(n);
+          Real p2_ = n0_cm*dt_/(n0+n0_cm*chf_f*dt_);
+          p2_ *= chf_p*eps_f + (chf_f-chf_p)*jr_cm_;
+          ir_cm_update(iang,ifr) = p1_+p2_;
+        }
 
       // Step 5: map fluid-frame intensity back to coordinate-frame
       for (int iang=0; iang<=nang1; ++iang) {
-        // variables for frame transformation
         Real &n_0 = n_0_iang(iang);
         Real &n0_cm = n0_cm_iang(iang);
 
@@ -488,26 +525,24 @@ TaskStatus Radiation::MultiFreqRadFluidCoupling(Driver *pdriver, int stage) {
         for (int nn=0; nn<=nfreq1; nn++) {
             for (int mm=0; mm<=nfreq1; mm++) {
               matrix_map(nn,mm) = 0.0;
-            } // endfor mm
-        } // endfor nn
+            }
+        }
 
-        // compute mapping matrix
+        // compute mapping matrix (with species offset)
         for (int ifr=0; ifr<=nfreq1; ++ifr) {
-          // compute ifr-th row of mapping matrix
           Real _ = MapIntensity(ifr, nu_tet, i0_, m, k, j, i, iang,
                                 n0_cm, n0, n_0, arad_, order, limiter,
-                                matrix_map, true);
-        } // endfor ifr
+                                matrix_map, true, sp_off, nang);
+        }
 
         // update intensity through inverse mapping
         bool inv_success = SolveTriLinearSystem(nfrq, matrix_map, ir_cm_update, iang, n0_cm, ir_cm_star_update);
 
-        // if inverse-mapping failed, piecewise linear reconstruct the intensity update
         if (!inv_success) {
           for (int ifr=0; ifr<=nfreq1; ++ifr) {
             ir_cm_star_update(iang,ifr) = InvMapIntensity(ifr, nu_tet, ir_cm_update, iang, n0_cm, arad_, order, limiter);
-          } // endfor ifr
-        } // endif !inverse_success
+          }
+        }
 
         // sum for normalization
         fac_norm(iang) = 0.0;
@@ -515,20 +550,16 @@ TaskStatus Radiation::MultiFreqRadFluidCoupling(Driver *pdriver, int stage) {
         for (int ifr=0; ifr<=nfreq1; ++ifr) {
          fac_norm(iang)  += ir_cm_update(iang,ifr);
          ir_cm_star_grey += ir_cm_star_update(iang,ifr);
-        } // endfor ifr
+        }
 
-        // compute normalization factor
         fac_norm(iang) *= 1./ir_cm_star_grey;
       } // endfor iang
 
       // Step 6: update tetrad-frame intensity and compute moment differences
-      Real m_old[4] = {0.0}; Real m_new[4] = {0.0};
       for (int iang=0; iang<=nang1; ++iang) {
-        // variables for frame transformation
         Real &n_0 = n_0_iang(iang);
         Real &n0_cm = n0_cm_iang(iang);
 
-        // coordinate normal components
         Real n_1 = tc(m,0,1,k,j,i)*nh_c_.d_view(iang,0) + tc(m,1,1,k,j,i)*nh_c_.d_view(iang,1)
                  + tc(m,2,1,k,j,i)*nh_c_.d_view(iang,2) + tc(m,3,1,k,j,i)*nh_c_.d_view(iang,3);
         Real n_2 = tc(m,0,2,k,j,i)*nh_c_.d_view(iang,0) + tc(m,1,2,k,j,i)*nh_c_.d_view(iang,1)
@@ -538,7 +569,7 @@ TaskStatus Radiation::MultiFreqRadFluidCoupling(Driver *pdriver, int stage) {
         Real &domega = solid_angles_.d_view(iang);
 
         for (int ifr=0; ifr<=nfreq1; ++ifr) {
-            int n = getFreqAngIndex(ifr, iang, nang);
+            int n = sp_off + getFreqAngIndex(ifr, iang, nang);
 
             // compute moments before coupling
             m_old[0] += (    i0_(m,n,k,j,i)    *domega);
@@ -562,11 +593,20 @@ TaskStatus Radiation::MultiFreqRadFluidCoupling(Driver *pdriver, int stage) {
 
         } // endfor ifr
       } // endfor iang
+      } // endfor isp (Phase 3)
 
-      // Step 7: update fluid variables
+      // Step 7: update fluid variables (combined moments from all species)
       if ((!test_only_compton_therm_) && (affect_fluid_)) {
         if (update_fluid_energy_) {
-          u0_(m,IEN,k,j,i) += (m_old[0] - m_new[0]);
+          Real dm0 = m_old[0] - m_new[0];
+          if (is_dyngr) {
+            Real dm1 = m_old[1] - m_new[1];
+            Real dm2 = m_old[2] - m_new[2];
+            Real dm3 = m_old[3] - m_new[3];
+            u0_(m,IEN,k,j,i) += (1.0/alpha)*(-dm0+beta_u[0]*dm1+beta_u[1]*dm2+beta_u[2]*dm3);
+          } else {
+            u0_(m,IEN,k,j,i) += dm0;
+          }
         }
         if (update_fluid_moment_) {
           u0_(m,IM1,k,j,i) += (m_old[1] - m_new[1]);
@@ -579,7 +619,8 @@ TaskStatus Radiation::MultiFreqRadFluidCoupling(Driver *pdriver, int stage) {
 
 
 
-    // Compton process
+    // Compton process (photon-only, nspecies=1)
+    Real chi_s = chi_s_sp[0];  // scalar alias for Compton section
     if (!(badcell) && is_compton_enabled_) {
       for (int count=0; count<num_iter_compton_; count++) {
         // test setup
@@ -921,7 +962,15 @@ TaskStatus Radiation::MultiFreqRadFluidCoupling(Driver *pdriver, int stage) {
         // Step 7: update fluid variables
         if (affect_fluid_) {
           if (update_fluid_energy_) {
-            u0_(m,IEN,k,j,i) += (m_old[0] - m_new[0]);
+            Real dm0 = m_old[0] - m_new[0];
+            if (is_dyngr) {
+              Real dm1 = m_old[1] - m_new[1];
+              Real dm2 = m_old[2] - m_new[2];
+              Real dm3 = m_old[3] - m_new[3];
+              u0_(m,IEN,k,j,i) += (1.0/alpha)*(-dm0+beta_u[0]*dm1+beta_u[1]*dm2+beta_u[2]*dm3);
+            } else {
+              u0_(m,IEN,k,j,i) += dm0;
+            }
           }
           if (update_fluid_moment_) {
             u0_(m,IM1,k,j,i) += (m_old[1] - m_new[1]);

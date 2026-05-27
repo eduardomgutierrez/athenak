@@ -59,15 +59,23 @@ void Radiation::AssembleRadTasks(std::map<std::string, std::shared_ptr<TaskList>
     id.mhd_recve = tl["stagen"]->AddTask(&mhd::MHD::RecvE, pmhd, id.mhd_sende);
     id.mhd_ct    = tl["stagen"]->AddTask(&mhd::MHD::CT, pmhd, id.mhd_recve);
 #if ENABLE_NURATES
-    id.rad_calcop = tl["stagen"]->AddTask(&Radiation::CalcOpacityNurates, this, id.mhd_ct);
-    id.rad_coupl = tl["stagen"]->AddTask(&Radiation::RadFluidCoupling,this,id.rad_calcop);
-#else
+    if (use_nurates) {
+      id.rad_calcop = tl["stagen"]->AddTask(&Radiation::CalcOpacityNurates, this, id.mhd_ct);
+      if (!multi_freq) {
+        id.rad_coupl = tl["stagen"]->AddTask(&Radiation::RadFluidCoupling,this,id.rad_calcop);
+      } else {
+        id.rad_coupl = tl["stagen"]->AddTask(&Radiation::MultiFreqRadFluidCoupling,
+                                             this,id.rad_calcop);
+      }
+    } else
+#endif
+    {
     if (!multi_freq) {
       id.rad_coupl = tl["stagen"]->AddTask(&Radiation::RadFluidCoupling,this,id.mhd_ct);
     } else {
       id.rad_coupl = tl["stagen"]->AddTask(&Radiation::MultiFreqRadFluidCoupling,this,id.mhd_ct);
     }
-#endif
+    }
     id.rad_resti = tl["stagen"]->AddTask(&Radiation::RestrictI, this, id.rad_coupl);
     id.rad_sendi = tl["stagen"]->AddTask(&Radiation::SendI, this, id.rad_resti);
     id.rad_recvi = tl["stagen"]->AddTask(&Radiation::RecvI, this, id.rad_sendi);
@@ -109,15 +117,23 @@ void Radiation::AssembleRadTasks(std::map<std::string, std::shared_ptr<TaskList>
     id.hyd_rkupdt= tl["stagen"]->AddTask(&hydro::Hydro::RKUpdate,phyd,id.hyd_recvf);
     id.hyd_src   = tl["stagen"]->AddTask(&hydro::Hydro::HydroSrcTerms,phyd,id.hyd_rkupdt);
 #if ENABLE_NURATES
-    id.rad_calcop = tl["stagen"]->AddTask(&Radiation::CalcOpacityNurates, this, id.hyd_src);
-    id.rad_coupl = tl["stagen"]->AddTask(&Radiation::RadFluidCoupling,this,id.rad_calcop);
-#else
+    if (use_nurates) {
+      id.rad_calcop = tl["stagen"]->AddTask(&Radiation::CalcOpacityNurates, this, id.hyd_src);
+      if (!multi_freq) {
+        id.rad_coupl = tl["stagen"]->AddTask(&Radiation::RadFluidCoupling,this,id.rad_calcop);
+      } else {
+        id.rad_coupl = tl["stagen"]->AddTask(&Radiation::MultiFreqRadFluidCoupling,
+                                             this,id.rad_calcop);
+      }
+    } else
+#endif
+    {
     if (!multi_freq) {
       id.rad_coupl = tl["stagen"]->AddTask(&Radiation::RadFluidCoupling,this,id.hyd_src);
     } else {
       id.rad_coupl = tl["stagen"]->AddTask(&Radiation::MultiFreqRadFluidCoupling,this,id.hyd_src);
     }
-#endif
+    }
     id.rad_resti = tl["stagen"]->AddTask(&Radiation::RestrictI, this, id.rad_coupl);
     id.rad_sendi = tl["stagen"]->AddTask(&Radiation::SendI, this, id.rad_resti);
     id.rad_recvi = tl["stagen"]->AddTask(&Radiation::RecvI, this, id.rad_sendi);
@@ -152,15 +168,23 @@ void Radiation::AssembleRadTasks(std::map<std::string, std::shared_ptr<TaskList>
     id.rad_rkupdt= tl["stagen"]->AddTask(&Radiation::RKUpdate, this, id.rad_recvf);
     id.rad_src   = tl["stagen"]->AddTask(&Radiation::RadSrcTerms, this, id.rad_rkupdt);
 #if ENABLE_NURATES
-    id.rad_calcop = tl["stagen"]->AddTask(&Radiation::CalcOpacityNurates, this, id.rad_src);
-    id.rad_coupl = tl["stagen"]->AddTask(&Radiation::RadFluidCoupling,this,id.rad_calcop);
-#else
+    if (use_nurates) {
+      id.rad_calcop = tl["stagen"]->AddTask(&Radiation::CalcOpacityNurates, this, id.rad_src);
+      if (!multi_freq) {
+        id.rad_coupl = tl["stagen"]->AddTask(&Radiation::RadFluidCoupling,this,id.rad_calcop);
+      } else {
+        id.rad_coupl = tl["stagen"]->AddTask(&Radiation::MultiFreqRadFluidCoupling,
+                                             this,id.rad_calcop);
+      }
+    } else
+#endif
+    {
     if (!multi_freq) {
       id.rad_coupl = tl["stagen"]->AddTask(&Radiation::RadFluidCoupling,this,id.rad_src);
     } else {
       id.rad_coupl = tl["stagen"]->AddTask(&Radiation::MultiFreqRadFluidCoupling,this,id.rad_src);
     }
-#endif
+    }
     id.rad_resti = tl["stagen"]->AddTask(&Radiation::RestrictI, this, id.rad_coupl);
     id.rad_sendi = tl["stagen"]->AddTask(&Radiation::SendI, this, id.rad_resti);
     id.rad_recvi = tl["stagen"]->AddTask(&Radiation::RecvI, this, id.rad_sendi);

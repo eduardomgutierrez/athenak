@@ -172,6 +172,7 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::QueueDynGRMHDTasks() {
   Z4c *pz4c = pmy_pack->pz4c;
   adm::ADM *padm = pmy_pack->padm;
   MHD *pmhd = pmy_pack->pmhd;
+  radiation::Radiation *prad = pmy_pack->prad;
   NumericalRelativity *pnr = pmy_pack->pnr;
 
   // Start task list
@@ -214,6 +215,7 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::QueueDynGRMHDTasks() {
                  {MHD_ExplRK});
   pnr->QueueTask(&MHD::RestrictU, pmhd, MHD_RestU, "MHD_RestU", Task_Run,
                  {MHD_AddSrc}, {Rad_Coupl});
+
   pnr->QueueTask(&MHD::SendU, pmhd, MHD_SendU, "MHD_SendU", Task_Run, {MHD_RestU});
   pnr->QueueTask(&MHD::RecvU, pmhd, MHD_RecvU, "MHD_RecvU", Task_Run, {MHD_SendU});
   pnr->QueueTask(&MHD::CornerE, pmhd, MHD_EField, "MHD_EField", Task_Run, {MHD_RecvU});
@@ -244,7 +246,6 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::QueueDynGRMHDTasks() {
   pnr->QueueTask(&MHD::ClearSend, pmhd, MHD_ClearS, "MHD_ClearS", Task_End);
   pnr->QueueTask(&MHD::ClearRecv, pmhd, MHD_ClearR, "MHD_ClearR", Task_End);
 
-  radiation::Radiation *prad = pmy_pack->prad;
   if (prad != nullptr) {
     // Start tasks
     pnr->QueueTask(&radiation::Radiation::InitRecv, prad, Rad_Recv, "Rad_Recv", Task_Start);
@@ -252,39 +253,45 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::QueueDynGRMHDTasks() {
     // Run tasks: Radiation transport (runs in parallel with MHD flux)
     pnr->QueueTask(&radiation::Radiation::CopyCons, prad, Rad_CopyI, "Rad_CopyI", Task_Run);
     pnr->QueueTask(&radiation::Radiation::CalculateFluxes, prad, Rad_Flux, "Rad_Flux",
-                  Task_Run, {Rad_CopyI});
+            Task_Run, {Rad_CopyI});
     pnr->QueueTask(&radiation::Radiation::SendFlux, prad, Rad_SendFlux, "Rad_SendFlux",
-                  Task_Run, {Rad_Flux});
+            Task_Run, {Rad_Flux});
     pnr->QueueTask(&radiation::Radiation::RecvFlux, prad, Rad_RecvFlux, "Rad_RecvFlux",
-                  Task_Run, {Rad_SendFlux});
+            Task_Run, {Rad_SendFlux});
     pnr->QueueTask(&radiation::Radiation::RKUpdate, prad, Rad_ExplRK, "Rad_ExplRK",
-                  Task_Run, {Rad_RecvFlux});
-
-    // Beam/user source terms on radiation field (independent of MHD)
-    pnr->QueueTask(&radiation::Radiation::RadSrcTerms, prad, Rad_AddSrc,
-                  "Rad_AddSrc", Task_Run, {Rad_ExplRK});
+            Task_Run, {Rad_RecvFlux});
 
 #if ENABLE_NURATES
-    // Nurates opacity calculation: fill per-cell opacity arrays before coupling
-    pnr->QueueTask(&radiation::Radiation::CalcOpacityNurates, prad, Rad_CalcOpac,
-                  "Rad_CalcOpac", Task_Run, {Rad_AddSrc});
-
-    // Radiation-fluid coupling: depends on nurates opacities, beam sources, and MHD
-    pnr->QueueTask(&radiation::Radiation::RadFluidCoupling, prad, Rad_Coupl,
-                  "Rad_Coupl", Task_Run, {Rad_CalcOpac, MHD_AddSrc});
-#else
-    // Radiation-fluid coupling: depends on BOTH beam sources and MHD source terms
-    pnr->QueueTask(&radiation::Radiation::RadFluidCoupling, prad, Rad_Coupl,
-                  "Rad_Coupl", Task_Run, {Rad_AddSrc, MHD_AddSrc});
+    if (prad->use_nurates) {
+      pnr->QueueTask(&radiation::Radiation::CalcOpacityNurates, prad, Rad_CalcOpac,
+            "Rad_CalcOpac", Task_Run, {Rad_ExplRK, MHD_AddSrc});
+      if (!prad->multi_freq) {
+        pnr->QueueTask(&radiation::Radiation::RadFluidCoupling, prad, Rad_Coupl,
+              "Rad_Coupl", Task_Run, {Rad_CalcOpac, MHD_AddSrc});
+      } else {
+        pnr->QueueTask(&radiation::Radiation::MultiFreqRadFluidCoupling, prad, Rad_Coupl,
+              "Rad_Coupl", Task_Run, {Rad_CalcOpac, MHD_AddSrc});
+      }
+    } else
 #endif
+    {
+      if (!prad->multi_freq) {
+        pnr->QueueTask(&radiation::Radiation::RadFluidCoupling, prad, Rad_Coupl,
+              "Rad_Coupl", Task_Run, {Rad_ExplRK, MHD_AddSrc});
+      } else {
+        pnr->QueueTask(&radiation::Radiation::MultiFreqRadFluidCoupling, prad, Rad_Coupl,
+              "Rad_Coupl", Task_Run, {Rad_ExplRK, MHD_AddSrc});
+      }
+    }
 
     // Restrict/Send/Recv/BCS/Prolongate for radiation intensities
     pnr->QueueTask(&radiation::Radiation::RestrictI, prad, Rad_RestI, "Rad_RestI",
-                  Task_Run, {Rad_Coupl});
+            Task_Run, {Rad_Coupl});
     pnr->QueueTask(&radiation::Radiation::SendI, prad, Rad_SendI, "Rad_SendI",
                   Task_Run, {Rad_RestI});
     pnr->QueueTask(&radiation::Radiation::RecvI, prad, Rad_RecvI, "Rad_RecvI",
                   Task_Run, {Rad_SendI});
+    // Radiation BCs + prolongation (after radiation recv)
     pnr->QueueTask(&radiation::Radiation::ApplyPhysicalBCs, prad, Rad_BCS, "Rad_BCS",
                   Task_Run, {Rad_RecvI});
     pnr->QueueTask(&radiation::Radiation::Prolongate, prad, Rad_Prolong, "Rad_Prolong",

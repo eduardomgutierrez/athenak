@@ -11,11 +11,14 @@
 #include <math.h>
 #include "athena.hpp"
 
+using std::isfinite;
 //=================================== Index Operations ===================================
 //----------------------------------------------------------------------------------------
 //! \fn void getFreqAngIndices
 //  \brief Exact frequency index (ifr) and angular index (iang) given
 //         the frequency-angular index (ifr_ang).
+//  NOTE: For multi-species, ifr_ang should be the index within a single species block,
+//        i.e., ifr_ang = n - isp*nfreq*nang, where n is the full combined index.
 KOKKOS_INLINE_FUNCTION
 void getFreqAngIndices(const int &ifr_ang, const int &nang, int &ifr, int &iang) {
   ifr  = ifr_ang / nang;
@@ -31,6 +34,32 @@ KOKKOS_INLINE_FUNCTION
 int getFreqAngIndex(const int &ifr, const int &iang, const int &nang) {
   int ret = iang + ifr*nang;
   return ret;
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void getSpecFreqAngIndices
+//  \brief Extract species (isp), frequency (ifr), and angular (iang) indices
+//         from the full combined index n.
+//  Layout: n = isp * nfreq * nang + ifr * nang + iang
+KOKKOS_INLINE_FUNCTION
+void getSpecFreqAngIndices(const int &n, const int &nfreq, const int &nang,
+                           int &isp, int &ifr, int &iang) {
+  int nfr_ang = nfreq * nang;
+  isp  = n / nfr_ang;
+  int rem = n - isp * nfr_ang;
+  ifr  = rem / nang;
+  iang = rem - ifr * nang;
+  return;
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn int getSpecFreqAngIndex
+//  \brief Return combined index given species (isp), frequency (ifr),
+//         and angular (iang) indices.
+KOKKOS_INLINE_FUNCTION
+int getSpecFreqAngIndex(const int &isp, const int &ifr, const int &iang,
+                        const int &nfreq, const int &nang) {
+  return iang + ifr*nang + isp*nfreq*nang;
 }
 
 //============================== Blackbody Helper Functions ==============================
@@ -678,14 +707,15 @@ bool AssignFreqIntensity(const int &fIdx, const DvceArray1D<Real> &nu_tet, const
                          const Real &a_rad, const Real &temp,
                          Real &nu0, Real &nu1, Real &nu2, Real &nu3, Real &nu1h, Real &nu3h, Real &nu5h,
                          Real &inu1h, Real &inu3h, Real &inu5h, Real &inu1, Real &inu2,
-                         Real &ir_cm_star_1, int &boundary) {
+                         Real &ir_cm_star_1, int &boundary,
+                         const int sp_off = 0) {
 
   Real ir_cm_star_0=0, ir_cm_star_2=0;
 
   nu0 = -1;
   if ((fIdx-1 >= 0) && (fIdx-1 <= nfreq1)) {
     nu0 = n0_cm*nu_tet(fIdx-1);
-    int n = getFreqAngIndex(fIdx-1, iang, nang);
+    int n = sp_off + getFreqAngIndex(fIdx-1, iang, nang);
     ir_cm_star_0 = SQR(SQR(n0_cm))*i0(m,n,k,j,i)/(n0*n_0);
   }
 
@@ -693,14 +723,14 @@ bool AssignFreqIntensity(const int &fIdx, const DvceArray1D<Real> &nu_tet, const
   ir_cm_star_1=0;
   if ((fIdx >= 0) && (fIdx <= nfreq1)) {
     nu1 = n0_cm*nu_tet(fIdx);
-    int n = getFreqAngIndex(fIdx, iang, nang);
+    int n = sp_off + getFreqAngIndex(fIdx, iang, nang);
     ir_cm_star_1 = SQR(SQR(n0_cm))*i0(m,n,k,j,i)/(n0*n_0);
   }
 
   nu2 = -1;
   if ((fIdx+1 >= 0) && (fIdx+1 <= nfreq1)) {
     nu2 = n0_cm*nu_tet(fIdx+1);
-    int n = getFreqAngIndex(fIdx+1, iang, nang);
+    int n = sp_off + getFreqAngIndex(fIdx+1, iang, nang);
     ir_cm_star_2 = SQR(SQR(n0_cm))*i0(m,n,k,j,i)/(n0*n_0);
   }
 
@@ -961,15 +991,15 @@ KOKKOS_INLINE_FUNCTION
 Real MapIntensity(const int &ifr, const DvceArray1D<Real> &nu_tet, const DvceArray5D<Real> &i0,
                   const int &m, const int &k, const int &j, const int &i, const int &iang,
                   const Real &n0_cm, const Real &n0, const Real &n_0, const Real &a_rad,
-                  int order, int limiter, ScrArray2D<Real> &matrix_imap, bool update_matrix_row) {
+                  int order, int limiter, ScrArray2D<Real> &matrix_imap, bool update_matrix_row,
+                  const int sp_off = 0, const int nang_override = -1) {
   // target frequency and intensity
   Real ir_cm_f = 0.0; // value to be assigned
   Real &nu_f = nu_tet(ifr);
 
   // parameters
-  int nfr_ang = i0.extent_int(1);
   int nfrq = nu_tet.extent_int(0);
-  int nang = nfr_ang/nfrq;
+  int nang = (nang_override > 0) ? nang_override : i0.extent_int(1)/nfrq;
   int nfreq1 = nfrq-1;
   Real &nu_e = nu_tet(nfreq1);
 
@@ -979,7 +1009,7 @@ Real MapIntensity(const int &ifr, const DvceArray1D<Real> &nu_tet, const DvceArr
   Real ir_cm_star_1; int boundary;
 
   // get effective temperature at last frequency bin
-  int ne = getFreqAngIndex(nfreq1, iang, nang);
+  int ne = sp_off + getFreqAngIndex(nfreq1, iang, nang);
   Real ir_cm_star_e = SQR(SQR(n0_cm))*i0(m,ne,k,j,i)/(n0*n_0);
   Real teff = GetEffTemperature(ir_cm_star_e, n0_cm*nu_e, a_rad);
 
@@ -1049,7 +1079,7 @@ Real MapIntensity(const int &ifr, const DvceArray1D<Real> &nu_tet, const DvceArr
                                                  nang, nfreq1, n0_cm, n0, n_0, a_rad, teff,
                                                  nu0, nu1, nu2, nu3, nu1h, nu3h, nu5h,
                                                  inu1h, inu3h, inu5h, inu1, inu2,
-                                                 ir_cm_star_1, boundary);
+                                                 ir_cm_star_1, boundary, sp_off);
     // compute left fractional contribution
     Real ifrac_l = 0;
     if (left_bin_assigned) {
@@ -1065,7 +1095,7 @@ Real MapIntensity(const int &ifr, const DvceArray1D<Real> &nu_tet, const DvceArr
 
     // add the rest intensity contribution
     for (int f=idx_l+1; f<=nfreq1; ++f) {
-      int nf = getFreqAngIndex(f, iang, nang);
+      int nf = sp_off + getFreqAngIndex(f, iang, nang);
       ir_cm_f += SQR(SQR(n0_cm))*i0(m,nf,k,j,i)/(n0*n_0);
       if (update_matrix_row) matrix_imap(ifr,f) = 1;
     }
@@ -1087,7 +1117,7 @@ Real MapIntensity(const int &ifr, const DvceArray1D<Real> &nu_tet, const DvceArr
 
     // add the contribution from L+1 to R-1
     for (int f=idx_l+1; f<=idx_r-1; ++f) {
-      int nf = getFreqAngIndex(f, iang, nang);
+      int nf = sp_off + getFreqAngIndex(f, iang, nang);
       ir_cm_f += SQR(SQR(n0_cm))*i0(m,nf,k,j,i)/(n0*n_0);
       if (update_matrix_row) matrix_imap(ifr,f) = 1;
     }
@@ -1108,7 +1138,7 @@ Real MapIntensity(const int &ifr, const DvceArray1D<Real> &nu_tet, const DvceArr
                                                  nang, nfreq1, n0_cm, n0, n_0, a_rad, teff,
                                                  nu0, nu1, nu2, nu3, nu1h, nu3h, nu5h,
                                                  inu1h, inu3h, inu5h, inu1, inu2,
-                                                 ir_cm_star_1, boundary);
+                                                 ir_cm_star_1, boundary, sp_off);
     // compute left fractional contribution
     Real ifrac_l = 0;
     if (left_bin_assigned) {
@@ -1137,7 +1167,7 @@ Real MapIntensity(const int &ifr, const DvceArray1D<Real> &nu_tet, const DvceArr
                                                   nang, nfreq1, n0_cm, n0, n_0, a_rad, teff,
                                                   nu0, nu1, nu2, nu3, nu1h, nu3h, nu5h,
                                                   inu1h, inu3h, inu5h, inu1, inu2,
-                                                  ir_cm_star_1, boundary);
+                                                  ir_cm_star_1, boundary, sp_off);
     // compute right fractional contribution
     Real ifrac_r = 0;
     if ((right_bin_assigned) && (idx_r > idx_l)) {
@@ -1163,7 +1193,7 @@ Real MapIntensity(const int &ifr, const DvceArray1D<Real> &nu_tet, const DvceArr
     // R = N-1 (right_bin_assigned==false):
     if (idx_r == nfreq1) {
       nu1 = n0_cm*nu_tet(idx_r);
-      int nr = getFreqAngIndex(idx_r, iang, nang);
+      int nr = sp_off + getFreqAngIndex(idx_r, iang, nang);
       Real ir_cm_star_r = SQR(SQR(n0_cm))*i0(m,nr,k,j,i)/(n0*n_0);
       Real integral_r = 1./(4*M_PI) * BBIntegral(nu1, nu_fp1, teff, a_rad);
       ir_cm_f += integral_r;

@@ -17,6 +17,8 @@
 #include "eos/eos.hpp"
 #include "geodesic-grid/geodesic_grid.hpp"
 #include "hydro/hydro.hpp"
+#include "mhd/mhd.hpp"
+#include "dyn_grmhd/dyn_grmhd.hpp"
 #include "driver/driver.hpp"
 #include "radiation/radiation.hpp"
 #include "radiation/radiation_multi_freq.hpp"
@@ -30,6 +32,8 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
 
   // return if restart
   if (restart) return;
+
+  bool use_dyngr = (pmbp->pdyngr != nullptr);
 
   // capture variables for kernel
   auto &indcs = pmy_mesh_->mb_indcs;
@@ -52,8 +56,17 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   Real lorz = 1.0 / sqrt(1.0-(SQR(v1)));
 
   // fluid and radiation variables
-  auto &w0 = pmbp->phydro->w0;
-  Real gm1 = pmbp->phydro->peos->eos_data.gamma - 1.0;
+  DvceArray5D<Real> w0, u0;
+  Real gm1;
+  if (pmbp->phydro != nullptr) {
+    w0 = pmbp->phydro->w0;
+    u0 = pmbp->phydro->u0;
+    gm1 = pmbp->phydro->peos->eos_data.gamma - 1.0;
+  } else {
+    w0 = pmbp->pmhd->w0;
+    u0 = pmbp->pmhd->u0;
+    gm1 = pmbp->pmhd->peos->eos_data.gamma - 1.0;
+  }
 
   int &nang = pmbp->prad->prgeo->nangles;
   int &nfrq = pmbp->prad->nfreq;
@@ -75,12 +88,23 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
     w0(m,IVX,k,j,i) = lorz*v1;
     w0(m,IVY,k,j,i) = 0.0;
     w0(m,IVZ,k,j,i) = 0.0;
-    w0(m,IEN,k,j,i) = rho*temp/gm1;
+    if (use_dyngr) {
+      w0(m,IEN,k,j,i) = rho*temp;  // IEN stores pressure for DynGRMHD
+    } else {
+      w0(m,IEN,k,j,i) = rho*temp/gm1;
+    }
   });
 
   // convert primitives to conserved
-  auto &u0 = pmbp->phydro->u0;
-  pmbp->phydro->peos->PrimToCons(w0, u0, 0, (n1-1), 0, (n2-1), 0, (n3-1));
+  if (use_dyngr) {
+    pmbp->padm->SetADMVariables(pmbp);
+    pmbp->pdyngr->PrimToConInit(0, (n1-1), 0, (n2-1), 0, (n3-1));
+  } else if (pmbp->phydro != nullptr) {
+    pmbp->phydro->peos->PrimToCons(w0, u0, 0, (n1-1), 0, (n2-1), 0, (n3-1));
+  } else {
+    pmbp->pmhd->peos->PrimToCons(w0, pmbp->pmhd->bcc0, u0,
+                                  0, (n1-1), 0, (n2-1), 0, (n3-1));
+  }
 
   // variables for result printing
   DualArray1D<bool> if_inv;

@@ -649,11 +649,15 @@ void SetupTorus(ParameterInput* pin, Mesh* pmy_mesh_, torus_pgen& torus) {
   bool use_dyngr = (pmbp->pdyngr != nullptr);
   // Extract radiation parameters if enabled
   int nangles_;
+  int nfreq_;
+  int nrad_;
   DualArray2D<Real> nh_c_;
   DvceArray6D<Real> norm_to_tet_, tet_c_, tetcov_c_;
   DvceArray5D<Real> i0_;
   if (is_radiation_enabled) {
     nangles_ = pmbp->prad->prgeo->nangles;
+    nfreq_ = pmbp->prad->nfreq;
+    nrad_ = pmbp->prad->nspecies*pmbp->prad->nfreq*nangles_;
     nh_c_ = pmbp->prad->nh_c;
     norm_to_tet_ = pmbp->prad->norm_to_tet;
     tet_c_ = pmbp->prad->tet_c;
@@ -850,8 +854,10 @@ void SetupTorus(ParameterInput* pin, Mesh* pmy_mesh_, torus_pgen& torus) {
       u_tet_[3] = (norm_to_tet_(m,3,0,k,j,i)*uu0 + norm_to_tet_(m,3,1,k,j,i)*uu1 +
                    norm_to_tet_(m,3,2,k,j,i)*uu2 + norm_to_tet_(m,3,3,k,j,i)*uu3);
 
-      // Go through each angle
-      for (int n=0; n<nangles_; ++n) {
+      // Go through each species/frequency/angle radiation variable.
+      Real urad_freq = urad/static_cast<Real>(nfreq_);
+      for (int nn=0; nn<nrad_; ++nn) {
+        int n = nn % nangles_;
         // Calculate direction in fluid frame
         Real un_t = (u_tet_[1]*nh_c_.d_view(n,1) + u_tet_[2]*nh_c_.d_view(n,2) +
                      u_tet_[3]*nh_c_.d_view(n,3));
@@ -860,7 +866,7 @@ void SetupTorus(ParameterInput* pin, Mesh* pmy_mesh_, torus_pgen& torus) {
         // Calculate intensity in tetrad frame
         Real n0 = tet_c_(m,0,0,k,j,i); Real n_0 = 0.0;
         for (int d=0; d<4; ++d) {  n_0 += tetcov_c_(m,d,0,k,j,i)*nh_c_.d_view(n,d);  }
-        i0_(m,n,k,j,i) = n0*n_0*(urad/(4.0*M_PI))/SQR(SQR(n0_f));
+        i0_(m,nn,k,j,i) = n0*n_0*(urad_freq/(4.0*M_PI))/SQR(SQR(n0_f));
       }
     }
 
@@ -2379,10 +2385,12 @@ void NoInflowTorus(Mesh *pm) {
 
   // Determine if radiation is enabled
   const bool is_radiation_enabled = (pm->pmb_pack->prad != nullptr);
-  DvceArray5D<Real> i0_; int nang1;
+  DvceArray5D<Real> i0_; int nrad1;
   if (is_radiation_enabled) {
     i0_ = pm->pmb_pack->prad->i0;
-    nang1 = pm->pmb_pack->prad->prgeo->nangles - 1;
+    nrad1 = (pm->pmb_pack->prad->nspecies*
+             pm->pmb_pack->prad->nfreq*
+             pm->pmb_pack->prad->prgeo->nangles) - 1;
   }
 
   // X1-Boundary
@@ -2446,7 +2454,7 @@ void NoInflowTorus(Mesh *pm) {
   });
   if (is_radiation_enabled) {
     // Set X1-BCs on i0 if Meshblock face is at the edge of computational domain
-    par_for("noinflow_rad_x1", DevExeSpace(),0,(nmb-1),0,nang1,0,(n3-1),0,(n2-1),
+    par_for("noinflow_rad_x1", DevExeSpace(),0,(nmb-1),0,nrad1,0,(n3-1),0,(n2-1),
     KOKKOS_LAMBDA(int m, int n, int k, int j) {
       if (mb_bcs.d_view(m,BoundaryFace::inner_x1) == BoundaryFlag::user) {
         for (int i=0; i<ng; ++i) {
@@ -2531,7 +2539,7 @@ void NoInflowTorus(Mesh *pm) {
   });
   if (is_radiation_enabled) {
     // Set X2-BCs on i0 if Meshblock face is at the edge of computational domain
-    par_for("noinflow_rad_x2", DevExeSpace(),0,(nmb-1),0,nang1,0,(n3-1),0,(n1-1),
+    par_for("noinflow_rad_x2", DevExeSpace(),0,(nmb-1),0,nrad1,0,(n3-1),0,(n1-1),
     KOKKOS_LAMBDA(int m, int n, int k, int i) {
       if (mb_bcs.d_view(m,BoundaryFace::inner_x2) == BoundaryFlag::user) {
         for (int j=0; j<ng; ++j) {
@@ -2616,7 +2624,7 @@ void NoInflowTorus(Mesh *pm) {
   });
   if (is_radiation_enabled) {
     // Set X3-BCs on i0 if Meshblock face is at the edge of computational domain
-    par_for("noinflow_rad_x3", DevExeSpace(),0,(nmb-1),0,nang1,0,(n2-1),0,(n1-1),
+    par_for("noinflow_rad_x3", DevExeSpace(),0,(nmb-1),0,nrad1,0,(n2-1),0,(n1-1),
     KOKKOS_LAMBDA(int m, int n, int j, int i) {
       if (mb_bcs.d_view(m,BoundaryFace::inner_x3) == BoundaryFlag::user) {
         for (int k=0; k<ng; ++k) {

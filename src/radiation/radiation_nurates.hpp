@@ -251,6 +251,128 @@ void bns_nurates_gray(Real nb, Real temp, Real yp, Real yn,
   }
 }
 
+//----------------------------------------------------------------------------------------
+//! \fn void bns_nurates_spectral_bin
+//! \brief Midpoint/quadrature wrapper for bns_nurates spectral opacity coefficients.
+//!        The frequency bin bounds are code-energy values; outputs are bin-integrated
+//!        emissivities and bin-centered opacities in code units.
+KOKKOS_INLINE_FUNCTION
+void bns_nurates_spectral_bin(Real e_lo_code, Real e_hi_code,
+                              int freq_scale,
+                              Real nb, Real temp, Real yp, Real yn,
+                              Real mu_n, Real mu_p, Real mu_e,
+                              Real nudens_0[4], Real nudens_1[4],
+                              Real eta_1[4], Real abs_1[4], Real scat_1[4],
+                              NuratesParams const &nurates_params,
+                              Primitive::UnitSystem &code_units,
+                              Primitive::UnitSystem &eos_units) {
+  Primitive::UnitSystem nurates_units = Primitive::MakeNGS();
+
+  const Real unit_length    = code_units.LengthConversion(nurates_units);
+  const Real unit_time      = code_units.TimeConversion(nurates_units);
+  const Real unit_num_dens  = eos_units.DensityConversion(nurates_units);
+  const Real unit_ene_dens  = code_units.EnergyDensityConversion(nurates_units);
+  const Real unit_energy    = 1.0; // code_units.EnergyConversion(nurates_units);
+
+  for (int idx = 0; idx < 4; ++idx) {
+    eta_1[idx]  = 0.;
+    abs_1[idx]  = 0.;
+    scat_1[idx] = 0.;
+  }
+
+  if ((nb * unit_num_dens < nurates_params.nb_min) ||
+      (temp < nurates_params.temp_min_mev) ||
+      (e_hi_code <= e_lo_code)) {
+    return;
+  }
+
+  GreyOpacityParams grey_op_params = {0};
+  grey_op_params.opacity_flags.use_abs_em           = nurates_params.use_abs_em;
+  grey_op_params.opacity_flags.use_brem             = nurates_params.use_brem;
+  grey_op_params.opacity_flags.use_pair             = nurates_params.use_pair;
+  grey_op_params.opacity_flags.use_iso              = nurates_params.use_iso;
+  grey_op_params.opacity_flags.use_inelastic_scatt  = nurates_params.use_inelastic_scatt;
+
+  grey_op_params.opacity_pars.use_WM_ab            = nurates_params.use_WM_ab;
+  grey_op_params.opacity_pars.use_WM_sc            = nurates_params.use_WM_sc;
+  grey_op_params.opacity_pars.use_dU               = nurates_params.use_dU;
+  grey_op_params.opacity_pars.use_dm_eff           = nurates_params.use_dm_eff;
+  grey_op_params.opacity_pars.use_NN_medium_corr   = nurates_params.use_NN_medium_corr;
+  grey_op_params.opacity_pars.neglect_blocking     = nurates_params.neglect_blocking;
+  grey_op_params.opacity_pars.use_decay            = nurates_params.use_decay;
+  grey_op_params.opacity_pars.brem_implementation  =
+      nurates_params.use_BRT_brem ? BREM_BRT06 : BREM_HR98;
+
+  grey_op_params.eos_pars.nb   = nb * unit_num_dens;
+  grey_op_params.eos_pars.temp = temp;
+  grey_op_params.eos_pars.yp   = yp;
+  grey_op_params.eos_pars.yn   = yn;
+  grey_op_params.eos_pars.mu_e = mu_e;
+  grey_op_params.eos_pars.mu_p = mu_p;
+  grey_op_params.eos_pars.mu_n = mu_n;
+  grey_op_params.eos_pars.dU      = 0.;
+  grey_op_params.eos_pars.dm_eff  = 0.;
+
+  if (nurates_params.use_equilibrium_distribution) {
+    grey_op_params.distr_pars = NuEquilibriumParams(&grey_op_params.eos_pars);
+    ComputeM1DensitiesEq(&grey_op_params.eos_pars,
+                         &grey_op_params.distr_pars,
+                         &grey_op_params.m1_pars);
+    for (int idx = 0; idx < 4; ++idx) {
+      grey_op_params.m1_pars.chi[idx] = 1./3.;
+    }
+  } else {
+    grey_op_params.m1_pars.n[id_nue]  = nudens_0[0] * unit_num_dens;
+    grey_op_params.m1_pars.n[id_anue] = nudens_0[1] * unit_num_dens;
+    grey_op_params.m1_pars.n[id_nux]  = 0.5 * nudens_0[2] * unit_num_dens;
+    grey_op_params.m1_pars.n[id_anux] = 0.5 * nudens_0[3] * unit_num_dens;
+
+    grey_op_params.m1_pars.J[id_nue]  = nudens_1[0] * unit_ene_dens;
+    grey_op_params.m1_pars.J[id_anue] = nudens_1[1] * unit_ene_dens;
+    grey_op_params.m1_pars.J[id_nux]  = 0.5 * nudens_1[2] * unit_ene_dens;
+    grey_op_params.m1_pars.J[id_anux] = 0.5 * nudens_1[3] * unit_ene_dens;
+
+    for (int idx = 0; idx < 4; ++idx) {
+      grey_op_params.m1_pars.chi[idx] = 1./3.;
+    }
+    grey_op_params.distr_pars =
+        CalculateDistrParamsFromM1(&grey_op_params.m1_pars, &grey_op_params.eos_pars);
+  }
+
+  const Real e_lo = e_lo_code * unit_energy;
+  const Real e_hi = e_hi_code * unit_energy;
+  const Real de = e_hi - e_lo;
+  const Real e_mid = (freq_scale == 1 && e_lo > 0.0) ? sqrt(e_lo*e_hi) :
+                                                         0.5*(e_lo + e_hi);
+
+  MyQuadrature quad = nurates_params.quadrature;
+  SpectralOpacities op_mid =
+      ComputeSpectralOpacitiesStimulatedAbs(e_mid, &quad, &grey_op_params);
+
+  for (int iq = 0; iq < quad.nx; ++iq) {
+    const Real x = quad.points[iq];
+    const Real w = quad.w[iq];
+    const Real e = e_lo + de*x;
+    SpectralOpacities op =
+        ComputeSpectralOpacitiesStimulatedAbs(e, &quad, &grey_op_params);
+    for (int idx = 0; idx < 4; ++idx) {
+      eta_1[idx] += w * de * kBS_FourPi_hc3 * SQR(e) * e * op.j[idx];
+    }
+  }
+
+  eta_1[2] *= 2.;
+  eta_1[3] *= 2.;
+
+  const Real kap_to_code  = unit_length;
+  const Real eta1_to_code = unit_time / unit_ene_dens;
+
+  for (int idx = 0; idx < 4; ++idx) {
+    eta_1[idx]  *= eta1_to_code;
+    abs_1[idx]   = op_mid.kappa[idx] * kap_to_code;
+    scat_1[idx]  = op_mid.kappa_s[idx] * kap_to_code;
+  }
+}
+
 } // namespace radiation
 
 #endif  // ENABLE_NURATES

@@ -47,7 +47,8 @@ Radiation::Radiation(MeshBlockPack *ppack, ParameterInput *pin) :
     na("na",1,1,1,1,1,1),
     norm_to_tet("norm_to_tet",1,1,1,1,1,1),
     freq_grid("freq_grid",1),
-    nnu_coeff("nnu_coeff",1,1,1,1,1) {
+    nnu_coeff("nnu_coeff",1,1,1,1,1),
+    beam_mask("beam_mask",1,1,1,1,1) {
   // Check for general relativity
   if (!(pmy_pack->pcoord->is_general_relativistic) &&
       !(pmy_pack->pcoord->is_dynamical_relativistic)) {
@@ -67,6 +68,10 @@ Radiation::Radiation(MeshBlockPack *ppack, ParameterInput *pin) :
   }
   are_units_enabled = pin->DoesBlockExist("units");
 
+#if ENABLE_NURATES
+  use_nurates = pin->GetOrAddBoolean("radiation", "use_nurates", false);
+#endif
+
   // Check flags and parameters for ad hoc fixes
   correct_radsrc_velocity = pin->GetOrAddBoolean("radiation","correct_radsrc_velocity",false);
   correct_radsrc_opacity  = pin->GetOrAddBoolean("radiation","correct_radsrc_opacity",false);
@@ -75,6 +80,34 @@ Radiation::Radiation(MeshBlockPack *ppack, ParameterInput *pin) :
   tau_truncation = pin->GetOrAddReal("radiation","tau_truncation",1e-100);
   sigmoid_residual = pin->GetOrAddReal("radiation","sigmoid_residual",1e-2);
   sigmoid_residual = fmin(sigmoid_residual, 1./3); // sigmoid residual must be less than 1./3
+  // Print solver information
+  if (pmy_pack->pdyngr != nullptr) {
+    std::cout << "### Radiation: coupled to Valencia (DynGRMHD) solver" << std::endl;
+  } else if (is_mhd_enabled) {
+    std::cout << "### Radiation: coupled to HARM (MHD) solver" << std::endl;
+  } else if (is_hydro_enabled) {
+    std::cout << "### Radiation: coupled to HARM (Hydro) solver" << std::endl;
+  } else {
+    std::cout << "### Radiation: no fluid coupling (transport only)" << std::endl;
+  }
+
+  // Check for radiation particle type (photon or neutrino)
+  std::string rad_type = pin->GetOrAddString("radiation","radiation_type","photon");
+  if (rad_type.compare("neutrino") == 0) {
+    is_neutrino = true;
+    nspecies = pin->GetOrAddInteger("radiation","nspecies",3);
+    if (nspecies < 1 || nspecies > 4) {
+      std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+        << std::endl << "nspecies must be between 1 and 4 for neutrino transport"
+        << std::endl;
+      std::exit(EXIT_FAILURE);
+    }
+    std::cout << "### Radiation: neutrino transport with " << nspecies
+              << " species" << std::endl;
+  } else {
+    is_neutrino = false;
+    nspecies = 1;
+  }
 
   // Check for multi-frequency radiation
   nfreq = 1;
@@ -145,13 +178,12 @@ Radiation::Radiation(MeshBlockPack *ppack, ParameterInput *pin) :
               SQR(SQR(pmy_pack->punit->temperature_cgs()))/
               pmy_pack->punit->pressure_cgs());
     } else {
-      arad = pin->GetReal("radiation","arad");
+      arad = pin->GetOrAddReal("radiation","arad",1.0);
     }
     affect_fluid = pin->GetOrAddBoolean("radiation","affect_fluid",true);
     evolve_ye = pin->GetOrAddBoolean("radiation","evolve_ye",true);
     source_Ye_min = pin->GetOrAddReal("radiation", "source_Ye_min", 0.0);
     source_Ye_max = pin->GetOrAddReal("radiation", "source_Ye_max", 0.6);
-  }
 
   // multi-frequency radiation
     if (multi_freq) {
@@ -190,6 +222,7 @@ Radiation::Radiation(MeshBlockPack *ppack, ParameterInput *pin) :
   fixed_fluid = pin->GetOrAddBoolean("radiation","fixed_fluid",false);
 
   // Source terms (if needed)
+  beam_source = pin->GetOrAddBoolean("radiation","beam_source",false);
   if (pin->DoesBlockExist("rad_srcterms")) {
     psrc = new SourceTerms("rad_srcterms", ppack, pin);
   }
@@ -199,7 +232,6 @@ Radiation::Radiation(MeshBlockPack *ppack, ParameterInput *pin) :
   rotate_geo = pin->GetOrAddBoolean("radiation","rotate_geo",true);
   angular_fluxes = pin->GetOrAddBoolean("radiation","angular_fluxes",true);
   n_0_floor = pin->GetOrAddReal("radiation","n_0_floor",0.1);
-  nspecies = pin->GetOrAddInteger("radiation","nspecies",1);
   prgeo = new GeodesicGrid(nlevel, rotate_geo, angular_fluxes);
 
   // Total number of MeshBlocks on this rank to be used in array dimensioning
@@ -297,8 +329,10 @@ Radiation::Radiation(MeshBlockPack *ppack, ParameterInput *pin) :
 
 #if ENABLE_NURATES
   // Initialize bns_nurates library (optional)
-  use_nurates = pin->GetOrAddBoolean("radiation", "use_nurates", false);
   if (use_nurates) {
+    nurates_debug_opacity =
+        pin->GetOrAddBoolean("bns_nurates","debug_opacity",false);
+
     // reaction flags
     nurates_params.use_abs_em          = pin->GetOrAddBoolean("bns_nurates","use_abs_em",true);
     nurates_params.use_pair            = pin->GetOrAddBoolean("bns_nurates","use_pair",true);
@@ -350,8 +384,19 @@ Radiation::Radiation(MeshBlockPack *ppack, ParameterInput *pin) :
     Kokkos::realloc(nurates_abs_0,  nmb, nspecies, ncells3, ncells2, ncells1);
     Kokkos::realloc(nurates_abs_1,  nmb, nspecies, ncells3, ncells2, ncells1);
     Kokkos::realloc(nurates_scat_1, nmb, nspecies, ncells3, ncells2, ncells1);
+    if (multi_freq) {
+      Kokkos::realloc(nurates_eta_1_freq,  nmb, nspecies, nfreq, ncells3, ncells2, ncells1);
+      Kokkos::realloc(nurates_abs_1_freq,  nmb, nspecies, nfreq, ncells3, ncells2, ncells1);
+      Kokkos::realloc(nurates_scat_1_freq, nmb, nspecies, nfreq, ncells3, ncells2, ncells1);
+    }
   }
 #endif
+  if (beam_source) {
+    int ncells1 = indcs.nx1 + 2*(indcs.ng);
+    int ncells2 = (indcs.nx2 > 1)? (indcs.nx2 + 2*(indcs.ng)) : 1;
+    int ncells3 = (indcs.nx3 > 1)? (indcs.nx3 + 2*(indcs.ng)) : 1;
+    Kokkos::realloc(beam_mask,nmb,nspecies*nfreq*prgeo->nangles,ncells3,ncells2,ncells1);
+  }
 }
 
 //----------------------------------------------------------------------------------------

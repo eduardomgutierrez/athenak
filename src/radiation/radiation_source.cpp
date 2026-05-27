@@ -52,14 +52,16 @@ TaskStatus Radiation::RadFluidCoupling(Driver *pdriver, int stage) {
   int &ks = indcs.ks, &ke = indcs.ke;
   int nmb1 = pmy_pack->nmb_thispack - 1;
   int nang1 = prgeo->nangles - 1;
+  int nang_ = prgeo->nangles;
+  int nsp_ = nspecies;
   auto &size = pmy_pack->pmb->mb_size;
   bool &is_hydro_enabled_ = is_hydro_enabled;
   bool &is_mhd_enabled_ = is_mhd_enabled;
+  bool is_dyngr = (pmy_pack->pdyngr != nullptr);
   bool &are_units_enabled_ = are_units_enabled;
   bool &is_compton_enabled_ = is_compton_enabled;
   bool &fixed_fluid_ = fixed_fluid;
   bool &affect_fluid_ = affect_fluid;
-  bool is_dyngr = (pmy_pack->pdyngr != nullptr);
 
   // Extract coordinate/excision data
   auto &coord = pmy_pack->pcoord->coord_data;
@@ -190,7 +192,11 @@ TaskStatus Radiation::RadFluidCoupling(Driver *pdriver, int stage) {
     // coordinate component n^0
     Real n0 = tt(m,0,0,k,j,i);
 
-    // Compute wght_sum (angle-only)
+    // Per-species opacity and coefficient storage (max 4 species)
+    Real sigma_a_sp[4], sigma_s_sp[4], sigma_p_sp[4];
+    Real suma1_sp[4], suma2_sp[4], suma3_sp[4];
+
+    // Compute wght_sum (angle-only, independent of species)
     Real wght_sum = 0.0;
     for (int n=0; n<=nang1; ++n) {
       Real n0_cm = (u_tet[0]*nh_c_.d_view(n,0) - u_tet[1]*nh_c_.d_view(n,1) -
@@ -199,43 +205,47 @@ TaskStatus Radiation::RadFluidCoupling(Driver *pdriver, int stage) {
       wght_sum += omega_cm;
     }
 
-    // Compute implicit coefficients
-    Real sigma_a, sigma_s, sigma_p;
-    OpacityFunction(wdn, density_scale_,
-                    tgas, temperature_scale_,
-                    length_scale_, gm1, mean_mol_weight_,
-                    power_opacity_, rosseland_coef_, planck_minus_rosseland_coef_,
-                    kappa_a_, kappa_s_, kappa_p_,
-                    sigma_a, sigma_s, sigma_p);
+    // Compute per-species implicit coefficients
+    Real coef1_total = 0.0, coef0_total = -tgas;
+    for (int isp=0; isp<nsp_; ++isp) {
+      // Set opacity for this species (same for all species for now — placeholder)
+      OpacityFunction(wdn, density_scale_,
+                      tgas, temperature_scale_,
+                      length_scale_, gm1, mean_mol_weight_,
+                      power_opacity_, rosseland_coef_, planck_minus_rosseland_coef_,
+                      kappa_a_, kappa_s_, kappa_p_,
+                      sigma_a_sp[isp], sigma_s_sp[isp], sigma_p_sp[isp]);
+      Real dtcsiga_s = dt_*sigma_a_sp[isp];
+      Real dtcsigs_s = dt_*sigma_s_sp[isp];
+      Real dtcsigp_s = dt_*sigma_p_sp[isp];
+      int sp_off = isp * nang_;
 
-    Real dtcsiga = dt_*sigma_a;
-    Real dtcsigs = dt_*sigma_s;
-    Real dtcsigp = dt_*sigma_p;
+      Real sum1 = 0.0, sum2 = 0.0;
+      for (int n=0; n<=nang1; ++n) {
+        int nn = sp_off + n;
+        Real n_0 = tc(m,0,0,k,j,i)*nh_c_.d_view(n,0) + tc(m,1,0,k,j,i)*nh_c_.d_view(n,1) +
+                   tc(m,2,0,k,j,i)*nh_c_.d_view(n,2) + tc(m,3,0,k,j,i)*nh_c_.d_view(n,3);
+        Real n0_cm = (u_tet[0]*nh_c_.d_view(n,0) - u_tet[1]*nh_c_.d_view(n,1) -
+                      u_tet[2]*nh_c_.d_view(n,2) - u_tet[3]*nh_c_.d_view(n,3));
+        Real omega_cm = solid_angles_.d_view(n)/SQR(n0_cm);
+        Real intensity_cm = 4.0*M_PI*(i0_(m,nn,k,j,i)/(n0*n_0))*SQR(SQR(n0_cm));
+        Real vncsigma = 1.0/(n0 + (dtcsiga_s + dtcsigs_s)*n0_cm);
+        Real vncsigma2 = n0_cm*vncsigma;
+        Real ir_weight = intensity_cm*omega_cm;
+        sum1 += omega_cm*vncsigma2;
+        sum2 += ir_weight*n0*vncsigma;
+      }
+      sum1 /= wght_sum;
+      sum2 /= wght_sum;
+      suma3_sp[isp] = sum1*(dtcsigs_s - dtcsigp_s);
+      suma1_sp[isp] = sum1*(dtcsiga_s + dtcsigp_s);
+      suma2_sp[isp] = sum2;
 
-    Real sum1 = 0.0, sum2 = 0.0;
-    for (int n=0; n<=nang1; ++n) {
-      Real n_0 = tc(m,0,0,k,j,i)*nh_c_.d_view(n,0) + tc(m,1,0,k,j,i)*nh_c_.d_view(n,1) +
-                 tc(m,2,0,k,j,i)*nh_c_.d_view(n,2) + tc(m,3,0,k,j,i)*nh_c_.d_view(n,3);
-      Real n0_cm = (u_tet[0]*nh_c_.d_view(n,0) - u_tet[1]*nh_c_.d_view(n,1) -
-                    u_tet[2]*nh_c_.d_view(n,2) - u_tet[3]*nh_c_.d_view(n,3));
-      Real omega_cm = solid_angles_.d_view(n)/SQR(n0_cm);
-      Real intensity_cm = 4.0*M_PI*(i0_(m,n,k,j,i)/(n0*n_0))*SQR(SQR(n0_cm));
-      Real vncsigma = 1.0/(n0 + (dtcsiga + dtcsigs)*n0_cm);
-      Real vncsigma2 = n0_cm*vncsigma;
-      Real ir_weight = intensity_cm*omega_cm;
-      sum1 += omega_cm*vncsigma2;
-      sum2 += ir_weight*n0*vncsigma;
+      Real dtaucsigap_s = dt_*(sigma_a_sp[isp] + sigma_p_sp[isp])/u0;
+      coef1_total += (dtaucsigap_s - dtaucsigap_s*suma1_sp[isp]/(1.0-suma3_sp[isp]))
+                     *arad_*gm1/wdn;
+      coef0_total -= dtaucsigap_s*suma2_sp[isp]*gm1/(wdn*(1.0-suma3_sp[isp]));
     }
-    sum1 /= wght_sum;
-    sum2 /= wght_sum;
-    Real suma3   = sum1*(dtcsigs - dtcsigp);
-    Real suma1_em = sum1*(dtcsiga + dtcsigp);
-    Real suma2_em = sum2;
-
-    Real dtaucsigap = dt_*(sigma_a + sigma_p)/u0;
-    // standard T^4 emission: coefficients for FourthPolyRoot solve
-    Real coef1_total = (dtaucsigap - dtaucsigap*suma1_em/(1.0-suma3))*arad_*gm1/wdn;
-    Real coef0_total = -tgas - dtaucsigap*suma2_em*gm1/(wdn*(1.0-suma3));
 
     // Calculate new gas temperature (combined polynomial over all species)
     Real tgasnew = tgas;
@@ -250,58 +260,61 @@ TaskStatus Radiation::RadFluidCoupling(Driver *pdriver, int stage) {
       tgasnew = -coef0_total;
     }
 
-    // Update the specific intensity
+    // Update the specific intensity for each species
     if (!(badcell)) {
       Real emission = arad_*SQR(SQR(tgasnew));
       Real m_old[4] = {0.0}; Real m_new[4] = {0.0};
-      Real jr_cm_s = (suma1_em*emission + suma2_em)/(1.0 - suma3);
-      for (int n=0; n<=nang1; ++n) {
-        // compute coordinate normal components
-        Real n_0 = tc(m,0,0,k,j,i)*nh_c_.d_view(n,0) + tc(m,1,0,k,j,i)*nh_c_.d_view(n,1)
-                 + tc(m,2,0,k,j,i)*nh_c_.d_view(n,2) + tc(m,3,0,k,j,i)*nh_c_.d_view(n,3);
-        Real n_1 = tc(m,0,1,k,j,i)*nh_c_.d_view(n,0) + tc(m,1,1,k,j,i)*nh_c_.d_view(n,1)
-                 + tc(m,2,1,k,j,i)*nh_c_.d_view(n,2) + tc(m,3,1,k,j,i)*nh_c_.d_view(n,3);
-        Real n_2 = tc(m,0,2,k,j,i)*nh_c_.d_view(n,0) + tc(m,1,2,k,j,i)*nh_c_.d_view(n,1)
-                 + tc(m,2,2,k,j,i)*nh_c_.d_view(n,2) + tc(m,3,2,k,j,i)*nh_c_.d_view(n,3);
-        Real n_3 = tc(m,0,3,k,j,i)*nh_c_.d_view(n,0) + tc(m,1,3,k,j,i)*nh_c_.d_view(n,1)
-                 + tc(m,2,3,k,j,i)*nh_c_.d_view(n,2) + tc(m,3,3,k,j,i)*nh_c_.d_view(n,3);
+      for (int isp=0; isp<nsp_; ++isp) {
+        Real dtcsiga_s = dt_*sigma_a_sp[isp];
+        Real dtcsigs_s = dt_*sigma_s_sp[isp];
+        Real dtcsigp_s = dt_*sigma_p_sp[isp];
+        Real jr_cm_s = (suma1_sp[isp]*emission + suma2_sp[isp])/(1.0 - suma3_sp[isp]);
+        int sp_off = isp * nang_;
+        for (int n=0; n<=nang1; ++n) {
+          int nn = sp_off + n;
+          // compute coordinate normal components (using angle index n)
+          Real n_0 = tc(m,0,0,k,j,i)*nh_c_.d_view(n,0) + tc(m,1,0,k,j,i)*nh_c_.d_view(n,1)
+                   + tc(m,2,0,k,j,i)*nh_c_.d_view(n,2) + tc(m,3,0,k,j,i)*nh_c_.d_view(n,3);
+          Real n_1 = tc(m,0,1,k,j,i)*nh_c_.d_view(n,0) + tc(m,1,1,k,j,i)*nh_c_.d_view(n,1)
+                   + tc(m,2,1,k,j,i)*nh_c_.d_view(n,2) + tc(m,3,1,k,j,i)*nh_c_.d_view(n,3);
+          Real n_2 = tc(m,0,2,k,j,i)*nh_c_.d_view(n,0) + tc(m,1,2,k,j,i)*nh_c_.d_view(n,1)
+                   + tc(m,2,2,k,j,i)*nh_c_.d_view(n,2) + tc(m,3,2,k,j,i)*nh_c_.d_view(n,3);
+          Real n_3 = tc(m,0,3,k,j,i)*nh_c_.d_view(n,0) + tc(m,1,3,k,j,i)*nh_c_.d_view(n,1)
+                   + tc(m,2,3,k,j,i)*nh_c_.d_view(n,2) + tc(m,3,3,k,j,i)*nh_c_.d_view(n,3);
 
-        // compute moments before coupling
-        m_old[0] += (    i0_(m,n,k,j,i)    *solid_angles_.d_view(n));
-        m_old[1] += (n_1*i0_(m,n,k,j,i)/n_0*solid_angles_.d_view(n));
-        m_old[2] += (n_2*i0_(m,n,k,j,i)/n_0*solid_angles_.d_view(n));
-        m_old[3] += (n_3*i0_(m,n,k,j,i)/n_0*solid_angles_.d_view(n));
+          // compute moments before coupling
+          m_old[0] += (    i0_(m,nn,k,j,i)    *solid_angles_.d_view(n));
+          m_old[1] += (n_1*i0_(m,nn,k,j,i)/n_0*solid_angles_.d_view(n));
+          m_old[2] += (n_2*i0_(m,nn,k,j,i)/n_0*solid_angles_.d_view(n));
+          m_old[3] += (n_3*i0_(m,nn,k,j,i)/n_0*solid_angles_.d_view(n));
 
-        // update intensity
-        Real n0_cm = (u_tet[0]*nh_c_.d_view(n,0) - u_tet[1]*nh_c_.d_view(n,1) -
-                      u_tet[2]*nh_c_.d_view(n,2) - u_tet[3]*nh_c_.d_view(n,3));
-        Real intensity_cm = 4.0*M_PI*(i0_(m,n,k,j,i)/(n0*n_0))*SQR(SQR(n0_cm));
-        Real vncsigma = 1.0/(n0 + (dtcsiga + dtcsigs)*n0_cm);
-        Real vncsigma2 = n0_cm*vncsigma;
-        Real di_cm = ( ((dtcsigs-dtcsigp)*jr_cm_s
-                      + (dtcsiga+dtcsigp)*emission
-                      - (dtcsigs+dtcsiga)*intensity_cm)*vncsigma2 );
-        i0_(m,n,k,j,i) = n0*n_0*fmax(i0_(m,n,k,j,i)/(n0*n_0) +
-                                     di_cm/(4.0*M_PI*SQR(SQR(n0_cm))), 0.0);
+          // update intensity
+          Real n0_cm = (u_tet[0]*nh_c_.d_view(n,0) - u_tet[1]*nh_c_.d_view(n,1) -
+                        u_tet[2]*nh_c_.d_view(n,2) - u_tet[3]*nh_c_.d_view(n,3));
+          Real intensity_cm = 4.0*M_PI*(i0_(m,nn,k,j,i)/(n0*n_0))*SQR(SQR(n0_cm));
+          Real vncsigma = 1.0/(n0 + (dtcsiga_s + dtcsigs_s)*n0_cm);
+          Real vncsigma2 = n0_cm*vncsigma;
+          Real di_cm = ( ((dtcsigs_s-dtcsigp_s)*jr_cm_s
+                        + (dtcsiga_s+dtcsigp_s)*emission
+                        - (dtcsigs_s+dtcsiga_s)*intensity_cm)*vncsigma2 );
+          i0_(m,nn,k,j,i) = n0*n_0*fmax(i0_(m,nn,k,j,i)/(n0*n_0) +
+                                       di_cm/(4.0*M_PI*SQR(SQR(n0_cm))), 0.0);
 
-        // compute moments after coupling
-        m_new[0] += (    i0_(m,n,k,j,i)    *solid_angles_.d_view(n));
-        m_new[1] += (n_1*i0_(m,n,k,j,i)/n_0*solid_angles_.d_view(n));
-        m_new[2] += (n_2*i0_(m,n,k,j,i)/n_0*solid_angles_.d_view(n));
-        m_new[3] += (n_3*i0_(m,n,k,j,i)/n_0*solid_angles_.d_view(n));
+          // compute moments after coupling
+          m_new[0] += (    i0_(m,nn,k,j,i)    *solid_angles_.d_view(n));
+          m_new[1] += (n_1*i0_(m,nn,k,j,i)/n_0*solid_angles_.d_view(n));
+          m_new[2] += (n_2*i0_(m,nn,k,j,i)/n_0*solid_angles_.d_view(n));
+          m_new[3] += (n_3*i0_(m,nn,k,j,i)/n_0*solid_angles_.d_view(n));
 
-        // handle excision
-        // NOTE(@pdmullen): The below zeroes all intensities within rks <= r_excision and
-        // zeroes intensities within angles where n_0 is about zero. When Compton is
-        // enabled, we delay the n_0_floor excision so that intensities updated via
-        // absorption and scattering inform the Compton update
-        if (excise) {
-          bool apply_excision = (rad_mask_(m,k,j,i) ||
-                                 (!(is_compton_enabled_) && fabs(n_0) < n_0_floor_));
-          if (apply_excision) { i0_(m,n,k,j,i) = 0.0; }
+          // handle excision
+          if (excise) {
+            bool apply_excision = (rad_mask_(m,k,j,i) ||
+                                   (!(is_compton_enabled_) && fabs(n_0) < n_0_floor_));
+            if (apply_excision) { i0_(m,nn,k,j,i) = 0.0; }
+          }
         }
       }
-      // update conserved fluid variables
+      // update conserved fluid variables (combined moments from all species)
       if (affect_fluid_) {
         Real dm0 = m_old[0] - m_new[0];
         Real dm1 = m_old[1] - m_new[1];
@@ -318,11 +331,11 @@ TaskStatus Radiation::RadFluidCoupling(Driver *pdriver, int stage) {
       }
     }  // end if(!(badcell))
 
+    // Compton currently uses the base species (isp=0)
+    Real dtcsigs = dt_*sigma_s_sp[0];
     Real dtaucsigs = dtcsigs/u0;
     Real suma1 = 0.0, suma2 = 0.0;
     Real coef[2];
-
-    // compton scattering
     if (is_compton_enabled_) {
       // use partially updated gas temperature
       tgas = tgasnew;
