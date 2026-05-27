@@ -377,7 +377,7 @@ void TOVStar::GetPrimitivesAtIsoPoint(const TOVEOS& eos, Real r_iso,
   m = Interpolate(r_iso, R_iso_l(idx), R_iso_l(idx+1), Ms_l(idx), Ms_l(idx+1));
   alp = Interpolate(r_iso, R_iso_l(idx), R_iso_l(idx+1), alps_l(idx), alps_l(idx+1));
   rho = eos.template GetRhoFromP<LocationTag::Device>(p);
-  if (!isfinite(p)) {
+  if (!std::isfinite(p)) {
     printf("There's a problem with p!\n"); // NOLINT
   }
 }

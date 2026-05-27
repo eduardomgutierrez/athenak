@@ -6,6 +6,7 @@
 //! \file radiation_source.cpp
 
 #include "athena.hpp"
+#include "config.hpp"
 #include "mesh/mesh.hpp"
 #include "driver/driver.hpp"
 #include "coordinates/cartesian_ks.hpp"
@@ -16,10 +17,13 @@
 #include "hydro/hydro.hpp"
 #include "mhd/mhd.hpp"
 #include "units/units.hpp"
+#include "dyn_grmhd/dyn_grmhd.hpp"
 #include "radiation.hpp"
 
 #include "radiation/radiation_tetrad.hpp"
 #include "radiation/radiation_opacities.hpp"
+
+using std::isfinite;
 
 namespace radiation {
 
@@ -37,6 +41,10 @@ TaskStatus Radiation::RadFluidCoupling(Driver *pdriver, int stage) {
     return TaskStatus::complete;
   }
 
+#if ENABLE_NURATES
+  if (use_nurates) { return RadFluidCouplingNurates(pdriver, stage); }
+#endif
+
   // Extract indices, size data, hydro/mhd/units flags, and coupling flags
   auto &indcs = pmy_pack->pmesh->mb_indcs;
   int &is = indcs.is, &ie = indcs.ie;
@@ -51,6 +59,7 @@ TaskStatus Radiation::RadFluidCoupling(Driver *pdriver, int stage) {
   bool &is_compton_enabled_ = is_compton_enabled;
   bool &fixed_fluid_ = fixed_fluid;
   bool &affect_fluid_ = affect_fluid;
+  bool is_dyngr = (pmy_pack->pdyngr != nullptr);
 
   // Extract coordinate/excision data
   auto &coord = pmy_pack->pcoord->coord_data;
@@ -111,7 +120,9 @@ TaskStatus Radiation::RadFluidCoupling(Driver *pdriver, int stage) {
 
   // Call ConsToPrim over active zones prior to source term application
   if (!(fixed_fluid_)) {
-    if (is_hydro_enabled_) {
+    if (is_dyngr) {
+      pmy_pack->pdyngr->ConToPrimBC(is, ie, js, je, ks, ke);
+    } else if (is_hydro_enabled_) {
       pmy_pack->phydro->peos->ConsToPrim(u0_,w0_,false,is,ie,js,je,ks,ke);
     } else if (is_mhd_enabled_) {
       auto &b0_ = pmy_pack->pmhd->b0;
@@ -139,6 +150,10 @@ TaskStatus Radiation::RadFluidCoupling(Driver *pdriver, int stage) {
     Real glower[4][4], gupper[4][4];
     ComputeMetricAndInverse(x1v,x2v,x3v,flat,spin,glower,gupper);
     Real alpha = sqrt(-1.0/gupper[0][0]);
+    Real beta_u[3];
+    beta_u[0] = SQR(alpha)*gupper[0][1];
+    beta_u[1] = SQR(alpha)*gupper[0][2];
+    beta_u[2] = SQR(alpha)*gupper[0][3];
 
     // fluid state
     Real &wdn = w0_(m,IDN,k,j,i);
@@ -149,6 +164,9 @@ TaskStatus Radiation::RadFluidCoupling(Driver *pdriver, int stage) {
 
     // derived quantities
     Real pgas = gm1*wen;
+    if (is_dyngr) {
+      pgas = wen;
+    }
     Real tgas = pgas/wdn;
     Real q = glower[1][1]*wvx*wvx + 2.0*glower[1][2]*wvx*wvy + 2.0*glower[1][3]*wvx*wvz
            + glower[2][2]*wvy*wvy + 2.0*glower[2][3]*wvy*wvz
@@ -156,20 +174,7 @@ TaskStatus Radiation::RadFluidCoupling(Driver *pdriver, int stage) {
     Real gamma = sqrt(1.0 + q);
     Real u0 = gamma/alpha;
 
-    // set opacities
-    Real sigma_a, sigma_s, sigma_p;
-    OpacityFunction(wdn, density_scale_,
-                    tgas, temperature_scale_,
-                    length_scale_, gm1, mean_mol_weight_,
-                    power_opacity_, rosseland_coef_, planck_minus_rosseland_coef_,
-                    kappa_a_, kappa_s_, kappa_p_,
-                    sigma_a, sigma_s, sigma_p);
-    Real dtcsiga = dt_*sigma_a;
-    Real dtcsigs = dt_*sigma_s;
-    Real dtcsigp = dt_*sigma_p;
-    Real dtaucsiga = dtcsiga/u0;
-    Real dtaucsigs = dtcsigs/u0;
-    Real dtaucsigp = dtcsigp/u0;
+    // calculate the moments before updating
 
     // compute fluid velocity in tetrad frame
     Real u_tet[4];
@@ -185,10 +190,29 @@ TaskStatus Radiation::RadFluidCoupling(Driver *pdriver, int stage) {
     // coordinate component n^0
     Real n0 = tt(m,0,0,k,j,i);
 
-    // Calculate polynomial coefficients
+    // Compute wght_sum (angle-only)
     Real wght_sum = 0.0;
-    Real suma1 = 0.0;
-    Real suma2 = 0.0;
+    for (int n=0; n<=nang1; ++n) {
+      Real n0_cm = (u_tet[0]*nh_c_.d_view(n,0) - u_tet[1]*nh_c_.d_view(n,1) -
+                    u_tet[2]*nh_c_.d_view(n,2) - u_tet[3]*nh_c_.d_view(n,3));
+      Real omega_cm = solid_angles_.d_view(n)/SQR(n0_cm);
+      wght_sum += omega_cm;
+    }
+
+    // Compute implicit coefficients
+    Real sigma_a, sigma_s, sigma_p;
+    OpacityFunction(wdn, density_scale_,
+                    tgas, temperature_scale_,
+                    length_scale_, gm1, mean_mol_weight_,
+                    power_opacity_, rosseland_coef_, planck_minus_rosseland_coef_,
+                    kappa_a_, kappa_s_, kappa_p_,
+                    sigma_a, sigma_s, sigma_p);
+
+    Real dtcsiga = dt_*sigma_a;
+    Real dtcsigs = dt_*sigma_s;
+    Real dtcsigp = dt_*sigma_p;
+
+    Real sum1 = 0.0, sum2 = 0.0;
     for (int n=0; n<=nang1; ++n) {
       Real n_0 = tc(m,0,0,k,j,i)*nh_c_.d_view(n,0) + tc(m,1,0,k,j,i)*nh_c_.d_view(n,1) +
                  tc(m,2,0,k,j,i)*nh_c_.d_view(n,2) + tc(m,3,0,k,j,i)*nh_c_.d_view(n,3);
@@ -199,39 +223,38 @@ TaskStatus Radiation::RadFluidCoupling(Driver *pdriver, int stage) {
       Real vncsigma = 1.0/(n0 + (dtcsiga + dtcsigs)*n0_cm);
       Real vncsigma2 = n0_cm*vncsigma;
       Real ir_weight = intensity_cm*omega_cm;
-      wght_sum += omega_cm;
-      suma1 += omega_cm*vncsigma2;
-      suma2 += ir_weight*n0*vncsigma;
+      sum1 += omega_cm*vncsigma2;
+      sum2 += ir_weight*n0*vncsigma;
     }
-    suma1 /= wght_sum;
-    suma2 /= wght_sum;
-    Real suma3 = suma1*(dtcsigs - dtcsigp);
-    suma1 *= (dtcsiga + dtcsigp);
+    sum1 /= wght_sum;
+    sum2 /= wght_sum;
+    Real suma3   = sum1*(dtcsigs - dtcsigp);
+    Real suma1_em = sum1*(dtcsiga + dtcsigp);
+    Real suma2_em = sum2;
 
-    // compute coefficients
-    Real coef[2];
-    coef[1] = (dtaucsiga+dtaucsigp-(dtaucsiga+dtaucsigp)*suma1/(1.0-suma3))*arad_*gm1/wdn;
-    coef[0] = -tgas-(dtaucsiga+dtaucsigp)*suma2*gm1/(wdn*(1.0-suma3));
+    Real dtaucsigap = dt_*(sigma_a + sigma_p)/u0;
+    // standard T^4 emission: coefficients for FourthPolyRoot solve
+    Real coef1_total = (dtaucsigap - dtaucsigap*suma1_em/(1.0-suma3))*arad_*gm1/wdn;
+    Real coef0_total = -tgas - dtaucsigap*suma2_em*gm1/(wdn*(1.0-suma3));
 
-    // Calculate new gas temperature
+    // Calculate new gas temperature (combined polynomial over all species)
     Real tgasnew = tgas;
     bool badcell = false;
-    if (fabs(coef[1]) > 1.0e-20) {
-      bool flag = FourthPolyRoot(coef[1], coef[0], tgasnew);
-      if (!(flag) || !(std::isfinite(tgasnew))) {
+    if (fabs(coef1_total) > 1.0e-20) {
+      bool flag = FourthPolyRoot(coef1_total, coef0_total, tgasnew);
+      if (!(flag) || !(isfinite(tgasnew))) {
         badcell = true;
         tgasnew = tgas;
       }
     } else {
-      tgasnew = -coef[0];
+      tgasnew = -coef0_total;
     }
 
     // Update the specific intensity
     if (!(badcell)) {
-      // Calculate emission coefficient and updated jr_cm
       Real emission = arad_*SQR(SQR(tgasnew));
-      Real jr_cm = (suma1*emission + suma2)/(1.0 - suma3);
       Real m_old[4] = {0.0}; Real m_new[4] = {0.0};
+      Real jr_cm_s = (suma1_em*emission + suma2_em)/(1.0 - suma3);
       for (int n=0; n<=nang1; ++n) {
         // compute coordinate normal components
         Real n_0 = tc(m,0,0,k,j,i)*nh_c_.d_view(n,0) + tc(m,1,0,k,j,i)*nh_c_.d_view(n,1)
@@ -255,7 +278,7 @@ TaskStatus Radiation::RadFluidCoupling(Driver *pdriver, int stage) {
         Real intensity_cm = 4.0*M_PI*(i0_(m,n,k,j,i)/(n0*n_0))*SQR(SQR(n0_cm));
         Real vncsigma = 1.0/(n0 + (dtcsiga + dtcsigs)*n0_cm);
         Real vncsigma2 = n0_cm*vncsigma;
-        Real di_cm = ( ((dtcsigs-dtcsigp)*jr_cm
+        Real di_cm = ( ((dtcsigs-dtcsigp)*jr_cm_s
                       + (dtcsiga+dtcsigp)*emission
                       - (dtcsigs+dtcsiga)*intensity_cm)*vncsigma2 );
         i0_(m,n,k,j,i) = n0*n_0*fmax(i0_(m,n,k,j,i)/(n0*n_0) +
@@ -280,12 +303,24 @@ TaskStatus Radiation::RadFluidCoupling(Driver *pdriver, int stage) {
       }
       // update conserved fluid variables
       if (affect_fluid_) {
-        u0_(m,IEN,k,j,i) += (m_old[0] - m_new[0]);
-        u0_(m,IM1,k,j,i) += (m_old[1] - m_new[1]);
-        u0_(m,IM2,k,j,i) += (m_old[2] - m_new[2]);
-        u0_(m,IM3,k,j,i) += (m_old[3] - m_new[3]);
+        Real dm0 = m_old[0] - m_new[0];
+        Real dm1 = m_old[1] - m_new[1];
+        Real dm2 = m_old[2] - m_new[2];
+        Real dm3 = m_old[3] - m_new[3];
+        if (is_dyngr) {
+          u0_(m,IEN,k,j,i) += (1.0/alpha)*(-dm0+beta_u[0]*dm1+beta_u[1]*dm2+beta_u[2]*dm3);
+        } else {
+          u0_(m,IEN,k,j,i) += dm0;
+        }
+        u0_(m,IM1,k,j,i) += dm1;
+        u0_(m,IM2,k,j,i) += dm2;
+        u0_(m,IM3,k,j,i) += dm3;
       }
-    }
+    }  // end if(!(badcell))
+
+    Real dtaucsigs = dtcsigs/u0;
+    Real suma1 = 0.0, suma2 = 0.0;
+    Real coef[2];
 
     // compton scattering
     if (is_compton_enabled_) {
@@ -319,7 +354,7 @@ TaskStatus Radiation::RadFluidCoupling(Driver *pdriver, int stage) {
         coef[1] = (1.0 + suma2*jr_cm)/(suma1*jr_cm)*arad_;
         coef[0] = -(1.0 + suma2*jr_cm)/suma1 - tgas;
         bool flag = FourthPolyRoot(coef[1], coef[0], tradnew);
-        if (!(flag) || !(std::isfinite(tradnew))) {
+        if (!(flag) || !(isfinite(tradnew))) {
           badcell = true;
         }
       }
@@ -367,10 +402,18 @@ TaskStatus Radiation::RadFluidCoupling(Driver *pdriver, int stage) {
 
         // feedback on fluid
         if (affect_fluid_) {
-          u0_(m,IEN,k,j,i) += (m_old[0] - m_new[0]);
-          u0_(m,IM1,k,j,i) += (m_old[1] - m_new[1]);
-          u0_(m,IM2,k,j,i) += (m_old[2] - m_new[2]);
-          u0_(m,IM3,k,j,i) += (m_old[3] - m_new[3]);
+          Real dm0 = m_old[0] - m_new[0];
+          Real dm1 = m_old[1] - m_new[1];
+          Real dm2 = m_old[2] - m_new[2];
+          Real dm3 = m_old[3] - m_new[3];
+          if (is_dyngr) {
+            u0_(m,IEN,k,j,i) += (1.0/alpha)*(-dm0+beta_u[0]*dm1+beta_u[1]*dm2+beta_u[2]*dm3);
+          } else {
+            u0_(m,IEN,k,j,i) += dm0;
+          }
+          u0_(m,IM1,k,j,i) += dm1;
+          u0_(m,IM2,k,j,i) += dm2;
+          u0_(m,IM3,k,j,i) += dm3;
         }
       } else {
         // NOTE(@pdmullen): At this point, it is possible that excision has not been

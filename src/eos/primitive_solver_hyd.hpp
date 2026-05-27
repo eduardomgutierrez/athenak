@@ -41,6 +41,8 @@
 #include "coordinates/coordinates.hpp"
 #include "coordinates/cell_locations.hpp"
 
+using std::isfinite;
+
 template<class EOSPolicy, class ErrorPolicy>
 class PrimitiveSolverHydro {
  protected:
@@ -75,6 +77,9 @@ class PrimitiveSolverHydro {
         ps.GetEOSMutable().SetCodeUnitSystem(Primitive::MakeNuclear());
       } else if (!units.compare("cgs")) {
         ps.GetEOSMutable().SetCodeUnitSystem(Primitive::MakeCGS());
+      } else if (!units.compare("geometric_mass")) {
+        Real M_Msun = pin->GetOrAddReal(block, "M_Msun", 1.0);
+        ps.GetEOSMutable().SetCodeUnitSystem(Primitive::MakeGeometricMass(M_Msun));
       } else {
         std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
                   << std::endl << "Unknown unit system " << units << " requested."
@@ -106,6 +111,9 @@ class PrimitiveSolverHydro {
         ps.GetEOSMutable().SetCodeUnitSystem(Primitive::MakeNuclear());
       } else if (!units.compare("cgs")) {
         ps.GetEOSMutable().SetCodeUnitSystem(Primitive::MakeCGS());
+      } else if (!units.compare("geometric_mass")) {
+        Real M_Msun = pin->GetOrAddReal("problem", "M_Msun", 1.0);
+        ps.GetEOSMutable().SetCodeUnitSystem(Primitive::MakeGeometricMass(M_Msun));
       } else {
         std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
                   << std::endl << "Unknown unit system " << units << " requested."

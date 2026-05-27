@@ -164,11 +164,15 @@ void MeshBlockPack::AddPhysics(ParameterInput *pin) {
   }
 
   // (5) RADIATION
-  // Create radiation physics module.  Create tasklist.
+  // Create radiation physics module.  Create tasklist only if <adm> block is not present
+  // (Valencia formulation). When both radiation and dynamical GR are enabled, radiation
+  // tasks are integrated into the NumericalRelativity task list.
   if (pin->DoesBlockExist("radiation")) {
     prad = new radiation::Radiation(this, pin);
     nphysics++;
-    prad->AssembleRadTasks(tl_map);
+    if (!(pin->DoesBlockExist("adm"))) {
+      prad->AssembleRadTasks(tl_map);
+    }
   } else {
     prad = nullptr;
   }

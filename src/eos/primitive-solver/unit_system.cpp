@@ -68,6 +68,26 @@ Primitive::UnitSystem Primitive::MakeGeometricSolar() {
   };
 }
 
+Primitive::UnitSystem Primitive::MakeGeometricMass(Real M_Msun) {
+  return UnitSystem{
+    1.0, // c
+    1.0, // G
+    1.0, // kb
+    1.0, // (M_Msun * Msun)
+    CGS.MeV / (CGS.c*CGS.c), // MeV, Msun
+
+    (CGS.c*CGS.c)/(CGS.G * (M_Msun * CGS.Msun)), // length, (M_Msun * Msun)
+    PS_CUBE( CGS.c)/(CGS.G * (M_Msun * CGS.Msun)), // time, (M_Msun * Msun)
+    PS_CUBE( (CGS.G * (M_Msun * CGS.Msun))/(CGS.c*CGS.c) ), // number density, (M_Msun * Msun)^-3
+    1.0 / (M_Msun * CGS.Msun), // mass, (M_Msun * Msun)
+    1.0 / ((M_Msun * CGS.Msun) * CGS.c*CGS.c), // energy, (M_Msun * Msun)
+    PS_CUBE( CGS.G/(CGS.c*CGS.c) ) * PS_SQR( (M_Msun * CGS.Msun)/(CGS.c) ), // pressure, (M_Msun * Msun)^-2
+//     CGS.kb / (CGS.Msun * CGS.c*CGS.c), // temperature, (M_Msun * Msun)
+    CGS.kb/CGS.MeV, // temperature, MeV
+    CGS.kb/CGS.MeV, // chemical potential, MeV
+  };
+}
+
 Primitive::UnitSystem Primitive::MakeNuclear() {
   return UnitSystem{
     1.0, // c
@@ -103,6 +123,25 @@ Primitive::UnitSystem Primitive::MakeMKS() {
     0.1,              // 1 dyne/cm in Pa
     1.0,              // 1 K in K
     1e-7,             // 1 erg in J
+  };
+}
+
+Primitive::UnitSystem Primitive::MakeNGS() {
+  return UnitSystem{
+    CGS.c * 1e7,                                                // c, nm/s
+    CGS.G * CGS.MeV / (CGS.c * CGS.c * CGS.c * CGS.c) * 1e7, // G, nm
+    1.0,                                                        // kb
+    CGS.Msun * (CGS.c * CGS.c) / CGS.MeV,                     // Msun, MeV
+    1.0,                                                        // MeV
+
+    1e7,                        // length, nm  (1 cm = 1e7 nm)
+    1.0,                        // time, s
+    1e-21,                      // density, nm^-3  (1 cm^-3 = 1e-21 nm^-3)
+    1.0,                        // mass, g
+    1.0 / CGS.MeV,              // energy, MeV
+    1e-21 / CGS.MeV,            // pressure, MeV/nm^3
+    CGS.kb / CGS.MeV,           // temperature, MeV
+    1.0 / CGS.MeV,              // chemical potential, MeV
   };
 }
 

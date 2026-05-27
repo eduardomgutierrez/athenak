@@ -35,6 +35,7 @@ option(Athena_SINGLE_PRECISION "Compile for single precision" OFF)
 option(Athena_ENABLE_MPI "Compile with MPI parallelism enabled" OFF)
 option(Athena_ENABLE_OPENMP "Compile with OpenMP parallelism enabled" OFF)
 option(Athena_ENABLE_RNS "Compile with RNS support enabled" OFF)
+option(Athena_ENABLE_NURATES "Compile with bns_nurates enabled" OFF)
 set(PROBLEM built_in_pgens CACHE STRING "Name of problem generator function")
 
 #------ set macros exported to config.hpp ------------------------------------------------
@@ -180,6 +181,15 @@ if (Athena_ENABLE_RNS)
       ${CMAKE_SOURCE_DIR}/rnsc/include)
   target_link_libraries(athena PUBLIC
       ${CMAKE_SOURCE_DIR}/rnsc/lib/libRNS.a)
+endif()
+
+# set nurates macro (true/false)
+if(Athena_ENABLE_NURATES)
+  set(ENABLE_NURATES 1)
+  message(STATUS "Compiling with bns-nurates")
+  target_include_directories(athena PRIVATE ${CMAKE_SOURCE_DIR}/src/bns_nurates/include)
+else()
+  set(ENABLE_NURATES 0)
 endif()
 
 if (${PROBLEM} STREQUAL "sgrid_bns")

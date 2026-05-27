@@ -83,7 +83,7 @@ struct UnitSystem {
     return b.temperature/temperature;
   }
 
-  KOKKOS_INLINE_FUNCTION constexpr Real ChemicalPotentialConversion(UnitSystem& b) const {
+  KOKKOS_INLINE_FUNCTION constexpr Real ChemicalPotentialConversion(const UnitSystem& b) const {
     return b.chemicalPotential/chemicalPotential;
   }
   //! \}
@@ -152,6 +152,25 @@ UnitSystem MakeGeometricSolar();
   CGS.kb / (CGS.Msun * CGS.c*CGS.c), // temperature, Msun
 };*/
 
+UnitSystem MakeGeometricMass(Real M_Msun);
+  /*static UnitSystem GeometricMass{
+    1.0, // c
+    1.0, // G
+    1.0, // kb
+    1.0, // (M_Msun * Msun)
+    CGS.MeV / (CGS.c*CGS.c), // MeV, Msun
+
+    (CGS.c*CGS.c)/(CGS.G * (M_Msun * CGS.Msun)), // length, (M_Msun * Msun)
+    PS_CUBE( CGS.c)/(CGS.G * (M_Msun * CGS.Msun)), // time, (M_Msun * Msun)
+    PS_CUBE( (CGS.G * (M_Msun * CGS.Msun))/(CGS.c*CGS.c) ), // number density, (M_Msun * Msun)^-3
+    1.0 / (M_Msun * CGS.Msun), // mass, (M_Msun * Msun)
+    1.0 / ((M_Msun * CGS.Msun) * CGS.c*CGS.c), // energy, (M_Msun * Msun)
+    PS_CUBE( CGS.G/(CGS.c*CGS.c) ) * PS_SQR( (M_Msun * CGS.Msun)/(CGS.c) ), // pressure, (M_Msun * Msun)^-2
+//     CGS.kb / (CGS.Msun * CGS.c*CGS.c), // temperature, (M_Msun * Msun)
+    CGS.kb/CGS.MeV, // temperature, MeV
+    CGS.kb/CGS.MeV, // chemical potential, MeV
+  };*/
+
 //! Nuclear units
 UnitSystem MakeNuclear();
 /*static UnitSystem Nuclear{
@@ -172,6 +191,10 @@ UnitSystem MakeNuclear();
 
 //! MKS unit systems
 UnitSystem MakeMKS();
+
+//! NGS units (nano-gram-second): energy = MeV, length = nm, time = s
+//! Used by bns_nurates library
+UnitSystem MakeNGS();
 
 } // namespace Primitive
 

@@ -31,6 +31,9 @@
 // Kokkos nested loop layout (inner)
 //#define @PAR_LOOP_INNER_LAYOUT@
 
+// use bns-nurates opacity library? default=0 (false)
+#define ENABLE_NURATES @ENABLE_NURATES@
+
 // compiler options
 #define COMPILED_WITH "@COMPILER_CHOICE@"
 #define COMPILER_COMMAND "@COMPILER_COMMAND@"

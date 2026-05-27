@@ -184,6 +184,43 @@ void EOSCompOSE<LogPolicy>::ReadTableFromFile(std::string fname) {
       }
     }
 
+    if (table.HasField("Y[p]") && table.HasField("Y[n]")) {
+      { // Read proton fraction -> Y[p]
+        Real * table_yp = table["Y[p]"];
+        for (size_t in=0; in<m_nn; ++in) {
+          for (size_t iy=0; iy<m_ny; ++iy) {
+            for (size_t it=0; it<m_nt; ++it) {
+              size_t iflat = it + m_nt*(iy + m_ny*in);
+              host_table(ECYP,in,iy,it) = table_yp[iflat];
+            }
+          }
+        }
+      }
+
+      { // Read neutron fraction -> Y[n]
+        Real * table_yn = table["Y[n]"];
+        for (size_t in=0; in<m_nn; ++in) {
+          for (size_t iy=0; iy<m_ny; ++iy) {
+            for (size_t it=0; it<m_nt; ++it) {
+              size_t iflat = it + m_nt*(iy + m_ny*in);
+              host_table(ECYN,in,iy,it) = table_yn[iflat];
+            }
+          }
+        }
+      }
+    } else {
+      std::cout << "WARNING: Missing Y[p]/Y[n] in EOS table. "
+                << "Falling back to Y[p]=yq and Y[n]=1-yq." << std::endl;
+      for (size_t in=0; in<m_nn; ++in) {
+        for (size_t iy=0; iy<m_ny; ++iy) {
+          for (size_t it=0; it<m_nt; ++it) {
+            host_table(ECYP,in,iy,it) = host_yq(iy);
+            host_table(ECYN,in,iy,it) = 1.0 - host_yq(iy);
+          }
+        }
+      }
+    }
+
     // Copy from host to device
     Kokkos::deep_copy(m_log_nb, host_log_nb);
     Kokkos::deep_copy(m_yq,     host_yq);

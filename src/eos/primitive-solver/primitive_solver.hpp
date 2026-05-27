@@ -384,15 +384,15 @@ SolverResult PrimitiveSolver<EOSPolicy, ErrorPolicy>::ConToPrim(Real prim[NPRIM]
   Real q      = tau/D;
 
   // Make sure there are no NaNs at this point.
-  if (!isfinite(D) || !isfinite(rsqr) || !isfinite(q) ||
-      !isfinite(rbsqr) || !isfinite(bsqr)) {
+  if (!std::isfinite(D) || !std::isfinite(rsqr) || !std::isfinite(q) ||
+      !std::isfinite(rbsqr) || !std::isfinite(bsqr)) {
     HandleFailure(prim, cons, b, g3d);
     solver_result.error = Error::NANS_IN_CONS;
     return solver_result;
   }
   // We have to check the particle fractions separately.
   for (int s = 0; s < n_species; s++) {
-    if (!isfinite(Y[s])) {
+    if (!std::isfinite(Y[s])) {
       HandleFailure(prim, cons, b, g3d);
       solver_result.error = Error::NANS_IN_CONS;
       return solver_result;

@@ -44,7 +44,9 @@ class EOSCompOSE : public EOSPolicyInterface, public LogPolicy, public SupportsE
     ECMUL   = 4,  //! lepton chemical potential [MeV]
     ECLOGE  = 5,  //! log (total energy density / 1 MeV fm^-3)
     ECCS    = 6,  //! sound speed [c]
-    ECNVARS = 7
+    ECYP    = 7,  //! proton fraction
+    ECYN    = 8,  //! neutron fraction
+    ECNVARS = 9
   };
 
  protected:
@@ -166,6 +168,18 @@ class EOSCompOSE : public EOSPolicyInterface, public LogPolicy, public SupportsE
                                                               Real *Y) const {
     assert (m_initialized);
     return eval_at_nty(ECMUL, n, T, Y[0]);
+  }
+
+  /// Calculate the proton fraction
+  KOKKOS_INLINE_FUNCTION Real ProtonFraction(Real n, Real T, Real *Y) const {
+    assert (m_initialized);
+    return eval_at_nty(ECYP, n, T, Y[0]);
+  }
+
+  /// Calculate the neutron fraction
+  KOKKOS_INLINE_FUNCTION Real NeutronFraction(Real n, Real T, Real *Y) const {
+    assert (m_initialized);
+    return eval_at_nty(ECYN, n, T, Y[0]);
   }
 
   /// Calculate hot (neutrino trapped) beta equilibrium T_eq and Y_eq given n, e, and Yl

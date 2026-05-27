@@ -20,7 +20,7 @@
 //! \fn void MeshBlock::UserProblem(ParameterInput *pin)
 //  \brief Sets initial conditions for GR radiation hohlraum test
 
-void ProblemGenerator::Hohlraum(ParameterInput *pin, const bool restart) {
+void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   // capture variables for kernel
   MeshBlockPack *pmbp = pmy_mesh_->pmb_pack;
   auto &indcs = pmy_mesh_->mb_indcs;
