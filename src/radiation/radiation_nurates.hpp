@@ -214,28 +214,25 @@ KOKKOS_INLINE_FUNCTION
 MyQuadratureIntegrand RadiationIntegrateSpectral1D(
     MyQuadrature* quad, GreyOpacityParams &grey_op_params, BS_REAL* t) {
   constexpr int num_integrands = 8;
-  BS_REAL f1_x[num_max_integrands][BS_N_MAX];
-  BS_REAL f2_x[num_max_integrands][BS_N_MAX];
-  BS_REAL var[2] = {0.0, 0.0};
   MyQuadratureIntegrand result = {0};
 
   result.n = num_integrands;
   for (int k = 0; k < num_integrands; ++k) {
+    BS_REAL f1_sum = 0.0;
+    BS_REAL f2_sum = 0.0;
     for (int i = 0; i < quad->nx; ++i) {
-      var[0] = t[k] * quad->points[i];
+      const BS_REAL x = quad->points[i];
+      const BS_REAL w = quad->w[i];
       MyQuadratureIntegrand f1_vals =
-          RadiationSpectralIntegrand(var[0], grey_op_params);
-      f1_x[k][i] = f1_vals.integrand[k];
+          RadiationSpectralIntegrand(t[k] * x, grey_op_params);
+      f1_sum += w * f1_vals.integrand[k];
 
-      var[0] = t[k] / quad->points[i];
       MyQuadratureIntegrand f2_vals =
-          RadiationSpectralIntegrand(var[0], grey_op_params);
-      f2_x[k][i] = f2_vals.integrand[k] / (quad->points[i] * quad->points[i]);
+          RadiationSpectralIntegrand(t[k] / x, grey_op_params);
+      f2_sum += w * f2_vals.integrand[k] / (x * x);
     }
 
-    result.integrand[k] =
-        t[k] * (DoIntegration(quad->nx, quad->w, f1_x[k]) +
-                DoIntegration(quad->nx, quad->w, f2_x[k]));
+    result.integrand[k] = t[k] * (f1_sum + f2_sum);
   }
 
   return result;
