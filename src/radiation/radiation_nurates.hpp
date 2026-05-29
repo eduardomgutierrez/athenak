@@ -266,8 +266,11 @@ SpectralOpacities RadiationComputeSpectralOpacitiesNotStimulatedAbs(
     s_neps[i] = nu;
   }
 
-  MyQuadratureIntegrand integrals_pair_1d =
-      RadiationIntegrateSpectral1D(quad_1d, local_grey_params, s_pair);
+  MyQuadratureIntegrand integrals_pair_1d = {0};
+  if (grey_op_params->opacity_flags.use_pair || grey_op_params->opacity_flags.use_brem) {
+    integrals_pair_1d =
+        RadiationIntegrateSpectral1D(quad_1d, local_grey_params, s_pair);
+  }
 
   MyQuadratureIntegrand integrals_neps_1d = {0};
   if (grey_op_params->opacity_flags.use_inelastic_scatt == 1) {
