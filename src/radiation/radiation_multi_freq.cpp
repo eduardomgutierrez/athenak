@@ -75,6 +75,7 @@ void Radiation::SetFrequencyGrid() {
   Real &nu_min_ = nu_min;
   Real &nu_max_ = nu_max;
   auto &freq_grid_ = freq_grid;
+  auto freq_grid_h = Kokkos::create_mirror_view(freq_grid_);
 
   // convert frequency from cgs into sim unit
   Real freq_min = nu_min_/nu_unit; // from cgs to sim unit
@@ -82,26 +83,27 @@ void Radiation::SetFrequencyGrid() {
 
   // assign freq_min and freq_max
   int nfreq_grid = nfreq_; // frequency grid is defined starting from 0 but with inf excluded
-  freq_grid_(0) = 0.0;
-  freq_grid_(1) = freq_min;
-  freq_grid_(nfreq_grid-1) = freq_max;
+  freq_grid_h(0) = 0.0;
+  freq_grid_h(1) = freq_min;
+  freq_grid_h(nfreq_grid-1) = freq_max;
 
   // partition frequency domain within [freq_min, freq_max]
   if (nfreq_grid > 3) {
     if (freq_scale == 0) { // linear frequency grid
       Real del_freq = (freq_max-freq_min) / (nfreq_grid-2);
       for (int f=2; f<nfreq_grid-1; ++f)
-        freq_grid_(f) = (f-1)*del_freq + freq_min;
+        freq_grid_h(f) = (f-1)*del_freq + freq_min;
     } else if (freq_scale == 1) { // log frequency grid
       Real log_freq_max = log(freq_max);
       Real log_freq_min = log(freq_min);
       Real del_log_freq = (log_freq_max-log_freq_min) / (nfreq_grid-2);
       for (int f=2; f<nfreq_grid-1; ++f) {
         Real log_freq = (f-1)*del_log_freq + log_freq_min;
-        freq_grid_(f) = exp(log_freq);
+        freq_grid_h(f) = exp(log_freq);
       } // endfor f
     } // endelse freq_scale
   } // endif (nfreq_ > 3)
+  Kokkos::deep_copy(freq_grid_, freq_grid_h);
 
   return;
 }
