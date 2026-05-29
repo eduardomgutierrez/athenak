@@ -85,6 +85,153 @@ Primitive::UnitSystem MakeNuratesUnitSystem() {
   };
 }
 
+KOKKOS_INLINE_FUNCTION
+MyQuadratureIntegrand RadiationIntegrateSpectral1D(
+    MyQuadrature* quad, GreyOpacityParams* grey_op_params, BS_REAL* t) {
+  constexpr int num_integrands = 8;
+  BS_REAL f1_x[num_max_integrands][BS_N_MAX];
+  BS_REAL f2_x[num_max_integrands][BS_N_MAX];
+  BS_REAL var[2] = {0.0, 0.0};
+  MyQuadratureIntegrand result = {0};
+
+  result.n = num_integrands;
+  for (int k = 0; k < num_integrands; ++k) {
+    for (int i = 0; i < quad->nx; ++i) {
+      var[0] = t[k] * quad->points[i];
+      MyQuadratureIntegrand f1_vals = SpectralIntegrand(var, grey_op_params);
+      f1_x[k][i] = f1_vals.integrand[k];
+
+      var[0] = t[k] / quad->points[i];
+      MyQuadratureIntegrand f2_vals = SpectralIntegrand(var, grey_op_params);
+      f2_x[k][i] = f2_vals.integrand[k] / (quad->points[i] * quad->points[i]);
+    }
+
+    result.integrand[k] =
+        t[k] * (DoIntegration(quad->nx, quad->w, f1_x[k]) +
+                DoIntegration(quad->nx, quad->w, f2_x[k]));
+  }
+
+  return result;
+}
+
+KOKKOS_INLINE_FUNCTION
+SpectralOpacities RadiationComputeSpectralOpacitiesNotStimulatedAbs(
+    const BS_REAL nu, MyQuadrature* quad_1d, GreyOpacityParams* grey_op_params) {
+  constexpr BS_REAL zero    = 0.0;
+  constexpr BS_REAL one     = 1.0;
+  constexpr BS_REAL four_pi = 4.0 * kBS_Pi;
+  constexpr BS_REAL c_light = kBS_Clight;
+
+  grey_op_params->kernel_pars.pair_kernel_params.omega      = nu;
+  grey_op_params->kernel_pars.brem_kernel_params.omega      = nu;
+  grey_op_params->kernel_pars.inelastic_kernel_params.omega = nu;
+
+  GreyOpacityParams local_grey_params = *grey_op_params;
+  local_grey_params.opacity_flags.use_inelastic_scatt = 0;
+
+  BS_REAL g_nu[total_num_species];
+  for (int idx = 0; idx < total_num_species; ++idx) {
+    g_nu[idx] = TotalNuF(nu, &grey_op_params->distr_pars, idx);
+  }
+
+  constexpr BS_REAL temp_multiple = 0.5 * 4.364;
+  BS_REAL s_pair[8];
+  BS_REAL s_neps[8];
+  for (int i = 0; i < 8; ++i) {
+    s_pair[i] = temp_multiple * grey_op_params->eos_pars.temp;
+    s_neps[i] = nu;
+  }
+
+  MyQuadratureIntegrand integrals_pair_1d =
+      RadiationIntegrateSpectral1D(quad_1d, &local_grey_params, s_pair);
+
+  MyQuadratureIntegrand integrals_neps_1d = {0};
+  if (grey_op_params->opacity_flags.use_inelastic_scatt == 1) {
+    local_grey_params.opacity_flags                     = {0};
+    local_grey_params.opacity_flags.use_inelastic_scatt = 1;
+    integrals_neps_1d =
+        RadiationIntegrateSpectral1D(quad_1d, &local_grey_params, s_neps);
+  }
+
+  MyOpacity abs_em_beta = {0};
+  if (grey_op_params->opacity_flags.use_abs_em) {
+    abs_em_beta = AbsOpacity(nu, &grey_op_params->opacity_pars,
+                             &grey_op_params->eos_pars);
+  }
+
+  BS_REAL iso_scatt = zero;
+  if (grey_op_params->opacity_flags.use_iso) {
+    iso_scatt = IsoScattLegCoeff(nu, &grey_op_params->opacity_pars,
+                                 &grey_op_params->eos_pars, 0);
+  }
+
+  SpectralOpacities sp_opacities = {0};
+  sp_opacities.j[id_nue] =
+      abs_em_beta.em[id_nue] +
+      kBS_FourPi_hc3 * (integrals_pair_1d.integrand[0] +
+                        integrals_neps_1d.integrand[0]);
+  sp_opacities.j[id_anue] =
+      abs_em_beta.em[id_anue] +
+      kBS_FourPi_hc3 * (integrals_pair_1d.integrand[1] +
+                        integrals_neps_1d.integrand[1]);
+  sp_opacities.j[id_nux] =
+      abs_em_beta.em[id_nux] +
+      kBS_FourPi_hc3 * (integrals_pair_1d.integrand[2] +
+                        integrals_neps_1d.integrand[2]);
+  sp_opacities.j[id_anux] =
+      abs_em_beta.em[id_anux] +
+      kBS_FourPi_hc3 * (integrals_pair_1d.integrand[3] +
+                        integrals_neps_1d.integrand[3]);
+
+  sp_opacities.kappa[id_nue] =
+      (abs_em_beta.abs[id_nue] +
+       kBS_FourPi_hc3 * (integrals_pair_1d.integrand[4] +
+                         integrals_neps_1d.integrand[4])) / c_light;
+  sp_opacities.kappa[id_anue] =
+      (abs_em_beta.abs[id_anue] +
+       kBS_FourPi_hc3 * (integrals_pair_1d.integrand[5] +
+                         integrals_neps_1d.integrand[5])) / c_light;
+  sp_opacities.kappa[id_nux] =
+      (abs_em_beta.abs[id_nux] +
+       kBS_FourPi_hc3 * (integrals_pair_1d.integrand[6] +
+                         integrals_neps_1d.integrand[6])) / c_light;
+  sp_opacities.kappa[id_anux] =
+      (abs_em_beta.abs[id_anux] +
+       kBS_FourPi_hc3 * (integrals_pair_1d.integrand[7] +
+                         integrals_neps_1d.integrand[7])) / c_light;
+
+  sp_opacities.j_s[id_nue]  = four_pi * POW2(nu) * g_nu[id_nue] * iso_scatt;
+  sp_opacities.j_s[id_anue] = four_pi * POW2(nu) * g_nu[id_anue] * iso_scatt;
+  sp_opacities.j_s[id_nux]  = four_pi * POW2(nu) * g_nu[id_nux] * iso_scatt;
+  sp_opacities.j_s[id_anux] = four_pi * POW2(nu) * g_nu[id_anux] * iso_scatt;
+
+  sp_opacities.kappa_s[id_nue] =
+      four_pi * POW2(nu) * (one - g_nu[id_nue]) * iso_scatt / c_light;
+  sp_opacities.kappa_s[id_anue] =
+      four_pi * POW2(nu) * (one - g_nu[id_anue]) * iso_scatt / c_light;
+  sp_opacities.kappa_s[id_nux] =
+      four_pi * POW2(nu) * (one - g_nu[id_nux]) * iso_scatt / c_light;
+  sp_opacities.kappa_s[id_anux] =
+      four_pi * POW2(nu) * (one - g_nu[id_anux]) * iso_scatt / c_light;
+
+  return sp_opacities;
+}
+
+KOKKOS_INLINE_FUNCTION
+SpectralOpacities RadiationComputeSpectralOpacitiesStimulatedAbs(
+    const BS_REAL nu, MyQuadrature* quad_1d, GreyOpacityParams* grey_op_params) {
+  constexpr BS_REAL c_light = kBS_Clight;
+  SpectralOpacities op =
+      RadiationComputeSpectralOpacitiesNotStimulatedAbs(nu, quad_1d, grey_op_params);
+
+  for (int idx = 0; idx < total_num_species; ++idx) {
+    op.kappa[idx]   += op.j[idx] / c_light;
+    op.kappa_s[idx] += op.j_s[idx] / c_light;
+  }
+
+  return op;
+}
+
 //----------------------------------------------------------------------------------------
 //! \fn void bns_nurates_gray
 //! \brief Wrapper for bns_nurates grey opacity call for gray (frequency-integrated)
@@ -375,14 +522,14 @@ void bns_nurates_spectral_bin(Real e_lo_code, Real e_hi_code,
 
   MyQuadrature quad = nurates_params.quadrature;
   SpectralOpacities op_mid =
-      ComputeSpectralOpacitiesStimulatedAbs(e_mid, &quad, &grey_op_params);
+      RadiationComputeSpectralOpacitiesStimulatedAbs(e_mid, &quad, &grey_op_params);
 
   for (int iq = 0; iq < quad.nx; ++iq) {
     const Real x = quad.points[iq];
     const Real w = quad.w[iq];
     const Real e = e_lo + de*x;
     SpectralOpacities op =
-        ComputeSpectralOpacitiesStimulatedAbs(e, &quad, &grey_op_params);
+        RadiationComputeSpectralOpacitiesStimulatedAbs(e, &quad, &grey_op_params);
     for (int idx = 0; idx < 4; ++idx) {
       eta_1[idx] += w * de * kBS_FourPi_hc3 * SQR(e) * e * op.j[idx];
     }
