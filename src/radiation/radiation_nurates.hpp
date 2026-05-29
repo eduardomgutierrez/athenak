@@ -57,6 +57,34 @@ struct NuratesParams {
   MyQuadrature quadrature_2; // 2d quadrature for bns_nurates
 };
 
+KOKKOS_INLINE_FUNCTION
+Primitive::UnitSystem MakeNuratesUnitSystem() {
+  // bns_nurates internal unit system: energy = MeV, length = nm, time = s.
+  // Keep this device-callable; Primitive::MakeNGS() is a host-side factory.
+  constexpr Real c_cgs    = 2.99792458e10;
+  constexpr Real g_cgs    = 6.67408e-8;
+  constexpr Real kb_cgs   = 1.38064852e-16;
+  constexpr Real msun_cgs = 1.98848e33;
+  constexpr Real mev_cgs  = 1.6021766208e-6;
+
+  return Primitive::UnitSystem{
+    c_cgs * 1e7,
+    g_cgs * mev_cgs / (c_cgs * c_cgs * c_cgs * c_cgs) * 1e7,
+    1.0,
+    msun_cgs * (c_cgs * c_cgs) / mev_cgs,
+    1.0,
+
+    1e7,
+    1.0,
+    1e-21,
+    1.0,
+    1.0 / mev_cgs,
+    1e-21 / mev_cgs,
+    kb_cgs / mev_cgs,
+    1.0 / mev_cgs,
+  };
+}
+
 //----------------------------------------------------------------------------------------
 //! \fn void bns_nurates_gray
 //! \brief Wrapper for bns_nurates grey opacity call for gray (frequency-integrated)
@@ -94,7 +122,7 @@ void bns_nurates_gray(Real nb, Real temp, Real yp, Real yn,
   //   kBS_Clight       = 2.998e17  nm/s  (dimensional speed of light, not c=1)
   //   kBS_Saturation_n = 0.15e18   nm^-3 (nuclear saturation density)
   // And mwe.cpp: eos_pars.nb = nb_cm3 * 1e-21  (cm^-3 -> nm^-3 conversion).
-  Primitive::UnitSystem nurates_units = Primitive::MakeNGS();
+  Primitive::UnitSystem nurates_units = MakeNuratesUnitSystem();
 
   const Real unit_length    = code_units.LengthConversion(nurates_units);
   const Real unit_time      = code_units.TimeConversion(nurates_units);
@@ -266,7 +294,7 @@ void bns_nurates_spectral_bin(Real e_lo_code, Real e_hi_code,
                               NuratesParams const &nurates_params,
                               Primitive::UnitSystem &code_units,
                               Primitive::UnitSystem &eos_units) {
-  Primitive::UnitSystem nurates_units = Primitive::MakeNGS();
+  Primitive::UnitSystem nurates_units = MakeNuratesUnitSystem();
 
   const Real unit_length    = code_units.LengthConversion(nurates_units);
   const Real unit_time      = code_units.TimeConversion(nurates_units);
