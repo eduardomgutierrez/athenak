@@ -86,8 +86,133 @@ Primitive::UnitSystem MakeNuratesUnitSystem() {
 }
 
 KOKKOS_INLINE_FUNCTION
+MyQuadratureIntegrand RadiationSpectralIntegrand(
+    const BS_REAL nu_bar, GreyOpacityParams &grey_op_params) {
+  constexpr BS_REAL zero = 0.0;
+  constexpr BS_REAL one  = 1.0;
+
+  MyEOSParams my_eos_params  = grey_op_params.eos_pars;
+  OpacityFlags opacity_flags = grey_op_params.opacity_flags;
+  OpacityParams opacity_pars = grey_op_params.opacity_pars;
+
+  BS_REAL nu = grey_op_params.kernel_pars.pair_kernel_params.omega;
+  BS_REAL block_factor[total_num_species];
+  BS_REAL g_nu[total_num_species], g_nu_bar[total_num_species];
+
+  for (int idx = 0; idx < total_num_species; ++idx) {
+    g_nu[idx] = TotalNuF(nu, &grey_op_params.distr_pars, idx);
+    g_nu_bar[idx] = TotalNuF(nu_bar, &grey_op_params.distr_pars, idx);
+  }
+
+  MyKernelOutput pair_kernels_m1 = {0};
+  if (opacity_flags.use_pair) {
+    grey_op_params.kernel_pars.pair_kernel_params.omega_prime = nu_bar;
+    grey_op_params.kernel_pars.pair_kernel_params.cos_theta = one;
+    grey_op_params.kernel_pars.pair_kernel_params.filter    = zero;
+    grey_op_params.kernel_pars.pair_kernel_params.lmax      = zero;
+    grey_op_params.kernel_pars.pair_kernel_params.mu        = one;
+    grey_op_params.kernel_pars.pair_kernel_params.mu_prime  = one;
+    pair_kernels_m1 =
+        PairKernels(&my_eos_params, &grey_op_params.kernel_pars.pair_kernel_params);
+  }
+
+  MyKernelOutput brem_kernels_m1 = {0};
+  if (opacity_flags.use_brem) {
+    grey_op_params.kernel_pars.brem_kernel_params.omega_prime = nu_bar;
+    if (opacity_pars.brem_implementation == BREM_BRT06) {
+      brem_kernels_m1 =
+          BremKernelsBRT06(&grey_op_params.kernel_pars.brem_kernel_params,
+                           &my_eos_params);
+    } else if (opacity_pars.brem_implementation == BREM_HR98) {
+      grey_op_params.kernel_pars.brem_kernel_params.l = 0;
+      grey_op_params.kernel_pars.brem_kernel_params.use_NN_medium_corr =
+          grey_op_params.opacity_pars.use_NN_medium_corr;
+      brem_kernels_m1 =
+          BremKernelsLegCoeff(&grey_op_params.kernel_pars.brem_kernel_params,
+                              &my_eos_params);
+    } else if (opacity_pars.brem_implementation == BREM_GP19) {
+      brem_kernels_m1 =
+          BremKernelAbsGP19(&grey_op_params.kernel_pars.brem_kernel_params,
+                            &my_eos_params);
+    }
+  }
+
+  MyKernelOutput inelastic_kernels_m1 = {0};
+  if (opacity_flags.use_inelastic_scatt) {
+    grey_op_params.kernel_pars.inelastic_kernel_params.omega_prime = nu_bar;
+    inelastic_kernels_m1 =
+        InelasticScattKernels(&grey_op_params.kernel_pars.inelastic_kernel_params,
+                              &grey_op_params.eos_pars);
+  }
+
+  for (int idx = 0; idx < total_num_species; ++idx) {
+    block_factor[idx] = opacity_pars.neglect_blocking ? one : one - g_nu_bar[idx];
+  }
+
+  BS_REAL pro_term[total_num_species] = {0};
+  pro_term[id_nue] =
+      (pair_kernels_m1.em[id_nue] + brem_kernels_m1.em[id_nue]) *
+      block_factor[id_anue];
+  pro_term[id_anue] =
+      (pair_kernels_m1.em[id_anue] + brem_kernels_m1.em[id_anue]) *
+      block_factor[id_nue];
+  pro_term[id_nux] =
+      (pair_kernels_m1.em[id_nux] + brem_kernels_m1.em[id_nux]) *
+      block_factor[id_anux];
+  pro_term[id_anux] =
+      (pair_kernels_m1.em[id_anux] + brem_kernels_m1.em[id_anux]) *
+      block_factor[id_nux];
+
+  for (int idx = 0; idx < total_num_species; ++idx) {
+    pro_term[idx] += inelastic_kernels_m1.em[idx] * g_nu_bar[idx];
+  }
+
+  BS_REAL ann_term[total_num_species] = {0};
+  ann_term[id_nue] =
+      (pair_kernels_m1.abs[id_nue] + brem_kernels_m1.abs[id_nue]) *
+      g_nu_bar[id_anue];
+  ann_term[id_anue] =
+      (pair_kernels_m1.abs[id_anue] + brem_kernels_m1.abs[id_anue]) *
+      g_nu_bar[id_nue];
+  ann_term[id_nux] =
+      (pair_kernels_m1.abs[id_nux] + brem_kernels_m1.abs[id_nux]) *
+      g_nu_bar[id_anux];
+  ann_term[id_anux] =
+      (pair_kernels_m1.abs[id_anux] + brem_kernels_m1.abs[id_anux]) *
+      g_nu_bar[id_nux];
+
+  if (kirchoff_flag) {
+    ann_term[id_nue] +=
+        pair_kernels_m1.em[id_nue] * g_nu_bar[id_anue] / g_nu[id_nue];
+    ann_term[id_anue] +=
+        pair_kernels_m1.em[id_anue] * g_nu_bar[id_nue] / g_nu[id_anue];
+    ann_term[id_nux] +=
+        pair_kernels_m1.em[id_nux] * g_nu_bar[id_anux] / g_nu[id_nux];
+    ann_term[id_anux] +=
+        pair_kernels_m1.em[id_anux] * g_nu_bar[id_nux] / g_nu[id_anux];
+  }
+
+  for (int idx = 0; idx < total_num_species; ++idx) {
+    ann_term[idx] += inelastic_kernels_m1.abs[idx] * block_factor[idx];
+  }
+
+  MyQuadratureIntegrand result = {0};
+  result.n = 8;
+  result.integrand[0] = POW2(nu_bar) * pro_term[id_nue];
+  result.integrand[1] = POW2(nu_bar) * pro_term[id_anue];
+  result.integrand[2] = POW2(nu_bar) * pro_term[id_nux];
+  result.integrand[3] = POW2(nu_bar) * pro_term[id_anux];
+  result.integrand[4] = POW2(nu_bar) * ann_term[id_nue];
+  result.integrand[5] = POW2(nu_bar) * ann_term[id_anue];
+  result.integrand[6] = POW2(nu_bar) * ann_term[id_nux];
+  result.integrand[7] = POW2(nu_bar) * ann_term[id_anux];
+
+  return result;
+}
+
+KOKKOS_INLINE_FUNCTION
 MyQuadratureIntegrand RadiationIntegrateSpectral1D(
-    MyQuadrature* quad, GreyOpacityParams* grey_op_params, BS_REAL* t) {
+    MyQuadrature* quad, GreyOpacityParams &grey_op_params, BS_REAL* t) {
   constexpr int num_integrands = 8;
   BS_REAL f1_x[num_max_integrands][BS_N_MAX];
   BS_REAL f2_x[num_max_integrands][BS_N_MAX];
@@ -98,11 +223,13 @@ MyQuadratureIntegrand RadiationIntegrateSpectral1D(
   for (int k = 0; k < num_integrands; ++k) {
     for (int i = 0; i < quad->nx; ++i) {
       var[0] = t[k] * quad->points[i];
-      MyQuadratureIntegrand f1_vals = SpectralIntegrand(var, grey_op_params);
+      MyQuadratureIntegrand f1_vals =
+          RadiationSpectralIntegrand(var[0], grey_op_params);
       f1_x[k][i] = f1_vals.integrand[k];
 
       var[0] = t[k] / quad->points[i];
-      MyQuadratureIntegrand f2_vals = SpectralIntegrand(var, grey_op_params);
+      MyQuadratureIntegrand f2_vals =
+          RadiationSpectralIntegrand(var[0], grey_op_params);
       f2_x[k][i] = f2_vals.integrand[k] / (quad->points[i] * quad->points[i]);
     }
 
@@ -143,14 +270,14 @@ SpectralOpacities RadiationComputeSpectralOpacitiesNotStimulatedAbs(
   }
 
   MyQuadratureIntegrand integrals_pair_1d =
-      RadiationIntegrateSpectral1D(quad_1d, &local_grey_params, s_pair);
+      RadiationIntegrateSpectral1D(quad_1d, local_grey_params, s_pair);
 
   MyQuadratureIntegrand integrals_neps_1d = {0};
   if (grey_op_params->opacity_flags.use_inelastic_scatt == 1) {
     local_grey_params.opacity_flags                     = {0};
     local_grey_params.opacity_flags.use_inelastic_scatt = 1;
     integrals_neps_1d =
-        RadiationIntegrateSpectral1D(quad_1d, &local_grey_params, s_neps);
+        RadiationIntegrateSpectral1D(quad_1d, local_grey_params, s_neps);
   }
 
   MyOpacity abs_em_beta = {0};
