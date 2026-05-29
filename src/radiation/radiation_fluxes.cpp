@@ -55,9 +55,9 @@ TaskStatus Radiation::CalculateFluxes(Driver *pdriver, int stage) {
   auto &flx1 = iflx.x1f;
   par_for("rflux_x1",DevExeSpace(),0,nmb1,0,nfr_ang1,ks,ke,js,je,is,ie+1,
   KOKKOS_LAMBDA(int m, int n, int k, int j, int i) {
-    // compute frequency and angle indices
-    int ifr, iang;
-    getFreqAngIndices(n, nang, ifr, iang);
+    // compute species, frequency, and angle indices
+    int isp, ifr, iang;
+    getSpecFreqAngIndices(n, nfrq, nang, isp, ifr, iang);
 
     // calculate n^1 (hence determining upwinding direction)
     Real n1 = t1d1(m,0,k,j,i)*nh_c_.d_view(iang,0) + t1d1(m,1,k,j,i)*nh_c_.d_view(iang,1)
@@ -115,9 +115,9 @@ TaskStatus Radiation::CalculateFluxes(Driver *pdriver, int stage) {
     auto &flx2 = iflx.x2f;
     par_for("rflux_x2",DevExeSpace(),0,nmb1,0,nfr_ang1,ks,ke,js,je+1,is,ie,
     KOKKOS_LAMBDA(int m, int n, int k, int j, int i) {
-      // compute frequency and angle indices
-      int ifr, iang;
-      getFreqAngIndices(n, nang, ifr, iang);
+      // compute species, frequency, and angle indices
+      int isp, ifr, iang;
+      getSpecFreqAngIndices(n, nfrq, nang, isp, ifr, iang);
 
       // calculate n^2 (hence determining upwinding direction)
       Real n2 = t2d2(m,0,k,j,i)*nh_c_.d_view(iang,0) + t2d2(m,1,k,j,i)*nh_c_.d_view(iang,1)
@@ -176,9 +176,9 @@ TaskStatus Radiation::CalculateFluxes(Driver *pdriver, int stage) {
     auto &flx3 = iflx.x3f;
     par_for("rflux_x3",DevExeSpace(),0,nmb1,0,nfr_ang1,ks,ke+1,js,je,is,ie,
     KOKKOS_LAMBDA(int m, int n, int k, int j, int i) {
-      // compute frequency and angle indices
-      int ifr, iang;
-      getFreqAngIndices(n, nang, ifr, iang);
+      // compute species, frequency, and angle indices
+      int isp, ifr, iang;
+      getSpecFreqAngIndices(n, nfrq, nang, isp, ifr, iang);
 
       // calculate n^3 (hence determining upwinding direction)
       Real n3 = t3d3(m,0,k,j,i)*nh_c_.d_view(iang,0) + t3d3(m,1,k,j,i)*nh_c_.d_view(iang,1)
@@ -243,9 +243,9 @@ TaskStatus Radiation::CalculateFluxes(Driver *pdriver, int stage) {
 
     par_for("rflux_angular",DevExeSpace(),0,nmb1,0,nfr_ang1,ks,ke,js,je,is,ie,
     KOKKOS_LAMBDA(int m, int n, int k, int j, int i) {
-      // compute frequency and angle indices
-      int ifr, iang;
-      getFreqAngIndices(n, nang, ifr, iang);
+      // compute species, frequency, and angle indices
+      int isp, ifr, iang;
+      getSpecFreqAngIndices(n, nfrq, nang, isp, ifr, iang);
       // compute angular fluxes
       Real divfa_tmp = 0.0;
       Real tet_c_tmp = tet_c_(m,0,0,k,j,i);
@@ -255,8 +255,9 @@ TaskStatus Radiation::CalculateFluxes(Driver *pdriver, int stage) {
         Real na_tmp = na_(m,iang,k,j,i,nb);
         Real flx_edge = na_tmp/tet_c_tmp;
         if (na_tmp < 0.0) {
-          int ifr_ang = getFreqAngIndex(ifr, indn.d_view(iang,nb), nang);
-          flx_edge *= i0_(m,ifr_ang,k,j,i);
+          int n_neighbor =
+              getSpecFreqAngIndex(isp, ifr, indn.d_view(iang,nb), nfrq, nang);
+          flx_edge *= i0_(m,n_neighbor,k,j,i);
         } else {
           flx_edge *= i0_n;
         }

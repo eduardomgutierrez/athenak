@@ -34,7 +34,35 @@ namespace radiation {
 void Radiation::SetFrequencyGrid() {
   bool &are_units_enabled_ = are_units_enabled;
   Real nu_unit = 1.0;
-  if (are_units_enabled_) {
+  if (use_nurates && is_neutrino) {
+    Primitive::UnitSystem code_units{};
+    bool found_code_units = false;
+    if (pmy_pack->pdyngr != nullptr) {
+      auto *ptest_nqt =
+          dynamic_cast<dyngr::DynGRMHDPS<Primitive::EOSCompOSE<Primitive::NQTLogs>,
+                                        Primitive::ResetFloor> *>(pmy_pack->pdyngr);
+      if (ptest_nqt != nullptr) {
+        code_units = ptest_nqt->eos.ps.GetEOSMutable().GetCodeUnitSystem();
+        found_code_units = true;
+      }
+      auto *ptest_nlog =
+          dynamic_cast<dyngr::DynGRMHDPS<Primitive::EOSCompOSE<Primitive::NormalLogs>,
+                                        Primitive::ResetFloor> *>(pmy_pack->pdyngr);
+      if (ptest_nlog != nullptr) {
+        code_units = ptest_nlog->eos.ps.GetEOSMutable().GetCodeUnitSystem();
+        found_code_units = true;
+      }
+    }
+    if (!found_code_units) {
+      std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+                << std::endl
+                << "Neutrino multifrequency nurates requires EOSCompOSE code units "
+                << "to convert nu_min/nu_max from MeV to code units." << std::endl;
+      std::exit(EXIT_FAILURE);
+    }
+    Primitive::UnitSystem nurates_units = Primitive::MakeNGS();
+    nu_unit = code_units.EnergyConversion(nurates_units);
+  } else if (are_units_enabled_) {
     Real h_p = 6.62607015e-27; // Planck constant
     Real k_b = 1.380649e-16;   // Boltzman constant
     Real temp_unit = pmy_pack->punit->temperature_cgs();

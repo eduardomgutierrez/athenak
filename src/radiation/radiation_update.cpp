@@ -65,9 +65,9 @@ TaskStatus Radiation::RKUpdate(Driver *pdriver, int stage) {
 
   par_for("r_update",DevExeSpace(),0,nmb1,0,nfr_ang1,ks,ke,js,je,is,ie,
   KOKKOS_LAMBDA(int m, int n, int k, int j, int i) {
-    // compute frequency and angle indices
-    int ifr, iang;
-    getFreqAngIndices(n, nang_, ifr, iang);
+    // compute species, frequency, and angle indices
+    int isp, ifr, iang;
+    getSpecFreqAngIndices(n, nfreq_, nang_, isp, ifr, iang);
 
     // spatial fluxes
     Real divf_s = (flx1(m,n,k,j,i+1) - flx1(m,n,k,j,i))/mbsize.d_view(m).dx1;
