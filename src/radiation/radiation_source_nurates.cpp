@@ -50,8 +50,10 @@ TaskStatus Radiation::RadFluidCouplingNurates(Driver *pdriver, int stage) {
   bool &fixed_fluid_ = fixed_fluid;
   bool &affect_fluid_ = affect_fluid;
   bool &evolve_ye_ = evolve_ye;
+  int ye_source_model_ = ye_source_model;
   Real &source_Ye_min_ = source_Ye_min;
   Real &source_Ye_max_ = source_Ye_max;
+  Real &source_limiter_ = source_limiter;
   bool is_dyngr = (pmy_pack->pdyngr != nullptr);
 
   // Extract coordinate/excision data
@@ -84,9 +86,11 @@ TaskStatus Radiation::RadFluidCouplingNurates(Driver *pdriver, int stage) {
 
   auto &nurates_eta_1_ = nurates_eta_1;
   auto &nurates_eta_0_ = nurates_eta_0;
+  auto &nurates_abs_0_ = nurates_abs_0;
   auto &nurates_abs_1_ = nurates_abs_1;
   auto &nurates_scat_1_ = nurates_scat_1;
   Real mb_code_ = nurates_baryon_mass;
+  Real code_num_to_eos_num_ = nurates_code_num_to_eos_num;
 
   // Update primitives before source term application
   if (!(fixed_fluid_)) {
@@ -196,6 +200,7 @@ TaskStatus Radiation::RadFluidCouplingNurates(Driver *pdriver, int stage) {
     // the equilibrium intensity_cm^eq = eta_1/kappa_a, not eta_1/(4pi))
     Real m_old[4] = {0.0}; Real m_new[4] = {0.0};
     Real dJ_fluid[4] = {0.0};
+    Real dN_rad_source[4] = {0.0};
     for (int isp = 0; isp < nsp_; ++isp) {
       Real emission_sp = (sigma_a_sp[isp] > 0.0) ?
                          nurates_eta_1_(m, isp, k, j, i) / sigma_a_sp[isp] : 0.0;
@@ -250,7 +255,20 @@ TaskStatus Radiation::RadFluidCouplingNurates(Driver *pdriver, int stage) {
         }
       }
       if (isp < 4) {
-        dJ_fluid[isp] = (J_new_sp - J_old_sp)/wght_sum;
+        Real J_old = J_old_sp/wght_sum;
+        Real J_new = J_new_sp/wght_sum;
+        dJ_fluid[isp] = J_new - J_old;
+
+        Real eta0 = nurates_eta_0_(m, isp, k, j, i);
+        Real eta1 = nurates_eta_1_(m, isp, k, j, i);
+        Real abs0 = nurates_abs_0_(m, isp, k, j, i);
+        Real abs1 = nurates_abs_1_(m, isp, k, j, i);
+        // Estimate gray number density so J=eta1/abs1 implies N=eta0/abs0.
+        Real eps_eq = (eta0 > 0.0 && abs0 > 0.0 && abs1 > 0.0) ?
+                      (eta1/abs1)/(eta0/abs0) : 0.0;
+        Real N_old = (eps_eq > 0.0) ? J_old/eps_eq : 0.0;
+        Real N_new = (N_old + dt_*eta0)/(1.0 + dt_*abs0);
+        dN_rad_source[isp] = N_new - N_old;
       }
     }
 
@@ -269,24 +287,45 @@ TaskStatus Radiation::RadFluidCouplingNurates(Driver *pdriver, int stage) {
       u0_(m,IM2,k,j,i) += dm2;
       u0_(m,IM3,k,j,i) += dm3;
       if (evolve_ye_ && nsp_ > 1 && is_mhd_enabled_) {
-        Real dDYe = 0.0;
+        Real dN_nue = dN_rad_source[0];
+        Real dN_anue = dN_rad_source[1];
+        if (ye_source_model_ == 1) {
+          dN_nue = 0.0;
+          dN_anue = 0.0;
+        }
         Real eps_nue = (nurates_eta_0_(m, 0, k, j, i) > 0.0) ?
                        nurates_eta_1_(m, 0, k, j, i)/nurates_eta_0_(m, 0, k, j, i) : 0.0;
         Real eps_anue = (nurates_eta_0_(m, 1, k, j, i) > 0.0) ?
                         nurates_eta_1_(m, 1, k, j, i)/nurates_eta_0_(m, 1, k, j, i) : 0.0;
-        if (eps_nue > 0.0) {
-          dDYe -= gamma*dJ_fluid[0]/eps_nue;
+        if (ye_source_model_ == 1) {
+          if (eps_nue > 0.0) {
+            dN_nue = gamma*dJ_fluid[0]/eps_nue;
+          }
+          if (eps_anue > 0.0) {
+            dN_anue = gamma*dJ_fluid[1]/eps_anue;
+          }
         }
-        if (eps_anue > 0.0) {
-          dDYe += gamma*dJ_fluid[1]/eps_anue;
-        }
+        Real dDYe = mb_code_*code_num_to_eos_num_*(-dN_nue + dN_anue);
 
         Real cons_dens = u0_(m,IDN,k,j,i);
         if (cons_dens > 0.0) {
           Real ye_old = w0_(m,IYF,k,j,i);
           // u0_(IYF) stores the conserved scalar D*Ye, so convert the
           // number-density source through the conserved density.
-          Real ye_new = ye_old + mb_code_*dDYe/cons_dens;
+          Real raw_dDYe = dDYe;
+          if (source_limiter_ >= 0.0) {
+            Real raw_dYe = raw_dDYe/cons_dens;
+            Real theta = 1.0;
+            if (raw_dYe > 0.0) {
+              theta = fmin(theta, source_limiter_*
+                                  fmax(source_Ye_max_ - ye_old, 0.0)/raw_dYe);
+            } else if (raw_dYe < 0.0) {
+              theta = fmin(theta, source_limiter_*
+                                  fmin(source_Ye_min_ - ye_old, 0.0)/raw_dYe);
+            }
+            raw_dDYe *= fmax(theta, 0.0);
+          }
+          Real ye_new = ye_old + raw_dDYe/cons_dens;
           ye_new = fmin(fmax(ye_new, source_Ye_min_), source_Ye_max_);
           u0_(m,IYF,k,j,i) += cons_dens*(ye_new - ye_old);
         }
@@ -327,8 +366,10 @@ TaskStatus Radiation::MultiFreqRadFluidCouplingNurates(Driver *pdriver, int stag
   bool &fixed_fluid_ = fixed_fluid;
   bool &affect_fluid_ = affect_fluid;
   bool &evolve_ye_ = evolve_ye;
+  int ye_source_model_ = ye_source_model;
   Real &source_Ye_min_ = source_Ye_min;
   Real &source_Ye_max_ = source_Ye_max;
+  Real &source_limiter_ = source_limiter;
   bool is_dyngr = (pmy_pack->pdyngr != nullptr);
 
   auto &coord = pmy_pack->pcoord->coord_data;
@@ -356,10 +397,13 @@ TaskStatus Radiation::MultiFreqRadFluidCouplingNurates(Driver *pdriver, int stag
   }
 
   Real dt_ = (pdriver->beta[stage-1])*(pmy_pack->pmesh->dt);
+  auto &eta_0_f_ = nurates_eta_0_freq;
   auto &eta_1_f_ = nurates_eta_1_freq;
+  auto &abs_0_f_ = nurates_abs_0_freq;
   auto &abs_1_f_ = nurates_abs_1_freq;
   auto &scat_1_f_ = nurates_scat_1_freq;
   Real mb_code_ = nurates_baryon_mass;
+  Real code_num_to_eos_num_ = nurates_code_num_to_eos_num;
 
   if (!(fixed_fluid_)) {
     if (is_dyngr) {
@@ -460,7 +504,8 @@ TaskStatus Radiation::MultiFreqRadFluidCouplingNurates(Driver *pdriver, int stag
     }
 
     Real m_old[4] = {0.0}; Real m_new[4] = {0.0};
-    Real dN_rad[4] = {0.0};
+    Real dN_rad_source[4] = {0.0};
+    Real dN_rad_moment[4] = {0.0};
     for (int isp=0; isp<nsp_; ++isp) {
       int sp_off = isp*nfrq_*nang_;
       for (int ifr=0; ifr<nfrq_; ++ifr) {
@@ -475,10 +520,13 @@ TaskStatus Radiation::MultiFreqRadFluidCouplingNurates(Driver *pdriver, int stag
           e_mid = (freq_scale_ == 1 && e_lo > 0.0) ? sqrt(e_lo*e_hi) :
                                                       0.5*(e_lo + e_hi);
         } else {
-          Real e_hi = nu_tet(ifr) + (nu_tet(ifr) - nu_tet(ifr-1));
+          Real e_hi = (freq_scale_ == 1 && nu_tet(ifr-1) > 0.0) ?
+                      nu_tet(ifr)*nu_tet(ifr)/nu_tet(ifr-1) :
+                      nu_tet(ifr) + (nu_tet(ifr) - nu_tet(ifr-1));
           e_mid = (freq_scale_ == 1 && nu_tet(ifr) > 0.0) ? sqrt(nu_tet(ifr)*e_hi) :
                                                             0.5*(nu_tet(ifr) + e_hi);
         }
+        Real n_bin_old = 0.0;
         for (int iang=0; iang<=nang1; ++iang) {
           int nn = sp_off + ifr*nang_ + iang;
           Real n_0 = tc(m,0,0,k,j,i)*nh_c_.d_view(iang,0) +
@@ -507,17 +555,22 @@ TaskStatus Radiation::MultiFreqRadFluidCouplingNurates(Driver *pdriver, int stag
           Real n0_cm = (u_tet[0]*nh_c_.d_view(iang,0) - u_tet[1]*nh_c_.d_view(iang,1) -
                         u_tet[2]*nh_c_.d_view(iang,2) - u_tet[3]*nh_c_.d_view(iang,3));
           Real intensity_cm_old = 4.0*M_PI*(i0_(m,nn,k,j,i)/(n0*n_0))*SQR(SQR(n0_cm));
+          Real omega_cm = domega/SQR(n0_cm);
+          Real e_cm = n0_cm*e_mid;
+          if (isp < 4) {
+            n_bin_old += intensity_cm_old*omega_cm/fmax(e_cm, 1.0e-100);
+          }
+
           Real vncsigma = 1.0/(n0 + (dtcsiga + dtcsigs)*n0_cm);
           Real di_cm = ((dtcsigs*jr_cm + dtcsiga*eq_j(idx) -
                          (dtcsigs + dtcsiga)*intensity_cm_old)*n0_cm*vncsigma);
           i0_(m,nn,k,j,i) = n0*n_0*fmax(i0_(m,nn,k,j,i)/(n0*n_0) +
                              di_cm/(4.0*M_PI*SQR(SQR(n0_cm))), 0.0);
 
-          Real intensity_cm_new = 4.0*M_PI*(i0_(m,nn,k,j,i)/(n0*n_0))*SQR(SQR(n0_cm));
-          Real omega_cm = domega/SQR(n0_cm);
-          if (isp < 4) {
-            dN_rad[isp] += (intensity_cm_new - intensity_cm_old)*omega_cm/
-                           fmax(n0_cm*e_mid, 1.0e-100);
+          if (isp < 4 && ye_source_model_ == 1) {
+            Real intensity_cm_new = 4.0*M_PI*(i0_(m,nn,k,j,i)/(n0*n_0))*SQR(SQR(n0_cm));
+            dN_rad_moment[isp] += (intensity_cm_new - intensity_cm_old)*omega_cm/
+                                  fmax(e_cm, 1.0e-100);
           }
 
           m_new[0] += i0_(m,nn,k,j,i)*domega;
@@ -530,10 +583,17 @@ TaskStatus Radiation::MultiFreqRadFluidCouplingNurates(Driver *pdriver, int stag
             if (apply_excision) { i0_(m,nn,k,j,i) = 0.0; }
           }
         }
+        if (isp < 4) {
+          n_bin_old /= wght_sum;
+          Real eta0 = eta_0_f_(m, isp, ifr, k, j, i);
+          Real abs0 = abs_0_f_(m, isp, ifr, k, j, i);
+          Real n_bin_new = (n_bin_old + dt_*eta0)/(1.0 + dt_*abs0);
+          dN_rad_source[isp] += n_bin_new - n_bin_old;
+        }
       }
     }
     for (int isp=0; isp<4; ++isp) {
-      dN_rad[isp] /= wght_sum;
+      dN_rad_moment[isp] /= wght_sum;
     }
 
     if (affect_fluid_) {
@@ -551,11 +611,25 @@ TaskStatus Radiation::MultiFreqRadFluidCouplingNurates(Driver *pdriver, int stag
       u0_(m,IM3,k,j,i) += dm3;
 
       if (evolve_ye_ && nsp_ > 1 && is_mhd_enabled_) {
-        Real dDYe = -gamma*dN_rad[0] + gamma*dN_rad[1];
+        Real dN_nue = (ye_source_model_ == 1) ? dN_rad_moment[0] : dN_rad_source[0];
+        Real dN_anue = (ye_source_model_ == 1) ? dN_rad_moment[1] : dN_rad_source[1];
+        Real dDYe = mb_code_*code_num_to_eos_num_*(-dN_nue + dN_anue);
         Real cons_dens = u0_(m,IDN,k,j,i);
         if (cons_dens > 0.0) {
           Real ye_old = w0_(m,IYF,k,j,i);
-          Real ye_new = ye_old + mb_code_*dDYe/cons_dens;
+          if (source_limiter_ >= 0.0) {
+            Real raw_dYe = dDYe/cons_dens;
+            Real theta = 1.0;
+            if (raw_dYe > 0.0) {
+              theta = fmin(theta, source_limiter_*
+                                  fmax(source_Ye_max_ - ye_old, 0.0)/raw_dYe);
+            } else if (raw_dYe < 0.0) {
+              theta = fmin(theta, source_limiter_*
+                                  fmin(source_Ye_min_ - ye_old, 0.0)/raw_dYe);
+            }
+            dDYe *= fmax(theta, 0.0);
+          }
+          Real ye_new = ye_old + dDYe/cons_dens;
           ye_new = fmin(fmax(ye_new, source_Ye_min_), source_Ye_max_);
           u0_(m,IYF,k,j,i) += cons_dens*(ye_new - ye_old);
         }

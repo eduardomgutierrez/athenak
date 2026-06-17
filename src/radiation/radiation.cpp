@@ -108,6 +108,15 @@ Radiation::Radiation(MeshBlockPack *ppack, ParameterInput *pin) :
     is_neutrino = false;
     nspecies = 1;
   }
+#if ENABLE_NURATES
+  if (use_nurates && !is_neutrino) {
+    std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+              << std::endl
+              << "use_nurates=true requires <radiation>/radiation_type = neutrino"
+              << std::endl;
+    std::exit(EXIT_FAILURE);
+  }
+#endif
 
   // Check for multi-frequency radiation
   nfreq = 1;
@@ -182,8 +191,24 @@ Radiation::Radiation(MeshBlockPack *ppack, ParameterInput *pin) :
     }
     affect_fluid = pin->GetOrAddBoolean("radiation","affect_fluid",true);
     evolve_ye = pin->GetOrAddBoolean("radiation","evolve_ye",true);
+    std::string ye_source_model_str =
+        pin->GetOrAddString("radiation", "ye_source_model", "opacity");
+    if (ye_source_model_str == "opacity" ||
+        ye_source_model_str == "number_opacity") {
+      ye_source_model = 0;
+    } else if (ye_source_model_str == "moment" ||
+               ye_source_model_str == "number_moment") {
+      ye_source_model = 1;
+    } else {
+      std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+                << std::endl
+                << "Unknown radiation/ye_source_model='" << ye_source_model_str
+                << "'. Use 'opacity' or 'moment'." << std::endl;
+      std::exit(EXIT_FAILURE);
+    }
     source_Ye_min = pin->GetOrAddReal("radiation", "source_Ye_min", 0.0);
     source_Ye_max = pin->GetOrAddReal("radiation", "source_Ye_max", 0.6);
+    source_limiter = pin->GetOrAddReal("radiation", "source_limiter", 0.5);
 
   // multi-frequency radiation
     if (multi_freq) {
@@ -350,6 +375,26 @@ Radiation::Radiation(MeshBlockPack *ppack, ParameterInput *pin) :
     nurates_params.use_BRT_brem        = pin->GetOrAddBoolean("bns_nurates","use_BRT_brem",false);
     nurates_params.use_equilibrium_distribution =
         pin->GetOrAddBoolean("bns_nurates","use_equilibrium_distribution",true);
+    if (pin->DoesParameterExist("bns_nurates", "use_kirchhoff_law")) {
+      nurates_params.use_kirchhoff_law =
+          pin->GetBoolean("bns_nurates", "use_kirchhoff_law");
+    } else if (pin->DoesParameterExist("bns_nurates", "use_kirchoff_law")) {
+      nurates_params.use_kirchhoff_law =
+          pin->GetBoolean("bns_nurates", "use_kirchoff_law");
+    } else {
+      nurates_params.use_kirchhoff_law =
+          pin->GetOrAddBoolean("bns_nurates", "use_kirchhoff_law", true);
+    }
+    if (!multi_freq && !nurates_params.use_equilibrium_distribution) {
+      std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+                << std::endl
+                << "Gray Boltzmann nurates requires "
+                << "<bns_nurates>/use_equilibrium_distribution = true. "
+                << "The gray Boltzmann variables do not carry an independent "
+                << "neutrino number density needed to reconstruct a non-equilibrium "
+                << "distribution." << std::endl;
+      std::exit(EXIT_FAILURE);
+    }
     // floors
     nurates_params.nb_min      = pin->GetOrAddReal("bns_nurates","nb_min",1.0e-12);
     nurates_params.temp_min_mev = pin->GetOrAddReal("bns_nurates","temp_min_mev",0.01);
@@ -385,7 +430,9 @@ Radiation::Radiation(MeshBlockPack *ppack, ParameterInput *pin) :
     Kokkos::realloc(nurates_abs_1,  nmb, nspecies, ncells3, ncells2, ncells1);
     Kokkos::realloc(nurates_scat_1, nmb, nspecies, ncells3, ncells2, ncells1);
     if (multi_freq) {
+      Kokkos::realloc(nurates_eta_0_freq,  nmb, nspecies, nfreq, ncells3, ncells2, ncells1);
       Kokkos::realloc(nurates_eta_1_freq,  nmb, nspecies, nfreq, ncells3, ncells2, ncells1);
+      Kokkos::realloc(nurates_abs_0_freq,  nmb, nspecies, nfreq, ncells3, ncells2, ncells1);
       Kokkos::realloc(nurates_abs_1_freq,  nmb, nspecies, nfreq, ncells3, ncells2, ncells1);
       Kokkos::realloc(nurates_scat_1_freq, nmb, nspecies, nfreq, ncells3, ncells2, ncells1);
     }

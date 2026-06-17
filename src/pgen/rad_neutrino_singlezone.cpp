@@ -67,6 +67,12 @@ void SingleZoneImpl(Mesh *pmesh, ParameterInput *pin, const bool restart) {
               << std::endl;
     std::exit(EXIT_FAILURE);
   }
+  if (!pmbp->prad->is_neutrino || pmbp->prad->nspecies < 2) {
+    std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
+              << "rad_neutrino_singlezone requires <radiation>/radiation_type = neutrino "
+              << "and nspecies >= 2" << std::endl;
+    std::exit(EXIT_FAILURE);
+  }
 
   auto &indcs = pmesh->mb_indcs;
   int &ng = indcs.ng;

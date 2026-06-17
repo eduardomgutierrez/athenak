@@ -105,12 +105,15 @@ class Radiation {
   NuratesParams nurates_params;
   bool nurates_debug_opacity = false;
   Real nurates_baryon_mass = 1.0;    // baryon mass in code units (for Ye update)
+  Real nurates_code_num_to_eos_num = 1.0; // code number density -> EOS number density
   DvceArray5D<Real> nurates_eta_0;   // number emissivity    [nspecies, nk, nj, ni]
   DvceArray5D<Real> nurates_eta_1;   // energy emissivity
   DvceArray5D<Real> nurates_abs_0;   // number absorption opacity
   DvceArray5D<Real> nurates_abs_1;   // energy absorption opacity
   DvceArray5D<Real> nurates_scat_1;  // energy scattering opacity
+  DvceArray6D<Real> nurates_eta_0_freq;   // [nmb, nspecies, nfreq, nk, nj, ni]
   DvceArray6D<Real> nurates_eta_1_freq;   // [nmb, nspecies, nfreq, nk, nj, ni]
+  DvceArray6D<Real> nurates_abs_0_freq;
   DvceArray6D<Real> nurates_abs_1_freq;
   DvceArray6D<Real> nurates_scat_1_freq;
 #endif
@@ -120,8 +123,10 @@ class Radiation {
   bool fixed_fluid;         // flag to enable/disable fluid integration
   bool affect_fluid;        // flag to enable/disable feedback of rad field on fluid
   bool evolve_ye;           // update fluid electron fraction from neutrino sources
+  int ye_source_model;      // 0: opacity number source, 1: radiation number moment change
   Real source_Ye_min;       // minimum allowed Ye for matter source update
   Real source_Ye_max;       // maximum allowed Ye for matter source update
+  Real source_limiter;      // fraction of remaining Ye range allowed per source update
   Real arad;                // radiation constant
   Real kappa_a;             // constant Rosseland mean absorption coefficient
   Real kappa_s;             // constant scattering coefficient

@@ -97,6 +97,8 @@ TaskStatus Radiation::CalcOpacityNurates_(Driver *pdrive, int stage) {
           ->eos.ps.GetEOSMutable();
   const Real mb = eos.GetBaryonMass();
   nurates_baryon_mass = mb;
+  nurates_code_num_to_eos_num =
+      eos.GetCodeUnitSystem().DensityConversion(eos.GetEOSUnitSystem());
 
   // Unit systems
   auto code_units    = eos.GetCodeUnitSystem();
@@ -120,7 +122,9 @@ TaskStatus Radiation::CalcOpacityNurates_(Driver *pdrive, int stage) {
   auto &abs_0_   = nurates_abs_0;
   auto &abs_1_   = nurates_abs_1;
   auto &scat_1_  = nurates_scat_1;
+  auto &eta_0_f_   = nurates_eta_0_freq;
   auto &eta_1_f_   = nurates_eta_1_freq;
+  auto &abs_0_f_   = nurates_abs_0_freq;
   auto &abs_1_f_   = nurates_abs_1_freq;
   auto &scat_1_f_  = nurates_scat_1_freq;
   auto &i0_ = i0;
@@ -161,7 +165,7 @@ TaskStatus Radiation::CalcOpacityNurates_(Driver *pdrive, int stage) {
     // transport, derive number density directly from bin-integrated energy.
     Real nudens_0[4] = {0., 0., 0., 0.};
     Real nudens_1[4] = {0., 0., 0., 0.};
-    if (multi_freq_) {
+    if (multi_freq_ && !nurates_params_.use_equilibrium_distribution) {
       Real &x1min = size.d_view(m).x1min;
       Real &x1max = size.d_view(m).x1max;
       Real x1v = CellCenterX(i-is, indcs.nx1, x1min, x1max);
@@ -208,8 +212,10 @@ TaskStatus Radiation::CalcOpacityNurates_(Driver *pdrive, int stage) {
             e_mid = (freq_scale_ == 1 && e_lo > 0.0) ? sqrt(e_lo*e_hi) :
                                                         0.5*(e_lo + e_hi);
           } else {
+            Primitive::UnitSystem nurates_units_mom = MakeNuratesUnitSystem();
+            Real temp_code = T / code_units.EnergyConversion(nurates_units_mom);
             Real e_hi = freq_grid_(ifr) + fmax(freq_grid_(ifr) - freq_grid_(ifr-1),
-                                               20.0*T - freq_grid_(ifr));
+                                               20.0*temp_code - freq_grid_(ifr));
             e_mid = (freq_scale_ == 1 && freq_grid_(ifr) > 0.0) ?
                     sqrt(freq_grid_(ifr)*e_hi) : 0.5*(freq_grid_(ifr) + e_hi);
           }
@@ -272,26 +278,34 @@ TaskStatus Radiation::CalcOpacityNurates_(Driver *pdrive, int stage) {
     }
 
     if (multi_freq_) {
+      Primitive::UnitSystem nurates_units_l = MakeNuratesUnitSystem();
+      Real unit_energy_l = code_units_l.EnergyConversion(nurates_units_l);
       for (int ifr = 0; ifr < nfreq_; ++ifr) {
         Real e_lo = freq_grid_(ifr);
         Real e_hi = 0.0;
         if (ifr < nfreq_ - 1) {
           e_hi = freq_grid_(ifr+1);
         } else {
+          Real temp_code = T / unit_energy_l;
           e_hi = freq_grid_(ifr) + fmax(freq_grid_(ifr) - freq_grid_(ifr-1),
-                                        20.0*T - freq_grid_(ifr));
+                                        20.0*temp_code - freq_grid_(ifr));
         }
 
+        Real loc_eta_0_f[4]  = {0.};
         Real loc_eta_1_f[4]  = {0.};
+        Real loc_abs_0_f[4]  = {0.};
         Real loc_abs_1_f[4]  = {0.};
         Real loc_scat_1_f[4] = {0.};
         bns_nurates_spectral_bin(e_lo, e_hi, freq_scale_,
                                  nb, T, yp, yn, mu_n, mu_p, mu_e,
                                  nudens_0, nudens_1,
-                                 loc_eta_1_f, loc_abs_1_f, loc_scat_1_f,
+                                 loc_eta_0_f, loc_eta_1_f,
+                                 loc_abs_0_f, loc_abs_1_f, loc_scat_1_f,
                                  nurates_params_, code_units_l, eos_units_loc_l);
         for (int isp = 0; isp < nspecies_; ++isp) {
+          eta_0_f_(m, isp, ifr, k, j, i)  = loc_eta_0_f[isp];
           eta_1_f_(m, isp, ifr, k, j, i)  = loc_eta_1_f[isp];
+          abs_0_f_(m, isp, ifr, k, j, i)  = loc_abs_0_f[isp];
           abs_1_f_(m, isp, ifr, k, j, i)  = loc_abs_1_f[isp];
           scat_1_f_(m, isp, ifr, k, j, i) = loc_scat_1_f[isp];
         }
@@ -303,8 +317,23 @@ TaskStatus Radiation::CalcOpacityNurates_(Driver *pdrive, int stage) {
     if (multi_freq_) {
       const int ncell = (nmb1 + 1)*(ke - ks + 1)*(je - js + 1)*(ie - is + 1);
       const int ntot = ncell*nspecies_*nfreq_;
-      Real eta_sum = 0.0, abs_sum = 0.0, scat_sum = 0.0;
-      Kokkos::parallel_reduce("nurates_mf_eta_sum", Kokkos::RangePolicy<>(DevExeSpace(), 0, ntot),
+      Real eta0_sum = 0.0, eta1_sum = 0.0, abs0_sum = 0.0, abs1_sum = 0.0, scat_sum = 0.0;
+      Kokkos::parallel_reduce("nurates_mf_eta0_sum", Kokkos::RangePolicy<>(DevExeSpace(), 0, ntot),
+      KOKKOS_LAMBDA(const int &idx, Real &sum) {
+        int q = idx;
+        int ifr = q % nfreq_;
+        q /= nfreq_;
+        int isp = q % nspecies_;
+        q /= nspecies_;
+        int i = is + (q % (ie - is + 1));
+        q /= (ie - is + 1);
+        int j = js + (q % (je - js + 1));
+        q /= (je - js + 1);
+        int k = ks + (q % (ke - ks + 1));
+        int m = q / (ke - ks + 1);
+        sum += eta_0_f_(m, isp, ifr, k, j, i);
+      }, eta0_sum);
+      Kokkos::parallel_reduce("nurates_mf_eta1_sum", Kokkos::RangePolicy<>(DevExeSpace(), 0, ntot),
       KOKKOS_LAMBDA(const int &idx, Real &sum) {
         int q = idx;
         int ifr = q % nfreq_;
@@ -318,8 +347,23 @@ TaskStatus Radiation::CalcOpacityNurates_(Driver *pdrive, int stage) {
         int k = ks + (q % (ke - ks + 1));
         int m = q / (ke - ks + 1);
         sum += eta_1_f_(m, isp, ifr, k, j, i);
-      }, eta_sum);
-      Kokkos::parallel_reduce("nurates_mf_abs_sum", Kokkos::RangePolicy<>(DevExeSpace(), 0, ntot),
+      }, eta1_sum);
+      Kokkos::parallel_reduce("nurates_mf_abs0_sum", Kokkos::RangePolicy<>(DevExeSpace(), 0, ntot),
+      KOKKOS_LAMBDA(const int &idx, Real &sum) {
+        int q = idx;
+        int ifr = q % nfreq_;
+        q /= nfreq_;
+        int isp = q % nspecies_;
+        q /= nspecies_;
+        int i = is + (q % (ie - is + 1));
+        q /= (ie - is + 1);
+        int j = js + (q % (je - js + 1));
+        q /= (je - js + 1);
+        int k = ks + (q % (ke - ks + 1));
+        int m = q / (ke - ks + 1);
+        sum += abs_0_f_(m, isp, ifr, k, j, i);
+      }, abs0_sum);
+      Kokkos::parallel_reduce("nurates_mf_abs1_sum", Kokkos::RangePolicy<>(DevExeSpace(), 0, ntot),
       KOKKOS_LAMBDA(const int &idx, Real &sum) {
         int q = idx;
         int ifr = q % nfreq_;
@@ -333,7 +377,7 @@ TaskStatus Radiation::CalcOpacityNurates_(Driver *pdrive, int stage) {
         int k = ks + (q % (ke - ks + 1));
         int m = q / (ke - ks + 1);
         sum += abs_1_f_(m, isp, ifr, k, j, i);
-      }, abs_sum);
+      }, abs1_sum);
       Kokkos::parallel_reduce("nurates_mf_scat_sum", Kokkos::RangePolicy<>(DevExeSpace(), 0, ntot),
       KOKKOS_LAMBDA(const int &idx, Real &sum) {
         int q = idx;
@@ -364,8 +408,10 @@ TaskStatus Radiation::CalcOpacityNurates_(Driver *pdrive, int stage) {
         std::cout << (ifr == 0 ? "" : ", ")
                   << freq_grid_h(ifr)*code_units.EnergyConversion(nurates_units);
       }
-      std::cout << "] sum(eta_1_freq)=" << eta_sum
-                << " sum(abs_1_freq)=" << abs_sum
+      std::cout << "] sum(eta_0_freq)=" << eta0_sum
+                << " sum(eta_1_freq)=" << eta1_sum
+                << " sum(abs_0_freq)=" << abs0_sum
+                << " sum(abs_1_freq)=" << abs1_sum
                 << " sum(scat_1_freq)=" << scat_sum << std::endl;
     } else {
       const int ncell = (nmb1 + 1)*(ke - ks + 1)*(je - js + 1)*(ie - is + 1);

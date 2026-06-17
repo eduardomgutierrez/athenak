@@ -50,6 +50,7 @@ struct NuratesParams {
   bool use_decay;            // include muon decay
   bool use_BRT_brem;         // use BRT06 bremsstrahlung (instead of HR98)
   bool use_equilibrium_distribution;  // assume neutrinos in thermal equilibrium
+  bool use_kirchhoff_law;    // replace gray emissivities by kappa times equilibrium density
 
   int quad_nx;               // number of quadrature points for 1d integration
   int quad_nx_2;             // number of quadrature points for 2d integration (-1 = same)
@@ -400,11 +401,12 @@ void bns_nurates_gray(Real nb, Real temp, Real yp, Real yn,
 
   const Real unit_length    = code_units.LengthConversion(nurates_units);
   const Real unit_time      = code_units.TimeConversion(nurates_units);
-  const Real unit_num_dens  = eos_units.DensityConversion(nurates_units);
+  const Real unit_eos_num_dens  = eos_units.DensityConversion(nurates_units);
+  const Real unit_code_num_dens = code_units.DensityConversion(nurates_units);
   const Real unit_ene_dens  = code_units.EnergyDensityConversion(nurates_units);
 
   // zero outputs if below floor values
-  if ((nb * unit_num_dens < nurates_params.nb_min) ||
+  if ((nb * unit_eos_num_dens < nurates_params.nb_min) ||
       (temp < nurates_params.temp_min_mev)) {
     for (int idx = 0; idx < 4; ++idx) {
       eta_0[idx]  = 0.;
@@ -439,7 +441,7 @@ void bns_nurates_gray(Real nb, Real temp, Real yp, Real yn,
       nurates_params.use_BRT_brem ? BREM_BRT06 : BREM_HR98;
 
   // EOS quantities (convert to bns_nurates/nuclear units)
-  grey_op_params.eos_pars.nb   = nb * unit_num_dens;  // [baryon/nm^3]
+  grey_op_params.eos_pars.nb   = nb * unit_eos_num_dens;  // [baryon/nm^3]
   grey_op_params.eos_pars.temp = temp;                 // [MeV]
   grey_op_params.eos_pars.yp   = yp;                  // [dimensionless]
   grey_op_params.eos_pars.yn   = yn;                  // [dimensionless]
@@ -464,10 +466,10 @@ void bns_nurates_gray(Real nb, Real temp, Real yp, Real yn,
     // reconstruct from gray radiation moments (frequency-integrated)
     // nudens_0[isp] = number density, nudens_1[isp] = energy density
     // factor 1/2 for nux/anux: bns_nurates uses "mu or tau", gray rad uses "mu+tau"
-    grey_op_params.m1_pars.n[id_nue]  = nudens_0[0] * unit_num_dens;
-    grey_op_params.m1_pars.n[id_anue] = nudens_0[1] * unit_num_dens;
-    grey_op_params.m1_pars.n[id_nux]  = 0.5 * nudens_0[2] * unit_num_dens;
-    grey_op_params.m1_pars.n[id_anux] = 0.5 * nudens_0[3] * unit_num_dens;
+    grey_op_params.m1_pars.n[id_nue]  = nudens_0[0] * unit_code_num_dens;
+    grey_op_params.m1_pars.n[id_anue] = nudens_0[1] * unit_code_num_dens;
+    grey_op_params.m1_pars.n[id_nux]  = 0.5 * nudens_0[2] * unit_code_num_dens;
+    grey_op_params.m1_pars.n[id_anux] = 0.5 * nudens_0[3] * unit_code_num_dens;
 
     grey_op_params.m1_pars.J[id_nue]  = nudens_1[0] * unit_ene_dens;
     grey_op_params.m1_pars.J[id_anue] = nudens_1[1] * unit_ene_dens;
@@ -536,12 +538,33 @@ void bns_nurates_gray(Real nb, Real temp, Real yp, Real yn,
   //     eta_nuclear = eta_code * (unit_ene_dens / unit_time)
   //     => eta_code = eta_nuclear * unit_time / unit_ene_dens
   //
-  //   number emissivity [number_density / time]:
-  //     eta_0_nuclear = eta_0_code * (unit_num_dens / unit_time)
-  //     => eta_0_code = eta_0_nuclear * unit_time / unit_num_dens
+  //   number emissivity [code_number_density / time]:
+  //     eta_0_nuclear = eta_0_code * (unit_code_num_dens / unit_time)
+  //     => eta_0_code = eta_0_nuclear * unit_time / unit_code_num_dens
   const Real kap_to_code  = unit_length;
   const Real eta1_to_code = unit_time / unit_ene_dens;
-  const Real eta0_to_code = unit_time / unit_num_dens;
+  const Real eta0_to_code = unit_time / unit_code_num_dens;
+
+  Real eq_n_code[4] = {0., 0., 0., 0.};
+  Real eq_J_code[4] = {0., 0., 0., 0.};
+  if (nurates_params.use_kirchhoff_law) {
+    M1Quantities eq_m1_pars = {0};
+    NuDistributionParams eq_distr_pars =
+        NuEquilibriumParams(&grey_op_params.eos_pars);
+    ComputeM1DensitiesEq(&grey_op_params.eos_pars,
+                         &eq_distr_pars,
+                         &eq_m1_pars);
+
+    eq_n_code[0] = eq_m1_pars.n[id_nue] / unit_code_num_dens;
+    eq_n_code[1] = eq_m1_pars.n[id_anue] / unit_code_num_dens;
+    eq_n_code[2] = 2.0 * eq_m1_pars.n[id_nux] / unit_code_num_dens;
+    eq_n_code[3] = 2.0 * eq_m1_pars.n[id_anux] / unit_code_num_dens;
+
+    eq_J_code[0] = eq_m1_pars.J[id_nue] / unit_ene_dens;
+    eq_J_code[1] = eq_m1_pars.J[id_anue] / unit_ene_dens;
+    eq_J_code[2] = 2.0 * eq_m1_pars.J[id_nux] / unit_ene_dens;
+    eq_J_code[3] = 2.0 * eq_m1_pars.J[id_anux] / unit_ene_dens;
+  }
 
   for (int idx = 0; idx < 4; ++idx) {
     eta_0[idx]  *= eta0_to_code;
@@ -550,6 +573,11 @@ void bns_nurates_gray(Real nb, Real temp, Real yp, Real yn,
     abs_1[idx]  *= kap_to_code;
     scat_1[idx] *= kap_to_code;
     // scat_0 is set to zero above; conversion unnecessary
+
+    if (nurates_params.use_kirchhoff_law) {
+      eta_0[idx] = (abs_0[idx] > 0.0) ? abs_0[idx] * eq_n_code[idx] : eta_0[idx];
+      eta_1[idx] = (abs_1[idx] > 0.0) ? abs_1[idx] * eq_J_code[idx] : eta_1[idx];
+    }
   }
 }
 
@@ -564,7 +592,8 @@ void bns_nurates_spectral_bin(Real e_lo_code, Real e_hi_code,
                               Real nb, Real temp, Real yp, Real yn,
                               Real mu_n, Real mu_p, Real mu_e,
                               Real nudens_0[4], Real nudens_1[4],
-                              Real eta_1[4], Real abs_1[4], Real scat_1[4],
+                              Real eta_0[4], Real eta_1[4],
+                              Real abs_0[4], Real abs_1[4], Real scat_1[4],
                               NuratesParams const &nurates_params,
                               Primitive::UnitSystem &code_units,
                               Primitive::UnitSystem &eos_units) {
@@ -572,17 +601,20 @@ void bns_nurates_spectral_bin(Real e_lo_code, Real e_hi_code,
 
   const Real unit_length    = code_units.LengthConversion(nurates_units);
   const Real unit_time      = code_units.TimeConversion(nurates_units);
-  const Real unit_num_dens  = eos_units.DensityConversion(nurates_units);
+  const Real unit_eos_num_dens  = eos_units.DensityConversion(nurates_units);
+  const Real unit_code_num_dens = code_units.DensityConversion(nurates_units);
   const Real unit_ene_dens  = code_units.EnergyDensityConversion(nurates_units);
-  const Real unit_energy    = 1.0; // code_units.EnergyConversion(nurates_units);
+  const Real unit_energy    = code_units.EnergyConversion(nurates_units);
 
   for (int idx = 0; idx < 4; ++idx) {
+    eta_0[idx]  = 0.;
     eta_1[idx]  = 0.;
+    abs_0[idx]  = 0.;
     abs_1[idx]  = 0.;
     scat_1[idx] = 0.;
   }
 
-  if ((nb * unit_num_dens < nurates_params.nb_min) ||
+  if ((nb * unit_eos_num_dens < nurates_params.nb_min) ||
       (temp < nurates_params.temp_min_mev) ||
       (e_hi_code <= e_lo_code)) {
     return;
@@ -605,7 +637,7 @@ void bns_nurates_spectral_bin(Real e_lo_code, Real e_hi_code,
   grey_op_params.opacity_pars.brem_implementation  =
       nurates_params.use_BRT_brem ? BREM_BRT06 : BREM_HR98;
 
-  grey_op_params.eos_pars.nb   = nb * unit_num_dens;
+  grey_op_params.eos_pars.nb   = nb * unit_eos_num_dens;
   grey_op_params.eos_pars.temp = temp;
   grey_op_params.eos_pars.yp   = yp;
   grey_op_params.eos_pars.yn   = yn;
@@ -624,10 +656,10 @@ void bns_nurates_spectral_bin(Real e_lo_code, Real e_hi_code,
       grey_op_params.m1_pars.chi[idx] = 1./3.;
     }
   } else {
-    grey_op_params.m1_pars.n[id_nue]  = nudens_0[0] * unit_num_dens;
-    grey_op_params.m1_pars.n[id_anue] = nudens_0[1] * unit_num_dens;
-    grey_op_params.m1_pars.n[id_nux]  = 0.5 * nudens_0[2] * unit_num_dens;
-    grey_op_params.m1_pars.n[id_anux] = 0.5 * nudens_0[3] * unit_num_dens;
+    grey_op_params.m1_pars.n[id_nue]  = nudens_0[0] * unit_code_num_dens;
+    grey_op_params.m1_pars.n[id_anue] = nudens_0[1] * unit_code_num_dens;
+    grey_op_params.m1_pars.n[id_nux]  = 0.5 * nudens_0[2] * unit_code_num_dens;
+    grey_op_params.m1_pars.n[id_anux] = 0.5 * nudens_0[3] * unit_code_num_dens;
 
     grey_op_params.m1_pars.J[id_nue]  = nudens_1[0] * unit_ene_dens;
     grey_op_params.m1_pars.J[id_anue] = nudens_1[1] * unit_ene_dens;
@@ -658,18 +690,24 @@ void bns_nurates_spectral_bin(Real e_lo_code, Real e_hi_code,
     SpectralOpacities op =
         RadiationComputeSpectralOpacitiesStimulatedAbs(e, &quad, &grey_op_params);
     for (int idx = 0; idx < 4; ++idx) {
+      eta_0[idx] += w * de * kBS_FourPi_hc3 * SQR(e) * op.j[idx];
       eta_1[idx] += w * de * kBS_FourPi_hc3 * SQR(e) * e * op.j[idx];
     }
   }
 
+  eta_0[2] *= 2.;
+  eta_0[3] *= 2.;
   eta_1[2] *= 2.;
   eta_1[3] *= 2.;
 
   const Real kap_to_code  = unit_length;
+  const Real eta0_to_code = unit_time / unit_code_num_dens;
   const Real eta1_to_code = unit_time / unit_ene_dens;
 
   for (int idx = 0; idx < 4; ++idx) {
+    eta_0[idx]  *= eta0_to_code;
     eta_1[idx]  *= eta1_to_code;
+    abs_0[idx]   = op_mid.kappa[idx] * kap_to_code;
     abs_1[idx]   = op_mid.kappa[idx] * kap_to_code;
     scat_1[idx]  = op_mid.kappa_s[idx] * kap_to_code;
   }
