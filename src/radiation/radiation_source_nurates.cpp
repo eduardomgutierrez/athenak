@@ -366,7 +366,6 @@ TaskStatus Radiation::MultiFreqRadFluidCouplingNurates(Driver *pdriver, int stag
   bool &fixed_fluid_ = fixed_fluid;
   bool &affect_fluid_ = affect_fluid;
   bool &evolve_ye_ = evolve_ye;
-  int ye_source_model_ = ye_source_model;
   Real &source_Ye_min_ = source_Ye_min;
   Real &source_Ye_max_ = source_Ye_max;
   Real &source_limiter_ = source_limiter;
@@ -397,9 +396,7 @@ TaskStatus Radiation::MultiFreqRadFluidCouplingNurates(Driver *pdriver, int stag
   }
 
   Real dt_ = (pdriver->beta[stage-1])*(pmy_pack->pmesh->dt);
-  auto &eta_0_f_ = nurates_eta_0_freq;
   auto &eta_1_f_ = nurates_eta_1_freq;
-  auto &abs_0_f_ = nurates_abs_0_freq;
   auto &abs_1_f_ = nurates_abs_1_freq;
   auto &scat_1_f_ = nurates_scat_1_freq;
   Real mb_code_ = nurates_baryon_mass;
@@ -504,7 +501,6 @@ TaskStatus Radiation::MultiFreqRadFluidCouplingNurates(Driver *pdriver, int stag
     }
 
     Real m_old[4] = {0.0}; Real m_new[4] = {0.0};
-    Real dN_rad_source[4] = {0.0};
     Real dN_rad_moment[4] = {0.0};
     for (int isp=0; isp<nsp_; ++isp) {
       int sp_off = isp*nfrq_*nang_;
@@ -526,7 +522,6 @@ TaskStatus Radiation::MultiFreqRadFluidCouplingNurates(Driver *pdriver, int stag
           e_mid = (freq_scale_ == 1 && nu_tet(ifr) > 0.0) ? sqrt(nu_tet(ifr)*e_hi) :
                                                             0.5*(nu_tet(ifr) + e_hi);
         }
-        Real n_bin_old = 0.0;
         for (int iang=0; iang<=nang1; ++iang) {
           int nn = sp_off + ifr*nang_ + iang;
           Real n_0 = tc(m,0,0,k,j,i)*nh_c_.d_view(iang,0) +
@@ -557,9 +552,6 @@ TaskStatus Radiation::MultiFreqRadFluidCouplingNurates(Driver *pdriver, int stag
           Real intensity_cm_old = 4.0*M_PI*(i0_(m,nn,k,j,i)/(n0*n_0))*SQR(SQR(n0_cm));
           Real omega_cm = domega/SQR(n0_cm);
           Real e_cm = n0_cm*e_mid;
-          if (isp < 4) {
-            n_bin_old += intensity_cm_old*omega_cm/fmax(e_cm, 1.0e-100);
-          }
 
           Real vncsigma = 1.0/(n0 + (dtcsiga + dtcsigs)*n0_cm);
           Real di_cm = ((dtcsigs*jr_cm + dtcsiga*eq_j(idx) -
@@ -567,7 +559,7 @@ TaskStatus Radiation::MultiFreqRadFluidCouplingNurates(Driver *pdriver, int stag
           i0_(m,nn,k,j,i) = n0*n_0*fmax(i0_(m,nn,k,j,i)/(n0*n_0) +
                              di_cm/(4.0*M_PI*SQR(SQR(n0_cm))), 0.0);
 
-          if (isp < 4 && ye_source_model_ == 1) {
+          if (isp < 4) {
             Real intensity_cm_new = 4.0*M_PI*(i0_(m,nn,k,j,i)/(n0*n_0))*SQR(SQR(n0_cm));
             dN_rad_moment[isp] += (intensity_cm_new - intensity_cm_old)*omega_cm/
                                   fmax(e_cm, 1.0e-100);
@@ -582,13 +574,6 @@ TaskStatus Radiation::MultiFreqRadFluidCouplingNurates(Driver *pdriver, int stag
             bool apply_excision = (rad_mask_(m,k,j,i) || fabs(n_0) < n_0_floor_);
             if (apply_excision) { i0_(m,nn,k,j,i) = 0.0; }
           }
-        }
-        if (isp < 4) {
-          n_bin_old /= wght_sum;
-          Real eta0 = eta_0_f_(m, isp, ifr, k, j, i);
-          Real abs0 = abs_0_f_(m, isp, ifr, k, j, i);
-          Real n_bin_new = (n_bin_old + dt_*eta0)/(1.0 + dt_*abs0);
-          dN_rad_source[isp] += n_bin_new - n_bin_old;
         }
       }
     }
@@ -611,8 +596,8 @@ TaskStatus Radiation::MultiFreqRadFluidCouplingNurates(Driver *pdriver, int stag
       u0_(m,IM3,k,j,i) += dm3;
 
       if (evolve_ye_ && nsp_ > 1 && is_mhd_enabled_) {
-        Real dN_nue = (ye_source_model_ == 1) ? dN_rad_moment[0] : dN_rad_source[0];
-        Real dN_anue = (ye_source_model_ == 1) ? dN_rad_moment[1] : dN_rad_source[1];
+        Real dN_nue = dN_rad_moment[0];
+        Real dN_anue = dN_rad_moment[1];
         Real dDYe = mb_code_*code_num_to_eos_num_*(-dN_nue + dN_anue);
         Real cons_dens = u0_(m,IDN,k,j,i);
         if (cons_dens > 0.0) {

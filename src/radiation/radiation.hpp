@@ -123,7 +123,7 @@ class Radiation {
   bool fixed_fluid;         // flag to enable/disable fluid integration
   bool affect_fluid;        // flag to enable/disable feedback of rad field on fluid
   bool evolve_ye;           // update fluid electron fraction from neutrino sources
-  int ye_source_model;      // 0: opacity number source, 1: radiation number moment change
+  int ye_source_model;      // gray nurates only; multifrequency uses number moment change
   Real source_Ye_min;       // minimum allowed Ye for matter source update
   Real source_Ye_max;       // maximum allowed Ye for matter source update
   Real source_limiter;      // fraction of remaining Ye range allowed per source update
