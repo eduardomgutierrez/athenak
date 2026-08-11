@@ -16,12 +16,12 @@
 #if ENABLE_NURATES
 
 #include "athena.hpp"
-#include "bns_nurates.hpp"
-#include "constants.hpp"
-#include "distribution.hpp"
-#include "functions.hpp"
-#include "integration.hpp"
-#include "m1_opacities.hpp"
+#include "bns_nurates/include/bns_nurates.hpp"
+#include "bns_nurates/include/constants.hpp"
+#include "bns_nurates/include/distribution.hpp"
+#include "bns_nurates/include/functions.hpp"
+#include "bns_nurates/include/integration.hpp"
+#include "bns_nurates/include/m1_opacities.hpp"
 #include "eos/primitive-solver/eos.hpp"
 #include "eos/primitive-solver/unit_system.hpp"
 #include "radiation_fermi.hpp"
