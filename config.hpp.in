@@ -34,6 +34,9 @@
 // use bns-nurates opacity library? default=0 (false)
 #define ENABLE_NURATES @ENABLE_NURATES@
 
+// number of neutrino species evolved by radiation_m1
+#define M1_TOTAL_NUM_SPECIES @M1_TOTAL_NUM_SPECIES@
+
 // compiler options
 #define COMPILED_WITH "@COMPILER_CHOICE@"
 #define COMPILER_COMMAND "@COMPILER_COMMAND@"

@@ -23,13 +23,13 @@ struct UnitSystem {
   Real Msun; //! Solar mass
   Real MeV;  // 10^6 electronvolt
 
-  Real length;      //! Length unit
-  Real time;        //! Time unit
-  Real density;     //! Number density unit
-  Real mass;        //! Mass unit
-  Real energy;      //! Energy unit
-  Real pressure;    //! Pressure unit
-  Real temperature; //! Temperature unit
+  Real length;            //! Length unit
+  Real time;              //! Time unit
+  Real numberDensity;     //! Number density unit
+  Real mass;              //! Mass unit
+  Real energy;            //! Energy unit
+  Real pressure;          //! Pressure unit
+  Real temperature;       //! Temperature unit
   Real chemicalPotential; //! Chemical potential unit
 
   //! \defgroup conversiongroup Conversion Methods
@@ -49,8 +49,9 @@ struct UnitSystem {
     return b.length/length * time/b.time;
   }
 
-  KOKKOS_INLINE_FUNCTION constexpr Real DensityConversion(const UnitSystem& b) const {
-    return b.density/density;
+  KOKKOS_INLINE_FUNCTION constexpr
+  Real NumberDensityConversion(const UnitSystem& b) const {
+    return b.numberDensity/numberDensity;
   }
 
   KOKKOS_INLINE_FUNCTION constexpr Real MassConversion(const UnitSystem& b) const {
@@ -59,7 +60,7 @@ struct UnitSystem {
 
   KOKKOS_INLINE_FUNCTION constexpr
   Real MassDensityConversion(const UnitSystem & b) const {
-    return (b.density/density)*(b.mass/mass);
+    return (b.numberDensity/numberDensity)*(b.mass/mass);
   }
 
   KOKKOS_INLINE_FUNCTION constexpr Real EnergyConversion(const UnitSystem& b) const {
@@ -68,7 +69,7 @@ struct UnitSystem {
 
   KOKKOS_INLINE_FUNCTION constexpr
   Real EnergyDensityConversion(const UnitSystem& b) const {
-    return (b.density/density)*(b.energy/energy);
+    return (b.numberDensity/numberDensity)*(b.energy/energy);
   }
 
   KOKKOS_INLINE_FUNCTION constexpr Real EntropyConversion(const UnitSystem& b) const {

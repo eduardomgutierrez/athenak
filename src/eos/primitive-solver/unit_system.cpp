@@ -20,7 +20,7 @@ Primitive::UnitSystem Primitive::MakeCGS() {
 
     1.0, // length, cm
     1.0, // time, s
-    1.0, // density, g cm^-3
+    1.0, // number density, cm^-3
     1.0, // mass, g
     1.0, // energy, erg
     1.0, // pressure, erg/cm^3
@@ -136,7 +136,7 @@ Primitive::UnitSystem Primitive::MakeNGS() {
 
     1e7,                        // length, nm  (1 cm = 1e7 nm)
     1.0,                        // time, s
-    1e-21,                      // density, nm^-3  (1 cm^-3 = 1e-21 nm^-3)
+    1e-21,                      // number density, nm^-3  (1 cm^-3 = 1e-21 nm^-3)
     1.0,                        // mass, g
     1.0 / CGS.MeV,              // energy, MeV
     1e-21 / CGS.MeV,            // pressure, MeV/nm^3

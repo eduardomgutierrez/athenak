@@ -17,3 +17,6 @@ build*/
 *~
 *.swp
 Lorene
+
+# local convenience symlink to the sibling bns_nurates checkout
+/bns_nurates

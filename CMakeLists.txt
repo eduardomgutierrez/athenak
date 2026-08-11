@@ -186,10 +186,13 @@ endif()
 # set nurates macro (true/false)
 if(Athena_ENABLE_NURATES)
   set(ENABLE_NURATES 1)
+  # The M1 solver sizes its per-zone scratch arrays from this at compile time.
+  set(M1_TOTAL_NUM_SPECIES 4)
   message(STATUS "Compiling with bns-nurates")
   target_include_directories(athena PRIVATE ${CMAKE_SOURCE_DIR}/src/bns_nurates/include)
 else()
   set(ENABLE_NURATES 0)
+  set(M1_TOTAL_NUM_SPECIES 1)
 endif()
 
 if (${PROBLEM} STREQUAL "sgrid_bns")

@@ -98,7 +98,7 @@ TaskStatus Radiation::CalcOpacityNurates_(Driver *pdrive, int stage) {
   const Real mb = eos.GetBaryonMass();
   nurates_baryon_mass = mb;
   nurates_code_num_to_eos_num =
-      eos.GetCodeUnitSystem().DensityConversion(eos.GetEOSUnitSystem());
+      eos.GetCodeUnitSystem().NumberDensityConversion(eos.GetEOSUnitSystem());
 
   // Unit systems
   auto code_units    = eos.GetCodeUnitSystem();

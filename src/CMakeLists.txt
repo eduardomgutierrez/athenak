@@ -203,7 +203,9 @@ add_executable(
 
 # bns_nurates opacity backend for the M1 solver.  Unlike radiation/*_nurates.cpp,
 # these files have no internal #if ENABLE_NURATES guard, so they are gated here.
-if (ENABLE_NURATES)
+# NB: gate on the option, not on ENABLE_NURATES -- the latter is only set by the
+# top-level CMakeLists *after* add_subdirectory(src), so it is empty in this scope.
+if (Athena_ENABLE_NURATES)
     target_sources(athena
         PRIVATE
             radiation_m1/radiation_m1_calc_opacities_nurates.cpp

@@ -401,8 +401,8 @@ void bns_nurates_gray(Real nb, Real temp, Real yp, Real yn,
 
   const Real unit_length    = code_units.LengthConversion(nurates_units);
   const Real unit_time      = code_units.TimeConversion(nurates_units);
-  const Real unit_eos_num_dens  = eos_units.DensityConversion(nurates_units);
-  const Real unit_code_num_dens = code_units.DensityConversion(nurates_units);
+  const Real unit_eos_num_dens  = eos_units.NumberDensityConversion(nurates_units);
+  const Real unit_code_num_dens = code_units.NumberDensityConversion(nurates_units);
   const Real unit_ene_dens  = code_units.EnergyDensityConversion(nurates_units);
 
   // zero outputs if below floor values
@@ -601,8 +601,8 @@ void bns_nurates_spectral_bin(Real e_lo_code, Real e_hi_code,
 
   const Real unit_length    = code_units.LengthConversion(nurates_units);
   const Real unit_time      = code_units.TimeConversion(nurates_units);
-  const Real unit_eos_num_dens  = eos_units.DensityConversion(nurates_units);
-  const Real unit_code_num_dens = code_units.DensityConversion(nurates_units);
+  const Real unit_eos_num_dens  = eos_units.NumberDensityConversion(nurates_units);
+  const Real unit_code_num_dens = code_units.NumberDensityConversion(nurates_units);
   const Real unit_ene_dens  = code_units.EnergyDensityConversion(nurates_units);
   const Real unit_energy    = code_units.EnergyConversion(nurates_units);
 
