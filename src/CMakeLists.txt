@@ -125,6 +125,8 @@ add_executable(
         pgen/tests/shwave.cpp
         pgen/tests/rad_beam.cpp
         pgen/tests/rad_linear_wave.cpp
+        pgen/tests/rad_m1_diffusiontest.cpp
+        pgen/tests/rad_m1_velocityjump.cpp
         pgen/tests/z4c_boosted_puncture.cpp
         pgen/tests/z4c_linear_wave.cpp
 
@@ -138,7 +140,23 @@ add_executable(
         radiation/radiation_tetrad.cpp
         radiation/radiation_multi_freq.cpp
         radiation/radiation_update.cpp
-        radiation/radiation_multi_freq.cpp        
+
+        radiation_m1/radiation_m1.cpp
+        radiation_m1/radiation_m1_beams.cpp
+        radiation_m1/radiation_m1_calc_closure.cpp
+        radiation_m1/radiation_m1_calc_opacities_photons.cpp
+        radiation_m1/radiation_m1_calc_opacities_toy.cpp
+        radiation_m1/radiation_m1_fluxes.cpp
+        radiation_m1/radiation_m1_newdt.cpp
+        radiation_m1/radiation_m1_tasks.cpp
+        radiation_m1/radiation_m1_tmunu.cpp
+        radiation_m1/radiation_m1_update.cpp
+        bvals/physics/radiation_m1_bcs.cpp
+        pgen/tests/rad_m1_beams.cpp
+        pgen/tests/rad_m1_brent.cpp
+        pgen/tests/rad_m1_hybridsj.cpp
+        pgen/tests/rad_m1_latticetest.cpp
+        pgen/tests/rad_m1_spheretest.cpp
 
         shearing_box/orbital_advection.cpp
         shearing_box/orbital_advection_cc.cpp
@@ -182,6 +200,16 @@ add_executable(
         z4c/z4c_amr.cpp
         z4c/cce/cce.cpp
 )
+
+# bns_nurates opacity backend for the M1 solver.  Unlike radiation/*_nurates.cpp,
+# these files have no internal #if ENABLE_NURATES guard, so they are gated here.
+if (ENABLE_NURATES)
+    target_sources(athena
+        PRIVATE
+            radiation_m1/radiation_m1_calc_opacities_nurates.cpp
+            pgen/tests/rad_m1_singlezone.cpp
+    )
+endif()
 
 # custom problem generator to be included in compile
 # specify on command line using '-D PROBLEM=file' where 'file' is name of file in
