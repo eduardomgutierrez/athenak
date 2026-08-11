@@ -24,7 +24,7 @@
 #include "bns_nurates/include/m1_opacities.hpp"
 #include "eos/primitive-solver/eos.hpp"
 #include "eos/primitive-solver/unit_system.hpp"
-#include "radiation_m1_fermi.hpp"
+#include "radiation/radiation_fermi.hpp"
 #include "radiation_m1_params.hpp"
 
 namespace radiationm1 {

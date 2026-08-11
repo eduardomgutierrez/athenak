@@ -29,6 +29,8 @@ std::vector<QueuedTask>& NumericalRelativity::SelectQueue(TaskLocation loc) {
       return run_queue;
     case Task_End:
       return end_queue;
+    case Task_AfterTimeIntegrator:
+      return after_timeintegrator_queue;
     default:
       std::cout << "NumericalRelativity: Unknown task queue requested!\n";
       abort();
@@ -44,6 +46,8 @@ PhysicsDependency NumericalRelativity::NeedsPhysics(TaskName task) {
     return Phys_Z4c;
   } else if (task < Rad_NTASKS) {
     return Phys_Rad;
+  } else if (task < M1_NTASKS) {
+    return Phys_M1;
   } else {
     return Phys_None;
   }
@@ -59,6 +63,8 @@ bool NumericalRelativity::DependencyAvailable(PhysicsDependency dep) {
       return pmy_pack->pz4c != nullptr;
     case Phys_Rad:
       return pmy_pack->prad != nullptr;
+    case Phys_M1:
+      return pmy_pack->pradm1 != nullptr;
     default:
       std::cout << "NumericalRelativity: Unknown dependency\n";
   }
@@ -123,7 +129,7 @@ bool NumericalRelativity::AssembleNumericalRelativityTasks(
       TaskID dep(0);
       if (DependenciesMet(task, queue, dep) && !task.added) {
         task.added = true;
-        task.id = list->AddTask(task.func_, dep);
+        task.id = list->AddTask(task.func_, dep, task.name_string);
         cycle_added++;
         added++;
         /*std::cout << "Successfully added " << task.name_string << " to task list!\n"
@@ -187,6 +193,16 @@ void NumericalRelativity::AssembleNumericalRelativityTasks(
     std::cout << "NumericalRelativity: Failed to construct end TaskList!\n"
               << "  Check that there are no cyclical dependencies or missing tasks.\n";
     PrintMissingTasks(end_queue);
+    abort();
+  }
+
+  success = AssembleNumericalRelativityTasks(tl["opsplit_after_timeintegrator"],
+                                             after_timeintegrator_queue);
+  if (!success) {
+    std::cout << "NumericalRelativity: Failed to construct "
+              << "opsplit_after_timeintegrator TaskList!\n"
+              << "  Check that there are no cyclical dependencies or missing tasks.\n";
+    PrintMissingTasks(after_timeintegrator_queue);
     abort();
   }
 }

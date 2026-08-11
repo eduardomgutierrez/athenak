@@ -21,7 +21,7 @@
     #error NHISTORY > NREDUCTION in outputs.hpp
 #endif
 
-#define NOUTPUT_CHOICES 156
+#define NOUTPUT_CHOICES 167
 // choices for output variables used in <ouput> blocks in input file
 // TO ADD MORE CHOICES:
 //   - add more strings to array below, change NOUTPUT_CHOICES above appropriately
@@ -101,7 +101,11 @@ static const char *var_choice[NOUTPUT_CHOICES] = {
   "prtcl_all", "prtcl_d",
 
   // Multi-frequency radiation (153-155)
-  "radnu_coord", "radnu_fluid", "radnu_coord_fluid"
+  "radnu_coord", "radnu_fluid", "radnu_coord_fluid",
+
+  // radiation M1 (156-166)
+  "rad_m1_N", "rad_m1_E", "rad_m1_F", "rad_m1_chi", "rad_m1_eta_0", "rad_m1_abs_0",
+  "rad_m1_eta_1", "rad_m1_abs_1", "rad_m1_scat_1", "rad_m1_vel", "rad_m1_opac"
 };
 
 
@@ -251,7 +255,7 @@ class BaseTypeOutput {
   // CC output data on host with dims (n,m,k,j,i) except
   // for restarts, where dims are (m,n,k,j,i)
   HostArray5D<Real> outarray;
-  HostArray5D<Real> outarray_hyd, outarray_mhd, outarray_rad,
+  HostArray5D<Real> outarray_hyd, outarray_mhd, outarray_rad, outarray_radm1,
                     outarray_force, outarray_z4c, outarray_adm;
   HostFaceFld4D<Real> outfield;  // FC output field on host
   std::vector<int> noutmbs;   // with MPI, number of output MBs across all ranks

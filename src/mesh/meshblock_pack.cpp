@@ -27,6 +27,7 @@
 #include "diffusion/viscosity.hpp"
 #include "diffusion/resistivity.hpp"
 #include "radiation/radiation.hpp"
+#include "radiation_m1/radiation_m1.hpp"
 #include "srcterms/turb_driver.hpp"
 #include "particles/particles.hpp"
 #include "units/units.hpp"
@@ -46,6 +47,11 @@ MeshBlockPack::MeshBlockPack(Mesh *pm, int igids, int igide) :
   tl_map.insert(std::make_pair("before_stagen",std::make_shared<TaskList>()));
   tl_map.insert(std::make_pair("stagen",std::make_shared<TaskList>()));
   tl_map.insert(std::make_pair("after_stagen",std::make_shared<TaskList>()));
+  tl_map.insert(std::make_pair("opsplit_before_stagen",std::make_shared<TaskList>()));
+  tl_map.insert(std::make_pair("opsplit_stagen",std::make_shared<TaskList>()));
+  tl_map.insert(std::make_pair("opsplit_after_stagen",std::make_shared<TaskList>()));
+  tl_map.insert(std::make_pair("opsplit_after_timeintegrator",
+                               std::make_shared<TaskList>()));
 }
 
 //----------------------------------------------------------------------------------------
@@ -67,6 +73,7 @@ MeshBlockPack::~MeshBlockPack() {
   }
   if (pturb  != nullptr) {delete pturb;}
   if (prad   != nullptr) {delete prad;}
+  if (pradm1 != nullptr) {delete pradm1;}
   if (pmhd   != nullptr) {delete pmhd;}
   if (phydro != nullptr) {delete phydro;}
   if (punit  != nullptr) {delete punit;}
@@ -108,6 +115,16 @@ void MeshBlockPack::AddPhysics(ParameterInput *pin) {
     punit = new units::Units(pin);
   } else {
     punit = nullptr;
+  }
+
+  // (1.5) RADIATION M1
+  // Create gray M1 physics module.  Create tasklist.
+  if (pin->DoesBlockExist("radiation_m1")) {
+    pradm1 = new radiationm1::RadiationM1(this, pin);
+    nphysics++;
+    pradm1->AssembleRadiationM1Tasks(tl_map);
+  } else {
+    pradm1 = nullptr;
   }
 
   // (2) HYDRODYNAMICS

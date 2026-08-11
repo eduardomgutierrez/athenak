@@ -24,6 +24,7 @@
 #include "bvals/bvals.hpp"
 #include "mhd/mhd.hpp"
 #include "z4c/z4c.hpp"
+#include "radiation_m1/radiation_m1.hpp"
 #include "coordinates/adm.hpp"
 #include "z4c/tmunu.hpp"
 #include "dyn_grmhd.hpp"
@@ -169,9 +170,11 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::QueueDynGRMHDTasks() {
   using namespace mhd;  // NOLINT(build/namespaces)
   using namespace z4c;  // NOLINT(build/namespaces)
   using namespace numrel; // NOLINT(build/namespaces))
+  using namespace radiationm1; // NOLINT(build/namespaces)
   Z4c *pz4c = pmy_pack->pz4c;
   adm::ADM *padm = pmy_pack->padm;
   MHD *pmhd = pmy_pack->pmhd;
+  RadiationM1 *pradm1 = pmy_pack->pradm1;
   radiation::Radiation *prad = pmy_pack->prad;
   NumericalRelativity *pnr = pmy_pack->pnr;
 
@@ -199,6 +202,12 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::QueueDynGRMHDTasks() {
   if (pz4c != nullptr) {
     pnr->QueueTask(&DynGRMHD::SetTmunu, this, MHD_SetTmunu, "MHD_SetTmunu",
                    Task_Run, {MHD_CopyU});
+    if (pradm1 != nullptr) {
+      pnr->QueueTask(&RadiationM1::FloorAndCalcClosure, pradm1, M1_Closure,
+                     "M1_Closure", Task_Run);
+      pnr->QueueTask(&RadiationM1::SetTmunu, pradm1, M1_SetTmunu, "M1_SetTmunu",
+                     Task_Run, {MHD_SetTmunu});
+    }
   }
   pnr->QueueTask(&MHD::SendFlux, pmhd, MHD_SendFlux, "MHD_SendFlux",
                  Task_Run, {MHD_Flux});
@@ -245,6 +254,30 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::QueueDynGRMHDTasks() {
   // End task list
   pnr->QueueTask(&MHD::ClearSend, pmhd, MHD_ClearS, "MHD_ClearS", Task_End);
   pnr->QueueTask(&MHD::ClearRecv, pmhd, MHD_ClearR, "MHD_ClearR", Task_End);
+
+  // After time integrator task list.  The M1 solver is operator-split and writes u0
+  // once the integrator has finished, so the conserved variables need one more round
+  // of communication, physical BCs and con2prim before the next cycle sees them.
+  if (pradm1 != nullptr) {
+    pnr->QueueTask(&MHD::InitRecvU, pmhd, MHD_URecv, "MHD_URecv",
+                   Task_AfterTimeIntegrator);
+    pnr->QueueTask(&MHD::RestrictU, pmhd, MHD_RestU, "MHD_RestU",
+                   Task_AfterTimeIntegrator);
+    pnr->QueueTask(&MHD::SendU, pmhd, MHD_SendU, "MHD_SendU",
+                   Task_AfterTimeIntegrator, {MHD_RestU});
+    pnr->QueueTask(&MHD::RecvU, pmhd, MHD_RecvU, "MHD_RecvU",
+                   Task_AfterTimeIntegrator, {MHD_SendU});
+    pnr->QueueTask(&MHD::ApplyPhysicalBCs, pmhd, MHD_BCS, "MHD_BCS",
+                   Task_AfterTimeIntegrator, {MHD_RecvU});
+    pnr->QueueTask(&MHD::Prolongate, pmhd, MHD_Prolong, "MHD_Prolong",
+                   Task_AfterTimeIntegrator, {MHD_BCS});
+    pnr->QueueTask(&DynGRMHDPS<EOSPolicy, ErrorPolicy>::ConToPrim, this, MHD_C2P,
+                   "MHD_C2P", Task_AfterTimeIntegrator, {MHD_Prolong});
+    pnr->QueueTask(&MHD::ClearSendU, pmhd, MHD_ClearSU, "MHD_ClearSU",
+                   Task_AfterTimeIntegrator, {MHD_C2P});
+    pnr->QueueTask(&MHD::ClearRecvU, pmhd, MHD_ClearRU, "MHD_ClearRU",
+                   Task_AfterTimeIntegrator, {MHD_C2P});
+  }
 
   if (prad != nullptr) {
     // Start tasks

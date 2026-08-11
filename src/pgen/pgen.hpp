@@ -73,6 +73,16 @@ class ProblemGenerator {
   void RadiationBeam(ParameterInput *pin, const bool restart);
   void Z4cBoostedPuncture(ParameterInput *pin, const bool restart);
   void Z4cLinearWave(ParameterInput *pin, const bool restart);
+  void RadiationM1BeamTest(ParameterInput *pin, const bool restart);
+  void RadiationM1BrentTest(ParameterInput *pin, const bool restart);
+  void RadiationM1HybridsjTest(ParameterInput *pin, const bool restart);
+  void RadiationM1SphereTest(ParameterInput *pin, const bool restart);
+  void RadiationM1LatticeTest(ParameterInput *pin, const bool restart);
+  void RadiationM1DiffusionTest(ParameterInput *pin, const bool restart);
+  void RadiationM1VelocityJumpTest(ParameterInput *pin, const bool restart);
+  void RadiationM1SingleZoneTest(ParameterInput *pin, const bool restart);
+  template <class EOSPolicy, class ErrorPolicy>
+  void RadiationM1SingleZoneTest_(ParameterInput *pin, const bool restart);
 
   // Generic error output function (using difference u0-u1)
   void OutputErrors(ParameterInput *pin, Mesh *pm);

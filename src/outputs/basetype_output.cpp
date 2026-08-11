@@ -27,6 +27,7 @@
 #include "radiation/radiation.hpp"
 #include "z4c/tmunu.hpp"
 #include "z4c/z4c.hpp"
+#include "radiation_m1/radiation_m1.hpp"
 #include "srcterms/srcterms.hpp"
 #include "srcterms/turb_driver.hpp"
 #include "outputs.hpp"
@@ -192,6 +193,13 @@ BaseTypeOutput::BaseTypeOutput(ParameterInput *pin, Mesh *pm, OutputParameters o
        << "Output of Multi-Frequency Radiation moments requested in <output> block '"
        << out_params.block_name << "' but Multi-Frequency Radiation is not turned on."
        << std::endl << "Set multi_freq=true in <radiation> block to enable it" << std::endl;
+    exit(EXIT_FAILURE);
+  }
+  if ((ivar>=156) && (ivar<167) && (pm->pmb_pack->pradm1 == nullptr)) {
+    std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
+       << "Output of radiation M1 variables requested in <output> block '"
+       << out_params.block_name << "' but no RadiationM1 object has been constructed."
+       << std::endl << "Input file is likely missing a <radiation_m1> block" << std::endl;
     exit(EXIT_FAILURE);
   }
 
@@ -764,6 +772,97 @@ BaseTypeOutput::BaseTypeOutput(ParameterInput *pin, Mesh *pm, OutputParameters o
     out_params.contains_derived = true;
     out_params.n_derived += 1;
     outvars.emplace_back("pdens",0,&(derived_var));
+  }
+
+  // radiation m1 lab energy density
+  if (out_params.variable.compare("rad_m1_E") == 0) {
+    for (int nuidx = 0; nuidx < pm->pmb_pack->pradm1->nspecies; ++nuidx) {
+      outvars.emplace_back(
+          "E:" + std::to_string(nuidx),
+          radiationm1::CombinedIdx(nuidx, 0, pm->pmb_pack->pradm1->nvars),
+          &(pm->pmb_pack->pradm1->u0));
+    }
+  }
+
+  // radiation m1 lab number density
+  if (out_params.variable.compare("rad_m1_N") == 0) {
+    for (int nuidx = 0; nuidx < pm->pmb_pack->pradm1->nspecies; ++nuidx) {
+      outvars.emplace_back(
+          "N:" + std::to_string(nuidx),
+          radiationm1::CombinedIdx(nuidx, 4, pm->pmb_pack->pradm1->nvars),
+          &(pm->pmb_pack->pradm1->u0));
+    }
+  }
+
+  // radiation m1 lab momentum density
+  if (out_params.variable.compare("rad_m1_F") == 0) {
+    for (int nuidx = 0; nuidx < pm->pmb_pack->pradm1->nspecies; ++nuidx) {
+      outvars.emplace_back(
+          "Fx:" + std::to_string(nuidx),
+          radiationm1::CombinedIdx(nuidx, 1, pm->pmb_pack->pradm1->nvars),
+          &(pm->pmb_pack->pradm1->u0));
+      outvars.emplace_back(
+          "Fy:" + std::to_string(nuidx),
+          radiationm1::CombinedIdx(nuidx, 2, pm->pmb_pack->pradm1->nvars),
+          &(pm->pmb_pack->pradm1->u0));
+      outvars.emplace_back(
+          "Fz:" + std::to_string(nuidx),
+          radiationm1::CombinedIdx(nuidx, 3, pm->pmb_pack->pradm1->nvars),
+          &(pm->pmb_pack->pradm1->u0));
+    }
+  }
+
+  // radiation m1 Eddington factor
+  if (out_params.variable.compare("rad_m1_chi") == 0) {
+    for (int nuidx = 0; nuidx < pm->pmb_pack->pradm1->nspecies; ++nuidx) {
+      outvars.emplace_back("chi:" + std::to_string(nuidx), nuidx,
+                           &(pm->pmb_pack->pradm1->chi));
+    }
+  }
+
+  // radiation m1 eta_0
+  if (out_params.variable.compare("rad_m1_opac") == 0 ||
+      out_params.variable.compare("rad_m1_eta_0") == 0) {
+    for (int nuidx = 0; nuidx < pm->pmb_pack->pradm1->nspecies; ++nuidx) {
+      outvars.emplace_back("eta_0:" + std::to_string(nuidx), nuidx,
+                           &(pm->pmb_pack->pradm1->eta_0));
+    }
+  }
+
+  // radiation m1 abs_0
+  if (out_params.variable.compare("rad_m1_opac") == 0 ||
+      out_params.variable.compare("rad_m1_abs_0") == 0) {
+    for (int nuidx = 0; nuidx < pm->pmb_pack->pradm1->nspecies; ++nuidx) {
+      outvars.emplace_back("abs_0:" + std::to_string(nuidx), nuidx,
+                           &(pm->pmb_pack->pradm1->abs_0));
+    }
+  }
+
+  // radiation m1 eta_1
+  if (out_params.variable.compare("rad_m1_opac") == 0 ||
+      out_params.variable.compare("rad_m1_eta_1") == 0) {
+    for (int nuidx = 0; nuidx < pm->pmb_pack->pradm1->nspecies; ++nuidx) {
+      outvars.emplace_back("eta_1:" + std::to_string(nuidx), nuidx,
+                           &(pm->pmb_pack->pradm1->eta_1));
+    }
+  }
+
+  // radiation m1 abs_1
+  if (out_params.variable.compare("rad_m1_opac") == 0 ||
+      out_params.variable.compare("rad_m1_abs_1") == 0) {
+    for (int nuidx = 0; nuidx < pm->pmb_pack->pradm1->nspecies; ++nuidx) {
+      outvars.emplace_back("abs_1:" + std::to_string(nuidx), nuidx,
+                           &(pm->pmb_pack->pradm1->abs_1));
+    }
+  }
+
+  // radiation m1 scat_1
+  if (out_params.variable.compare("rad_m1_opac") == 0 ||
+      out_params.variable.compare("rad_m1_scat_1") == 0) {
+    for (int nuidx = 0; nuidx < pm->pmb_pack->pradm1->nspecies; ++nuidx) {
+      outvars.emplace_back("scat_1:" + std::to_string(nuidx), nuidx,
+                           &(pm->pmb_pack->pradm1->scat_1));
+    }
   }
 
   // initialize vector containing number of output MBs per rank

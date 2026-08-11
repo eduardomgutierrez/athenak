@@ -23,6 +23,7 @@
 #include "dyn_grmhd/dyn_grmhd.hpp"
 #include "ion-neutral/ion-neutral.hpp"
 #include "radiation/radiation.hpp"
+#include "radiation_m1/radiation_m1.hpp"
 #include "driver.hpp"
 
 #if MPI_PARALLEL_ENABLED
@@ -318,6 +319,7 @@ void Driver::Initialize(Mesh *pmesh, ParameterInput *pin, Outputs *pout, bool re
   mhd::MHD *pmhd = pmesh->pmb_pack->pmhd;
   radiation::Radiation *prad = pmesh->pmb_pack->prad;
   z4c::Z4c *pz4c = pmesh->pmb_pack->pz4c;
+  radiationm1::RadiationM1 *pradm1 = pmesh->pmb_pack->pradm1;
   if (time_evolution != TimeEvolution::tstatic) {
     if (phydro != nullptr) {
       (void) pmesh->pmb_pack->phydro->NewTimeStep(this, nexp_stages);
@@ -330,6 +332,9 @@ void Driver::Initialize(Mesh *pmesh, ParameterInput *pin, Outputs *pout, bool re
     }
     if (pz4c != nullptr) {
       (void) pmesh->pmb_pack->pz4c->NewTimeStep(this, nexp_stages);
+    }
+    if (pradm1 != nullptr) {
+      (void) pmesh->pmb_pack->pradm1->NewTimeStep(this, nexp_stages);
     }
 
     pmesh->NewTimeStep(tlim);
@@ -404,6 +409,24 @@ void Driver::Execute(Mesh *pmesh, ParameterInput *pin, Outputs *pout) {
 
       // Work after time integrator indicated by "1" in stage
       ExecuteTaskList(pmesh, "after_timeintegrator", 1);
+#if MPI_PARALLEL_ENABLED
+      (void)MPI_Barrier(MPI_COMM_WORLD);
+#endif
+      // Operator-split stages, used by the M1 radiation solver
+      if (opsplit) {
+        for (int stage=1; stage<=(nopsplit_stages); ++stage) {
+          ExecuteTaskList(pmesh, "opsplit_before_stagen", stage);
+          ExecuteTaskList(pmesh, "opsplit_stagen", stage);
+          ExecuteTaskList(pmesh, "opsplit_after_stagen", stage);
+        }
+#if MPI_PARALLEL_ENABLED
+        (void)MPI_Barrier(MPI_COMM_WORLD);
+#endif
+        ExecuteTaskList(pmesh, "opsplit_after_timeintegrator", 1);
+#if MPI_PARALLEL_ENABLED
+        (void)MPI_Barrier(MPI_COMM_WORLD);
+#endif
+      }
 
       // Work outside of TaskLists:
       // increment time, ncycle, etc.
@@ -640,6 +663,22 @@ void Driver::InitBoundaryValuesAndPrimitives(Mesh *pm) {
     (void) prad->RecvI(this, 0);
     (void) prad->ApplyPhysicalBCs(this, 0);
     (void) prad->Prolongate(this, 0);
+  }
+
+  // Initialize radiation M1: ghost zones and moments (everywhere)
+  // DOES NOT include communications for shearing box boundaries
+  radiationm1::RadiationM1 *pradm1 = pm->pmb_pack->pradm1;
+  if (pradm1 != nullptr) {
+    (void) pradm1->RestrictU(this, 0);
+    (void) pradm1->InitRecv(this, -1);  // stage < 0 suppresses InitFluxRecv
+    (void) pradm1->SendU(this, 0);
+    (void) pradm1->ClearSend(this, -1); // stage = -1 only clear SendU
+    (void) pradm1->ClearRecv(this, -1); // stage = -1 only clear RecvU
+    (void) pradm1->RecvU(this, 0);
+    (void) pradm1->ClearSend(this, -4); // stage = -4 only clear SendU_Shr
+    (void) pradm1->ClearRecv(this, -4); // stage = -4 only clear RecvU_Shr
+    (void) pradm1->ApplyPhysicalBCs(this, 0);
+    (void) pradm1->Prolongate(this, 0);
   }
 
   return;
