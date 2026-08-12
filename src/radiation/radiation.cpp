@@ -423,16 +423,8 @@ Radiation::Radiation(MeshBlockPack *ppack, ParameterInput *pin) :
     nurates_params.use_BRT_brem        = pin->GetOrAddBoolean("bns_nurates","use_BRT_brem",false);
     nurates_params.use_equilibrium_distribution =
         pin->GetOrAddBoolean("bns_nurates","use_equilibrium_distribution",true);
-    if (pin->DoesParameterExist("bns_nurates", "use_kirchhoff_law")) {
-      nurates_params.use_kirchhoff_law =
-          pin->GetBoolean("bns_nurates", "use_kirchhoff_law");
-    } else if (pin->DoesParameterExist("bns_nurates", "use_kirchoff_law")) {
-      nurates_params.use_kirchhoff_law =
-          pin->GetBoolean("bns_nurates", "use_kirchoff_law");
-    } else {
-      nurates_params.use_kirchhoff_law =
-          pin->GetOrAddBoolean("bns_nurates", "use_kirchhoff_law", true);
-    }
+    nurates_params.use_kirchhoff_law =
+        pin->GetOrAddBoolean("bns_nurates", "use_kirchhoff_law", true);
     if (!multi_freq && !nurates_params.use_equilibrium_distribution) {
       std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
                 << std::endl
