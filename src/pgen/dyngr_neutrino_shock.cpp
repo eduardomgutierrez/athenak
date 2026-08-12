@@ -428,11 +428,21 @@ void NeutrinoDominatedShock(Mesh *pmesh, ParameterInput* pin) {
       // heavy flavours are carried as two species, each half the total
       Real nuJ[4] = {e_nue, e_anue, 0.5*e_nux, 0.5*e_nux};
 
-      // boost the isotropic fluid-frame intensity into the coordinate frame
+      // Boost the isotropic fluid-frame intensity into the coordinate frame.
+      // The fluid streams inward from both sides -- w0_(IVX) carries the same
+      // (x > 0 ? -1 : 1) sign flip, and so does the M1 branch's flux -- so the
+      // boost velocity must flip too, or the radiation is initialised moving
+      // against the fluid over half the domain.
+      Real &x1min = size.d_view(m).x1min;
+      Real &x1max = size.d_view(m).x1max;
+      int nx1 = indcs.nx1;
+      Real x = CellCenterX(i-is, nx1, x1min, x1max);
+      const Real vsign = (x > 0.0) ? -1.0 : 1.0;
+
       Real u_tet[4];
       for (int a = 0; a < 4; ++a) {
         u_tet[a] = norm_to_tet(m,a,0,k,j,i)*w_lorentz +
-                   norm_to_tet(m,a,1,k,j,i)*w_lorentz*v3x +
+                   norm_to_tet(m,a,1,k,j,i)*w_lorentz*v3x*vsign +
                    norm_to_tet(m,a,2,k,j,i)*w_lorentz*v3y +
                    norm_to_tet(m,a,3,k,j,i)*w_lorentz*v3z;
       }

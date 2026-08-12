@@ -96,6 +96,24 @@ void ProblemGenerator::RadiationM1SingleZoneTest_(ParameterInput *pin,
   Real vy = pin->GetReal("problem", "vy");
   Real vz = pin->GetReal("problem", "vz");
   Real ye = pin->GetReal("problem", "Y_e");
+  // Chiral imbalance seed and a uniform seed field, for the chiral tests.  Both
+  // default to zero, so the existing equilibration test is unaffected.  Names
+  // and semantics match rad_neutrino_singlezone.cpp so the same physical setup
+  // can be driven through either solver.
+  Real y5 = pin->GetOrAddReal("problem", "Y_5", 0.0);
+  Real bx = pin->GetOrAddReal("problem", "bx", 0.0);
+  Real by = pin->GetOrAddReal("problem", "by", 0.0);
+  Real bz = pin->GetOrAddReal("problem", "bz", 0.0);
+  const int nscalars_ = pmbp->pmhd->nscalars;
+  if (y5 != 0.0 && nscalars_ < 2) {
+    std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+              << std::endl
+              << "problem/Y_5 requires mhd/nscalars >= 2." << std::endl;
+    std::exit(EXIT_FAILURE);
+  }
+  auto &b0_ = pmbp->pmhd->b0;
+  auto &bcc0_ = pmbp->pmhd->bcc0;
+  int n1_ = n1, n2_ = n2, n3_ = n3;
 
   Real mb{};
   Primitive::EOS<EOSPolicy, ErrorPolicy> &eos =
@@ -137,6 +155,20 @@ void ProblemGenerator::RadiationM1SingleZoneTest_(ParameterInput *pin,
         w0_(m, IVZ, k, j, i) = vz * w_lorentz;
         w0_(m, IPR, k, j, i) = eos.GetPressure(nb, temp, &ye_);
         w0_(m, IYF, k, j, i) = ye;
+        if (nscalars_ > 1) {
+          w0_(m, IYF + 1, k, j, i) = y5;
+        }
+
+        // uniform field: divergence-free by construction
+        bcc0_(m, IBX, k, j, i) = bx;
+        bcc0_(m, IBY, k, j, i) = by;
+        bcc0_(m, IBZ, k, j, i) = bz;
+        b0_.x1f(m, k, j, i) = bx;
+        b0_.x2f(m, k, j, i) = by;
+        b0_.x3f(m, k, j, i) = bz;
+        if (i == n1_ - 1) b0_.x1f(m, k, j, i + 1) = bx;
+        if (j == n2_ - 1) b0_.x2f(m, k, j + 1, i) = by;
+        if (k == n3_ - 1) b0_.x3f(m, k + 1, j, i) = bz;
 
         for (int nuidx = 0; nuidx < nspecies_; ++nuidx) {
           uradm1_(m, radiationm1::CombinedIdx(nuidx, M1_E_IDX, m1_nvars_), k, j, i) = m1_params_.rad_E_floor;
