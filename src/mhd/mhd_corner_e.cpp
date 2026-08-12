@@ -14,6 +14,7 @@
 #include "diffusion/resistivity.hpp"
 #include "mhd.hpp"
 
+#include "mhd/chiral_dynamo.hpp"
 #include "coordinates/coordinates.hpp"
 #include "coordinates/cartesian_ks.hpp"
 #include "coordinates/cell_locations.hpp"
@@ -155,6 +156,7 @@ TaskStatus MHD::CornerE(Driver *pdriver, int stage) {
     // chiral dynamo correction (2D, dynGRMHD only)
     if (chiral_dynamo) {
       auto &adm = pmy_pack->padm->adm;
+      constexpr Real alpha_em = 1.0/137.0;
       par_for("e_cc_2d_chiral", DevExeSpace(), 0, nmb1, js-1, je+1, is-1, ie+1,
       KOKKOS_LAMBDA(int m, int j, int i) {
         const Real ux = w0_(m,IVX,ks,j,i);
@@ -173,20 +175,12 @@ TaskStatus MHD::CornerE(Driver *pdriver, int stage) {
         const Real by = bcc_(m,IBY,ks,j,i);
         const Real bz = bcc_(m,IBZ,ks,j,i);
 
-        // Dynamo coefficient xi
-        constexpr Real alpha_em  = 1.0/137.0;
-        const Real xi_coeff  = -(4.0/M_PI) * SQR(alpha_em) * log(1.0/alpha_em);
-        const Real Y5 = w0_(m, IYF+1, ks, j, i);
-        const Real Ye = w0_(m, IYF,   ks, j, i);
-        const Real xi = (Ye != 0.0) ? xi_coeff * cbrt(Y5/Ye) : 0.0;
+        const Real xi = chiral::Xi(w0_(m,IYF+1,ks,j,i), w0_(m,IYF,ks,j,i), alpha_em);
 
-        // v^2 = 1 - 1/W^2 in the Valencia formulation
-        const Real v2sq  = 1.0 - SQR(iW);
-        const Real xi2   = SQR(xi);
-        const Real D     = 1.0/(1.0 + xi2*v2sq);
-        const Real vdotB = v1*bx + v2*by + v3*bz;
-
-        e3cc_(m,ks,j,i) = D*(-(1+xi2)*(v1*by - v2*bx) + xi*(1-v2sq)*bz + xi*(xi2+1)*vdotB*v3);
+        // in 2D only e3 enters the CT update; e1/e2 are computed and dropped
+        Real e1_loc, e2_loc, e3_loc;
+        chiral::OhmsLawEMF(xi, iW, v1, v2, v3, bx, by, bz, e1_loc, e2_loc, e3_loc);
+        e3cc_(m,ks,j,i) = e3_loc;
       });
     }
 
@@ -358,6 +352,7 @@ TaskStatus MHD::CornerE(Driver *pdriver, int stage) {
     // chiral dynamo correction (3D, dynGRMHD only)
     if (chiral_dynamo) {
       auto &adm = pmy_pack->padm->adm;
+      constexpr Real alpha_em = 1.0/137.0;
       par_for("e_cc_3d_chiral", DevExeSpace(), 0, nmb1, ks-1, ke+1, js-1, je+1, is-1, ie+1,
       KOKKOS_LAMBDA(int m, int k, int j, int i) {
         const Real ux = w0_(m,IVX,k,j,i);
@@ -376,22 +371,13 @@ TaskStatus MHD::CornerE(Driver *pdriver, int stage) {
         const Real by = bcc_(m,IBY,k,j,i);
         const Real bz = bcc_(m,IBZ,k,j,i);
 
-        // Dynamo coefficient xi
-        constexpr Real alpha_em  = 1.0/137.0;
-        const Real xi_coeff  = -(4.0/M_PI) * SQR(alpha_em) * log(1.0/alpha_em);
-        const Real Y5 = w0_(m, IYF+1, k, j, i);
-        const Real Ye = w0_(m, IYF,   k, j, i);
-        const Real xi = (Ye != 0.0) ? xi_coeff * cbrt(Y5/Ye) : 0.0;
+        const Real xi = chiral::Xi(w0_(m,IYF+1,k,j,i), w0_(m,IYF,k,j,i), alpha_em);
 
-        // v^2 = 1 - 1/W^2 in the Valencia formulation
-        const Real v2sq  = 1.0 - SQR(iW);
-        const Real xi2   = SQR(xi);
-        const Real D     = 1.0/(1.0 + xi2*v2sq);
-        const Real vdotB = v1*bx + v2*by + v3*bz;
-
-        e1cc_(m,k,j,i) = D*(-(1+xi2)*(v2*bz - v3*by) + xi*(1-v2sq)*bx + xi*(xi2+1)*vdotB*v1);
-        e2cc_(m,k,j,i) = D*(-(1+xi2)*(v3*bx - v1*bz) + xi*(1-v2sq)*by + xi*(xi2+1)*vdotB*v2);
-        e3cc_(m,k,j,i) = D*(-(1+xi2)*(v1*by - v2*bx) + xi*(1-v2sq)*bz + xi*(xi2+1)*vdotB*v3);
+        Real e1_loc, e2_loc, e3_loc;
+        chiral::OhmsLawEMF(xi, iW, v1, v2, v3, bx, by, bz, e1_loc, e2_loc, e3_loc);
+        e1cc_(m,k,j,i) = e1_loc;
+        e2cc_(m,k,j,i) = e2_loc;
+        e3cc_(m,k,j,i) = e3_loc;
       });
     }
 
