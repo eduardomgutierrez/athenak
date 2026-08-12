@@ -314,7 +314,10 @@ class AthenaPointTensor<T, sym, ndim, 1> {
   }
 
  private:
-  Real data_[3];
+  // Must be sized from ndim, not hard-coded: ZeroClear() and every M1 kernel
+  // index this up to ndim-1, and the radiation/M1 modules instantiate the
+  // ndim=4 spacetime-vector form (u_u, u_d, v_u, v_d, n_d, F_d, beta_u).
+  Real data_[ndim];
 };
 
 //----------------------------------------------------------------------------------------
