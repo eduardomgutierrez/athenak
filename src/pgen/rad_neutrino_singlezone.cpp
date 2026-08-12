@@ -91,6 +91,18 @@ void SingleZoneImpl(Mesh *pmesh, ParameterInput *pin, const bool restart) {
   Real vz = pin->GetOrAddReal("problem", "vz", 0.0);
   Real ye = pin->GetReal("problem", "Y_e");
   Real erad = pin->GetOrAddReal("problem", "erad", 0.0);
+  // Chiral imbalance seed and a uniform seed field, for the chiral unit tests.
+  // Both default to zero, so the plain equilibration test is unaffected.
+  Real y5 = pin->GetOrAddReal("problem", "Y_5", 0.0);
+  Real bx = pin->GetOrAddReal("problem", "bx", 0.0);
+  Real by = pin->GetOrAddReal("problem", "by", 0.0);
+  Real bz = pin->GetOrAddReal("problem", "bz", 0.0);
+  if (y5 != 0.0 && pmbp->pmhd->nscalars < 2) {
+    std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+              << std::endl
+              << "problem/Y_5 requires mhd/nscalars >= 2." << std::endl;
+    std::exit(EXIT_FAILURE);
+  }
   Real wlor = 1.0/std::sqrt(1.0 - vx*vx - vy*vy - vz*vz);
 
   auto &eos =
@@ -102,6 +114,7 @@ void SingleZoneImpl(Mesh *pmesh, ParameterInput *pin, const bool restart) {
   auto &w0 = pmbp->pmhd->w0;
   auto &b0 = pmbp->pmhd->b0;
   auto &bcc0 = pmbp->pmhd->bcc0;
+  const int nscalars_ = pmbp->pmhd->nscalars;
   par_for("pgen_neutrino_singlezone_mhd", DevExeSpace(), 0, nmb1, 0, n3 - 1, 0,
           n2 - 1, 0, n1 - 1,
           KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
@@ -112,16 +125,20 @@ void SingleZoneImpl(Mesh *pmesh, ParameterInput *pin, const bool restart) {
             w0(m, IVZ, k, j, i) = wlor*vz;
             w0(m, IPR, k, j, i) = eos.GetPressure(nb, temp, &ye_);
             w0(m, IYF, k, j, i) = ye;
+            if (nscalars_ > 1) {
+              w0(m, IYF + 1, k, j, i) = y5;
+            }
 
-            bcc0(m, IBX, k, j, i) = 0.0;
-            bcc0(m, IBY, k, j, i) = 0.0;
-            bcc0(m, IBZ, k, j, i) = 0.0;
-            b0.x1f(m, k, j, i) = 0.0;
-            b0.x2f(m, k, j, i) = 0.0;
-            b0.x3f(m, k, j, i) = 0.0;
-            if (i == n1 - 1) b0.x1f(m, k, j, i + 1) = 0.0;
-            if (j == n2 - 1) b0.x2f(m, k, j + 1, i) = 0.0;
-            if (k == n3 - 1) b0.x3f(m, k + 1, j, i) = 0.0;
+            // uniform field: divergence-free by construction
+            bcc0(m, IBX, k, j, i) = bx;
+            bcc0(m, IBY, k, j, i) = by;
+            bcc0(m, IBZ, k, j, i) = bz;
+            b0.x1f(m, k, j, i) = bx;
+            b0.x2f(m, k, j, i) = by;
+            b0.x3f(m, k, j, i) = bz;
+            if (i == n1 - 1) b0.x1f(m, k, j, i + 1) = bx;
+            if (j == n2 - 1) b0.x2f(m, k, j + 1, i) = by;
+            if (k == n3 - 1) b0.x3f(m, k + 1, j, i) = bz;
           });
 
   if (pmbp->padm == nullptr) {
