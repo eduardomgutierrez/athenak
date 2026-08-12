@@ -131,6 +131,7 @@ add_executable(
         pgen/tests/z4c_linear_wave.cpp
 
         radiation/radiation.cpp
+        radiation/radiation_chiral.cpp
         radiation/radiation_fluxes.cpp
         radiation/radiation_newdt.cpp
         radiation/radiation_source.cpp

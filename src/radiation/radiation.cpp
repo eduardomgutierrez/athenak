@@ -16,6 +16,7 @@
 #include "parameter_input.hpp"
 #include "mesh/mesh.hpp"
 #include "eos/eos.hpp"
+#include "mhd/mhd.hpp"
 #include "srcterms/srcterms.hpp"
 #include "bvals/bvals.hpp"
 #include "coordinates/coordinates.hpp"
@@ -209,6 +210,45 @@ Radiation::Radiation(MeshBlockPack *ppack, ParameterInput *pin) :
     source_Ye_min = pin->GetOrAddReal("radiation", "source_Ye_min", 0.0);
     source_Ye_max = pin->GetOrAddReal("radiation", "source_Ye_max", 0.6);
     source_limiter = pin->GetOrAddReal("radiation", "source_limiter", 0.5);
+
+    // Chiral magnetic effect.  Names deliberately match <radiation_m1> so that
+    // the same physics reads the same way in both solvers' input files.
+    backreact_chiral = pin->GetOrAddBoolean("radiation", "backreact_chiral", false);
+    chiral_gamma_m = pin->GetOrAddBoolean("radiation", "chiral_gamma_m", true);
+
+    if (backreact_chiral) {
+      // Y5 lives in the second passive scalar slot, IYF+1, and the Gamma_m /
+      // E.B kernel needs the ADM metric and a magnetic field.
+      // MHD is constructed before Radiation in MeshBlockPack::AddPhysics, so
+      // pmhd is already available here.
+      if (pmy_pack->pmhd == nullptr) {
+        std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+                  << std::endl
+                  << "radiation/backreact_chiral requires MHD." << std::endl;
+        std::exit(EXIT_FAILURE);
+      }
+      if (pmy_pack->pmhd->nscalars < 2) {
+        std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+                  << std::endl
+                  << "radiation/backreact_chiral requires mhd/nscalars >= 2 "
+                  << "(slot 0 is Ye, slot 1 is Y5)." << std::endl;
+        std::exit(EXIT_FAILURE);
+      }
+      if (!pin->DoesBlockExist("adm") && !pin->DoesBlockExist("z4c")) {
+        std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+                  << std::endl
+                  << "radiation/backreact_chiral requires dynamical GRMHD "
+                  << "(<adm> or <z4c> block)." << std::endl;
+        std::exit(EXIT_FAILURE);
+      }
+      if (!evolve_ye) {
+        std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+                  << std::endl
+                  << "radiation/backreact_chiral requires evolve_ye, since Y5 "
+                  << "is sourced by the same weak reactions as Ye." << std::endl;
+        std::exit(EXIT_FAILURE);
+      }
+    }
 
   // multi-frequency radiation
     if (multi_freq) {

@@ -54,6 +54,7 @@ struct RadiationTaskIDs {
   TaskID hyd_src;
   TaskID rad_calcop;   // nurates opacity calculation
   TaskID rad_coupl;
+  TaskID rad_chiral;   // chiral Gamma_m sink + E.B anomaly source
   TaskID rad_resti;
   TaskID hyd_restu;
   TaskID mhd_restu;
@@ -127,6 +128,8 @@ class Radiation {
   Real source_Ye_min;       // minimum allowed Ye for matter source update
   Real source_Ye_max;       // maximum allowed Ye for matter source update
   Real source_limiter;      // fraction of remaining Ye range allowed per source update
+  bool backreact_chiral;    // source the chiral imbalance Y5 from the weak reactions
+  bool chiral_gamma_m;      // apply the chirality-flip sink and the E.B anomaly source
   Real arad;                // radiation constant
   Real kappa_a;             // constant Rosseland mean absorption coefficient
   Real kappa_s;             // constant scattering coefficient
@@ -230,6 +233,12 @@ class Radiation {
   template <class EOSPolicy, class ErrorPolicy>
   TaskStatus CalcOpacityNurates_(Driver *d, int stage);
 #endif
+  // chiral magnetic effect: Gamma_m sink + E.B anomaly source for Y5.  Not
+  // gated on ENABLE_NURATES -- it needs only the EOS, MHD and ADM.  (The Y5
+  // URCA source lives with the Ye update in radiation_source_nurates.cpp.)
+  TaskStatus ChiralSources(Driver *d, int stage);
+  template <class EOSPolicy, class ErrorPolicy>
+  TaskStatus ChiralSources_(Driver *d, int stage);
   TaskStatus RestrictI(Driver *d, int stage);
   TaskStatus SendI(Driver *d, int stage);
   TaskStatus RecvI(Driver *d, int stage);

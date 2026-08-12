@@ -54,6 +54,7 @@ TaskStatus Radiation::RadFluidCouplingNurates(Driver *pdriver, int stage) {
   Real &source_Ye_min_ = source_Ye_min;
   Real &source_Ye_max_ = source_Ye_max;
   Real &source_limiter_ = source_limiter;
+  bool &backreact_chiral_ = backreact_chiral;
   bool is_dyngr = (pmy_pack->pdyngr != nullptr);
 
   // Extract coordinate/excision data
@@ -327,7 +328,16 @@ TaskStatus Radiation::RadFluidCouplingNurates(Driver *pdriver, int stage) {
           }
           Real ye_new = ye_old + raw_dDYe/cons_dens;
           ye_new = fmin(fmax(ye_new, source_Ye_min_), source_Ye_max_);
-          u0_(m,IYF,k,j,i) += cons_dens*(ye_new - ye_old);
+          Real dDYe_applied = cons_dens*(ye_new - ye_old);
+          u0_(m,IYF,k,j,i) += dDYe_applied;
+          // The weak reactions that convert protons to neutrons also flip
+          // electron chirality, so the chiral imbalance Y5 is sourced with the
+          // opposite sign to Ye.  Using the increment that was actually applied
+          // means Y5 inherits the source_limiter / source_Ye_min / source_Ye_max
+          // protections for free.
+          if (backreact_chiral_) {
+            u0_(m,IYF+1,k,j,i) -= dDYe_applied;
+          }
         }
       }
     }
@@ -369,6 +379,7 @@ TaskStatus Radiation::MultiFreqRadFluidCouplingNurates(Driver *pdriver, int stag
   Real &source_Ye_min_ = source_Ye_min;
   Real &source_Ye_max_ = source_Ye_max;
   Real &source_limiter_ = source_limiter;
+  bool &backreact_chiral_ = backreact_chiral;
   bool is_dyngr = (pmy_pack->pdyngr != nullptr);
 
   auto &coord = pmy_pack->pcoord->coord_data;
@@ -616,7 +627,12 @@ TaskStatus Radiation::MultiFreqRadFluidCouplingNurates(Driver *pdriver, int stag
           }
           Real ye_new = ye_old + dDYe/cons_dens;
           ye_new = fmin(fmax(ye_new, source_Ye_min_), source_Ye_max_);
-          u0_(m,IYF,k,j,i) += cons_dens*(ye_new - ye_old);
+          Real dDYe_applied = cons_dens*(ye_new - ye_old);
+          u0_(m,IYF,k,j,i) += dDYe_applied;
+          // Y5 mirrors the applied Ye increment; see the grey path above.
+          if (backreact_chiral_) {
+            u0_(m,IYF+1,k,j,i) -= dDYe_applied;
+          }
         }
       }
     }

@@ -76,7 +76,8 @@ void Radiation::AssembleRadTasks(std::map<std::string, std::shared_ptr<TaskList>
       id.rad_coupl = tl["stagen"]->AddTask(&Radiation::MultiFreqRadFluidCoupling,this,id.mhd_ct);
     }
     }
-    id.rad_resti = tl["stagen"]->AddTask(&Radiation::RestrictI, this, id.rad_coupl);
+    id.rad_chiral = tl["stagen"]->AddTask(&Radiation::ChiralSources, this, id.rad_coupl);
+    id.rad_resti = tl["stagen"]->AddTask(&Radiation::RestrictI, this, id.rad_chiral);
     id.rad_sendi = tl["stagen"]->AddTask(&Radiation::SendI, this, id.rad_resti);
     id.rad_recvi = tl["stagen"]->AddTask(&Radiation::RecvI, this, id.rad_sendi);
     id.mhd_restu = tl["stagen"]->AddTask(&mhd::MHD::RestrictU, pmhd, id.rad_recvi);
@@ -134,7 +135,8 @@ void Radiation::AssembleRadTasks(std::map<std::string, std::shared_ptr<TaskList>
       id.rad_coupl = tl["stagen"]->AddTask(&Radiation::MultiFreqRadFluidCoupling,this,id.hyd_src);
     }
     }
-    id.rad_resti = tl["stagen"]->AddTask(&Radiation::RestrictI, this, id.rad_coupl);
+    id.rad_chiral = tl["stagen"]->AddTask(&Radiation::ChiralSources, this, id.rad_coupl);
+    id.rad_resti = tl["stagen"]->AddTask(&Radiation::RestrictI, this, id.rad_chiral);
     id.rad_sendi = tl["stagen"]->AddTask(&Radiation::SendI, this, id.rad_resti);
     id.rad_recvi = tl["stagen"]->AddTask(&Radiation::RecvI, this, id.rad_sendi);
     id.hyd_restu = tl["stagen"]->AddTask(&hydro::Hydro::RestrictU, phyd, id.rad_recvi);
@@ -185,7 +187,8 @@ void Radiation::AssembleRadTasks(std::map<std::string, std::shared_ptr<TaskList>
       id.rad_coupl = tl["stagen"]->AddTask(&Radiation::MultiFreqRadFluidCoupling,this,id.rad_src);
     }
     }
-    id.rad_resti = tl["stagen"]->AddTask(&Radiation::RestrictI, this, id.rad_coupl);
+    id.rad_chiral = tl["stagen"]->AddTask(&Radiation::ChiralSources, this, id.rad_coupl);
+    id.rad_resti = tl["stagen"]->AddTask(&Radiation::RestrictI, this, id.rad_chiral);
     id.rad_sendi = tl["stagen"]->AddTask(&Radiation::SendI, this, id.rad_resti);
     id.rad_recvi = tl["stagen"]->AddTask(&Radiation::RecvI, this, id.rad_sendi);
     id.bcs       = tl["stagen"]->AddTask(

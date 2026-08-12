@@ -101,6 +101,7 @@ enum TaskName {
   Rad_AddSrc,      // beam/user source terms (modifies i0)
   Rad_CalcOpac,    // nurates opacity calculation (fills per-cell opacity arrays)
   Rad_Coupl,       // radiation-fluid coupling (modifies both i0 and u0)
+  Rad_Chiral,      // chiral Gamma_m sink + E.B anomaly source (modifies u0)
   Rad_RestI,
   Rad_SendI,
   Rad_RecvI,

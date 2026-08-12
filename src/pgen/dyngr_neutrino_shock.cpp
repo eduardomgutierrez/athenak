@@ -30,6 +30,8 @@
 #include "mesh/mesh.hpp"
 #include "mhd/mhd.hpp"
 #include "parameter_input.hpp"
+#include "geodesic-grid/geodesic_grid.hpp"
+#include "radiation/radiation.hpp"
 #include "radiation_m1/radiation_m1.hpp"
 #include "radiation_m1/radiation_m1_helpers.hpp"
 #ifdef ENABLE_NURATES
@@ -92,13 +94,22 @@ void NeutrinoDominatedShock(Mesh *pmesh, ParameterInput* pin) {
   // Get the EOS and set units to CGS
   MeshBlockPack* pmbp = pmesh->pmb_pack;
   const bool has_m1 = (pmbp->pradm1 != nullptr);
+  const bool has_multifreq = (pmbp->prad != nullptr);
 
-  if (has_m1) {
+  if (has_m1 && has_multifreq) {
+    std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+              << std::endl
+              << "dyngr_neutrino_shock: enable either <radiation_m1> or "
+                 "<radiation>, not both." << std::endl;
+    std::exit(EXIT_FAILURE);
+  }
+
+  if (has_m1 || has_multifreq) {
 #ifndef ENABLE_NURATES
     std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
               << std::endl
               << "dyngr_neutrino_shock pgen requires ENABLE_NURATES=ON to "
-                 "initialize neutrinos in LTE when M1 radiation is enabled."
+                 "initialize neutrinos in LTE."
               << std::endl;
     std::exit(EXIT_FAILURE);
 #endif  // ENABLE_NURATES
@@ -359,6 +370,92 @@ void NeutrinoDominatedShock(Mesh *pmesh, ParameterInput* pin) {
         uradm1_(m, radiationm1::CombinedIdx(nuidx,M1_FY_IDX,m1_nvars_),k,j,i) = Fyd;
         uradm1_(m, radiationm1::CombinedIdx(nuidx,M1_FZ_IDX,m1_nvars_),k,j,i) = Fzd;
         uradm1_(m, radiationm1::CombinedIdx(nuidx,M1_N_IDX, m1_nvars_),k,j,i) = N;
+      }
+    });
+#endif  // ENABLE_NURATES
+  }
+
+  if (has_multifreq) {
+#ifdef ENABLE_NURATES
+    // Same LTE state as the M1 branch above, deliberately: the two solvers must
+    // start from identical initial data for the cross-solver comparison to mean
+    // anything.  radiationm1::NeutrinoDens is reused rather than reimplemented
+    // for the same reason -- it is a pure function of (mu_n, mu_p, mu_e, T) and
+    // the unit systems, with no M1 state.
+    auto code_units    = eos.GetCodeUnitSystem();
+    auto eos_units     = eos.GetEOSUnitSystem();
+    auto nurates_units = Primitive::MakeNGS();
+    // NeutrinoDens takes a NuratesParams by const reference but never reads it
+    // -- it is a pure function of (mu_n, mu_p, mu_e, T) and the unit systems.
+    // The two solvers have distinct NuratesParams types, so pass a default one
+    // rather than plumbing radiation::NuratesParams into the M1 namespace.
+    const radiationm1::NuratesParams m1_unused_params{};
+
+    const int nang = pmbp->prad->prgeo->nangles;
+    const int nfreq = pmbp->prad->nfreq;
+    const int nspecies_ = pmbp->prad->nspecies;
+    if (nspecies_ == 1) {
+      std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+                << std::endl
+                << "Neutrino radiation transport is required for this pgen!\n";
+      abort();
+    }
+
+    auto &i0 = pmbp->prad->i0;
+    auto &norm_to_tet = pmbp->prad->norm_to_tet;
+    auto &nh_c = pmbp->prad->nh_c;
+    auto &tet_c = pmbp->prad->tet_c;
+    auto &tetcov_c = pmbp->prad->tetcov_c;
+
+    par_for("pgen_shock1_multifreq", DevExeSpace(),
+            0,(pmbp->nmb_thispack-1),ks,ke,js,je,is,ie,
+    KOKKOS_LAMBDA(int m,int k, int j, int i) {
+      Real Y[2] = {yq, 0.0};
+
+      Real mu_b  = eos.GetBaryonChemicalPotential(nb, temp, &Y[0]);
+      Real mu_q  = eos.GetChargeChemicalPotential(nb, temp, &Y[0]);
+      Real mu_le = eos.GetElectronLeptonChemicalPotential(nb, temp, &Y[0]);
+      Real mu_n = mu_b;
+      Real mu_p = mu_b + mu_q;
+      Real mu_e = mu_le - mu_q;
+
+      Real n_nue, n_anue, n_nux, e_nue, e_anue, e_nux;
+      radiationm1::NeutrinoDens(mu_n, mu_p, mu_e, temp,
+                                n_nue, n_anue, n_nux,
+                                e_nue, e_anue, e_nux,
+                                m1_unused_params, code_units, eos_units,
+                                nurates_units);
+      // heavy flavours are carried as two species, each half the total
+      Real nuJ[4] = {e_nue, e_anue, 0.5*e_nux, 0.5*e_nux};
+
+      // boost the isotropic fluid-frame intensity into the coordinate frame
+      Real u_tet[4];
+      for (int a = 0; a < 4; ++a) {
+        u_tet[a] = norm_to_tet(m,a,0,k,j,i)*w_lorentz +
+                   norm_to_tet(m,a,1,k,j,i)*w_lorentz*v3x +
+                   norm_to_tet(m,a,2,k,j,i)*w_lorentz*v3y +
+                   norm_to_tet(m,a,3,k,j,i)*w_lorentz*v3z;
+      }
+
+      for (int isp = 0; isp < nspecies_; ++isp) {
+        // spread the species energy density uniformly over the frequency bins,
+        // matching rad_neutrino_singlezone.cpp
+        Real erad_freq = nuJ[isp]/static_cast<Real>(nfreq);
+        for (int ifr = 0; ifr < nfreq; ++ifr) {
+          for (int n = 0; n < nang; ++n) {
+            Real un_t = u_tet[1]*nh_c.d_view(n,1) +
+                        u_tet[2]*nh_c.d_view(n,2) +
+                        u_tet[3]*nh_c.d_view(n,3);
+            Real n0_f = u_tet[0]*nh_c.d_view(n,0) - un_t;
+            Real n0 = tet_c(m,0,0,k,j,i);
+            Real n_0 = 0.0;
+            for (int d = 0; d < 4; ++d) {
+              n_0 += tetcov_c(m,d,0,k,j,i)*nh_c.d_view(n,d);
+            }
+            int nn = (isp*nfreq + ifr)*nang + n;
+            i0(m, nn, k, j, i) = n0*n_0*(erad_freq/(4.0*M_PI))/SQR(SQR(n0_f));
+          }
+        }
       }
     });
 #endif  // ENABLE_NURATES

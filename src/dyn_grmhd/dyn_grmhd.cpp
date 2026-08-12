@@ -222,8 +222,10 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::QueueDynGRMHDTasks() {
   }
   pnr->QueueTask(&MHD::MHDSrcTerms, pmhd, MHD_AddSrc, "MHD_AddSrc", Task_Run,
                  {MHD_ExplRK});
+  // Rad_Chiral also writes u0_(IYF+1), so the conserved variables must not be
+  // restricted or converted to primitives until it has run.
   pnr->QueueTask(&MHD::RestrictU, pmhd, MHD_RestU, "MHD_RestU", Task_Run,
-                 {MHD_AddSrc}, {Rad_Coupl});
+                 {MHD_AddSrc}, {Rad_Coupl, Rad_Chiral});
 
   pnr->QueueTask(&MHD::SendU, pmhd, MHD_SendU, "MHD_SendU", Task_Run, {MHD_RestU});
   pnr->QueueTask(&MHD::RecvU, pmhd, MHD_RecvU, "MHD_RecvU", Task_Run, {MHD_SendU});
@@ -316,6 +318,12 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::QueueDynGRMHDTasks() {
               "Rad_Coupl", Task_Run, {Rad_ExplRK, MHD_AddSrc});
       }
     }
+
+    // Chiral Gamma_m sink and E.B anomaly source for Y5.  Queued unconditionally
+    // so that MHD_RestU's optional dependency on it always resolves; the task
+    // itself is a no-op unless backreact_chiral and chiral_gamma_m are set.
+    pnr->QueueTask(&radiation::Radiation::ChiralSources, prad, Rad_Chiral,
+            "Rad_Chiral", Task_Run, {Rad_Coupl});
 
     // Restrict/Send/Recv/BCS/Prolongate for radiation intensities
     pnr->QueueTask(&radiation::Radiation::RestrictI, prad, Rad_RestI, "Rad_RestI",
