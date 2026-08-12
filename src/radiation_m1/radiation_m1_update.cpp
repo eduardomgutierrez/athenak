@@ -688,8 +688,8 @@ TaskStatus RadiationM1::TimeUpdate_(Driver *d, int stage) {
             const Real mu_q  = eos.GetChargeChemicalPotential(nb, T, &Y);
             const Real mu_le = eos.GetElectronLeptonChemicalPotential(nb, T, &Y);
             const Real mu_e  = mu_le - mu_q; // MeV (code chemical potential units)
-            constexpr Real alpha_em = 1.0/137.036;
-            const Real Gamma_m = chiral::GammaM(mu_e, code_units_.time, alpha_em);
+            const Real Gamma_m =
+                chiral::GammaM(mu_e, code_units_.time, chiral::kAlphaEM);
 
             // E·B chiral anomaly source: dn5/dt = (2*alpha_em/pi) * xi * b^2
             const Real g11 = adm.g_dd(m,0,0,k,j,i), g12 = adm.g_dd(m,0,1,k,j,i);
@@ -722,11 +722,12 @@ TaskStatus RadiationM1::TimeUpdate_(Driver *d, int stage) {
             const Real bsq = (Bsq + Bv*Bv)*iW2;                // fluid-frame b^2
 
             const Real xi = chiral::Xi(w0_(m, IYF+1, k, j, i),
-                                       w0_(m, IYF, k, j, i), alpha_em);
+                                       w0_(m, IYF, k, j, i), chiral::kAlphaEM);
 
             // E·B explicit source; Gamma_m implicit damping — one combined step
-            const Real eb_src = - beta_dt_ * alpha * sqrtgam * mb_
-                                * chiral::AnomalySource(xi, bsq, alpha_em);
+            const Real eb_src =
+                - beta_dt_ * alpha * sqrtgam * mb_
+                * chiral::AnomalySource(xi, bsq, chiral::kAlphaEM);
             umhd0_(m, IYF + 1, k, j, i) =
                 (umhd0_(m, IYF + 1, k, j, i) + eb_src)
                 / (1.0 + beta_dt_ * alpha * Gamma_m);

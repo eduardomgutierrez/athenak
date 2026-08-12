@@ -156,7 +156,6 @@ TaskStatus MHD::CornerE(Driver *pdriver, int stage) {
     // chiral dynamo correction (2D, dynGRMHD only)
     if (chiral_dynamo) {
       auto &adm = pmy_pack->padm->adm;
-      constexpr Real alpha_em = 1.0/137.0;
       par_for("e_cc_2d_chiral", DevExeSpace(), 0, nmb1, js-1, je+1, is-1, ie+1,
       KOKKOS_LAMBDA(int m, int j, int i) {
         const Real ux = w0_(m,IVX,ks,j,i);
@@ -175,7 +174,8 @@ TaskStatus MHD::CornerE(Driver *pdriver, int stage) {
         const Real by = bcc_(m,IBY,ks,j,i);
         const Real bz = bcc_(m,IBZ,ks,j,i);
 
-        const Real xi = chiral::Xi(w0_(m,IYF+1,ks,j,i), w0_(m,IYF,ks,j,i), alpha_em);
+        const Real xi = chiral::Xi(w0_(m,IYF+1,ks,j,i), w0_(m,IYF,ks,j,i),
+                                   chiral::kAlphaEM);
 
         // in 2D only e3 enters the CT update; e1/e2 are computed and dropped
         Real e1_loc, e2_loc, e3_loc;
@@ -352,7 +352,6 @@ TaskStatus MHD::CornerE(Driver *pdriver, int stage) {
     // chiral dynamo correction (3D, dynGRMHD only)
     if (chiral_dynamo) {
       auto &adm = pmy_pack->padm->adm;
-      constexpr Real alpha_em = 1.0/137.0;
       par_for("e_cc_3d_chiral", DevExeSpace(), 0, nmb1, ks-1, ke+1, js-1, je+1, is-1, ie+1,
       KOKKOS_LAMBDA(int m, int k, int j, int i) {
         const Real ux = w0_(m,IVX,k,j,i);
@@ -371,7 +370,8 @@ TaskStatus MHD::CornerE(Driver *pdriver, int stage) {
         const Real by = bcc_(m,IBY,k,j,i);
         const Real bz = bcc_(m,IBZ,k,j,i);
 
-        const Real xi = chiral::Xi(w0_(m,IYF+1,k,j,i), w0_(m,IYF,k,j,i), alpha_em);
+        const Real xi = chiral::Xi(w0_(m,IYF+1,k,j,i), w0_(m,IYF,k,j,i),
+                                   chiral::kAlphaEM);
 
         Real e1_loc, e2_loc, e3_loc;
         chiral::OhmsLawEMF(xi, iW, v1, v2, v3, bx, by, bz, e1_loc, e2_loc, e3_loc);
