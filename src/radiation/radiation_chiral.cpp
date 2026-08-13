@@ -35,43 +35,6 @@ TaskStatus Radiation::ChiralSources(Driver *pdriver, int stage) {
     return TaskStatus::complete;
   }
 
-  // Applied on every RK stage with the stage-weighted timestep
-  // beta[stage-1]*dt, exactly as the radiation-fluid coupling does in
-  // radiation_source_nurates.cpp.  An earlier version instead ran once per cycle
-  // on the final stage with the full dt; that was a workaround for using the
-  // full dt on intermediate stages, and is unnecessary once the stage weighting
-  // is respected.
-  //
-  // Both pieces enter u0 additively -- the E.B term directly, and the Gamma_m
-  // sink as U <- U/(1 + beta_dt*alpha*Gamma_m), i.e. an increment
-  // -beta_dt*alpha*Gamma_m*U_new -- so they compose with the RK stage weighting
-  // the same way the flux divergence does.  Writing the accumulated source over
-  // a cycle as sum_k w_k*beta_k*dt*S_k, with w_k the product of the later
-  // stages' gam0 factors, gives sum_k w_k*beta_k = 1 for rk2 (1/2 + 1/2) and for
-  // rk3 (1/6 + 1/6 + 2/3), so this is consistent under either integrator.
-  //
-  // For rk2 the sink telescopes exactly.  With a = dt*alpha*Gamma_m,
-  //     U1 = U^n/(1+a)
-  //     U2 = [U1/2 + U^n/2]/(1+a/2) = U^n/(1+a)
-  // i.e. backward Euler over the whole step -- which is precisely what the
-  // previous final-stage-only form computed, so rk2 results do not move.
-  //
-  // Consistent is not the same as high order, and this inherits the same first
-  // order accuracy as Rad_Coupl.  Reusing the explicit SSP weights for an
-  // implicitly-treated operator induces an implicit tableau whose abscissae sit
-  // wherever the stage *results* land, and those do not satisfy the second-order
-  // coupling conditions.  Under rk2 the explicit abscissae are (0, 1), so both
-  // stage results sit at t^{n+1} and the accumulated source quadrature is the
-  // right-endpoint rule.  Under rk3 the weights (1/6, 1/6, 2/3) attach to stage
-  // results at (t+dt, t+dt/2, t+dt), giving (5/6) S(t+dt) + (1/6) S(t+dt/2),
-  // which misses the midpoint value by (5/12) dt S' -- local O(dt^2), global
-  // O(dt).  Measured global order is 1.00 for both integrators.
-  //
-  // So raising <time>/integrator does not raise the order of this term, and any
-  // future move to a genuine additive IMEX pair (a separate implicit tableau
-  // satisfying sum b_i ctilde_i = sum btilde_i c_i = 1/2, e.g. ARS(2,2,2) or
-  // Pareschi-Russo SSP2(3,3,2)) should change Rad_Coupl and this kernel together.
-
   auto *ptest_nqt =
       dynamic_cast<dyngr::DynGRMHDPS<Primitive::EOSCompOSE<Primitive::NQTLogs>,
                                      Primitive::ResetFloor> *>(pmy_pack->pdyngr);
@@ -100,9 +63,11 @@ TaskStatus Radiation::ChiralSources(Driver *pdriver, int stage) {
 //! \fn TaskStatus Radiation::ChiralSources_<EOSPolicy, ErrorPolicy>
 //! \brief Apply the E.B anomaly source and the Gamma_m sink to u0_(IYF+1).
 //!
-//! Numerics follow the M1 kernel exactly: E.B explicit, Gamma_m implicit, in one
-//! combined step, U <- (U + eb_src)/(1 + dt*alpha*Gamma_m), which is
-//! unconditionally stable for any Gamma_m > 0.
+//! E.B explicit, Gamma_m implicit, in one combined step,
+//! U <- (U + eb_src)/(1 + beta_dt*alpha*Gamma_m), unconditionally stable for any
+//! Gamma_m > 0.  Applied every RK stage with the stage-weighted timestep, as
+//! Rad_Coupl is; like Rad_Coupl it is first order in the source whatever
+//! <time>/integrator is set to.
 
 template <class EOSPolicy, class ErrorPolicy>
 TaskStatus Radiation::ChiralSources_(Driver *pdriver, int stage) {
@@ -112,9 +77,8 @@ TaskStatus Radiation::ChiralSources_(Driver *pdriver, int stage) {
   int &ks = indcs.ks, &ke = indcs.ke;
   int nmb1 = pmy_pack->nmb_thispack - 1;
 
-  // EOS reference captured at function scope, not a raw host pointer -- this is
-  // the pattern radiation_nurates.cpp uses, and it is what avoids the CUDA
-  // illegal-memory access that motivated M1's separate kernel.
+  // Capture the EOS by function-scope reference, not a raw host pointer: the
+  // pattern radiation_nurates.cpp uses, which avoids a CUDA illegal-memory access.
   Primitive::EOS<EOSPolicy, ErrorPolicy> &eos =
       static_cast<dyngr::DynGRMHDPS<EOSPolicy, ErrorPolicy> *>(pmy_pack->pdyngr)
           ->eos.ps.GetEOSMutable();
@@ -126,7 +90,7 @@ TaskStatus Radiation::ChiralSources_(Driver *pdriver, int stage) {
   auto &u0_ = pmy_pack->pmhd->u0;
   auto &bcc0_ = pmy_pack->pmhd->bcc0;
 
-  // stage-weighted timestep, matching Rad_Coupl (radiation_source_nurates.cpp)
+  // stage-weighted timestep, as in radiation_source_nurates.cpp
   const Real dt_ = (pdriver->beta[stage-1])*(pmy_pack->pmesh->dt);
 
   par_for("rad_chiral_sources", DevExeSpace(), 0, nmb1, ks, ke, js, je, is, ie,
