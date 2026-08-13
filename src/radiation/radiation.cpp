@@ -411,13 +411,18 @@ Radiation::Radiation(MeshBlockPack *ppack, ParameterInput *pin) :
     nurates_params.use_pair            = pin->GetOrAddBoolean("bns_nurates","use_pair",true);
     nurates_params.use_brem            = pin->GetOrAddBoolean("bns_nurates","use_brem",true);
     nurates_params.use_iso             = pin->GetOrAddBoolean("bns_nurates","use_iso",true);
-    nurates_params.use_inelastic_scatt = pin->GetOrAddBoolean("bns_nurates","use_inelastic_scatt",false);
+    // Defaults below are kept identical to the M1 parser in radiation_m1.cpp on
+    // purpose.  They used to differ -- these six correction flags defaulted false
+    // here and true there -- so an input that named only a few keys silently gave
+    // the two solvers different microphysics, with nothing in the output to say
+    // so.  Any change here must be mirrored in radiation_m1.cpp.
+    nurates_params.use_inelastic_scatt = pin->GetOrAddBoolean("bns_nurates","use_inelastic_scatt",true);
     // correction flags
-    nurates_params.use_WM_ab           = pin->GetOrAddBoolean("bns_nurates","use_WM_ab",false);
-    nurates_params.use_WM_sc           = pin->GetOrAddBoolean("bns_nurates","use_WM_sc",false);
-    nurates_params.use_dU              = pin->GetOrAddBoolean("bns_nurates","use_dU",false);
-    nurates_params.use_dm_eff          = pin->GetOrAddBoolean("bns_nurates","use_dm_eff",false);
-    nurates_params.use_NN_medium_corr  = pin->GetOrAddBoolean("bns_nurates","use_NN_medium_corr",false);
+    nurates_params.use_WM_ab           = pin->GetOrAddBoolean("bns_nurates","use_WM_ab",true);
+    nurates_params.use_WM_sc           = pin->GetOrAddBoolean("bns_nurates","use_WM_sc",true);
+    nurates_params.use_dU              = pin->GetOrAddBoolean("bns_nurates","use_dU",true);
+    nurates_params.use_dm_eff          = pin->GetOrAddBoolean("bns_nurates","use_dm_eff",true);
+    nurates_params.use_NN_medium_corr  = pin->GetOrAddBoolean("bns_nurates","use_NN_medium_corr",true);
     nurates_params.neglect_blocking    = pin->GetOrAddBoolean("bns_nurates","neglect_blocking",false);
     nurates_params.use_decay           = pin->GetOrAddBoolean("bns_nurates","use_decay",false);
     nurates_params.use_BRT_brem        = pin->GetOrAddBoolean("bns_nurates","use_BRT_brem",false);
@@ -435,12 +440,15 @@ Radiation::Radiation(MeshBlockPack *ppack, ParameterInput *pin) :
                 << "distribution." << std::endl;
       std::exit(EXIT_FAILURE);
     }
-    // floors
-    nurates_params.nb_min      = pin->GetOrAddReal("bns_nurates","nb_min",1.0e-12);
-    nurates_params.temp_min_mev = pin->GetOrAddReal("bns_nurates","temp_min_mev",0.01);
+    // floors -- key names and defaults match radiation_m1.cpp.  nb_min is in
+    // fm^-3, i.e. the EOS number-density unit, and is compared against nb before
+    // the conversion to bns_nurates units; it used to be compared after, so the
+    // same number meant two things 1e18 apart in the two solvers.
+    nurates_params.nb_min      = pin->GetOrAddReal("bns_nurates","nb_min_fm-3",0.0);
+    nurates_params.temp_min_mev = pin->GetOrAddReal("bns_nurates","temp_min_mev",0.0);
 
     // 1d Gauss-Legendre quadrature
-    nurates_params.quad_nx = pin->GetOrAddInteger("bns_nurates","quad_nx",6);
+    nurates_params.quad_nx = pin->GetOrAddInteger("bns_nurates","nurates_quad_nx",6);
     nurates_params.quadrature.nx   = nurates_params.quad_nx;
     nurates_params.quadrature.dim  = 1;
     nurates_params.quadrature.type = kGauleg;
@@ -449,7 +457,7 @@ Radiation::Radiation(MeshBlockPack *ppack, ParameterInput *pin) :
     GaussLegendre(&nurates_params.quadrature);
 
     // 2d quadrature (same number of points as 1d unless overridden)
-    nurates_params.quad_nx_2 = pin->GetOrAddInteger("bns_nurates","quad_nx_2",-1);
+    nurates_params.quad_nx_2 = pin->GetOrAddInteger("bns_nurates","nurates_quad_nx_2",-1);
     if (nurates_params.quad_nx_2 < 0) {
       nurates_params.quad_nx_2 = nurates_params.quad_nx;
     }

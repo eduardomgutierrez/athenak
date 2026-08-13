@@ -32,8 +32,8 @@ namespace radiation {
 //! \struct NuratesParams
 //! \brief Parameters for bns_nurates opacity library
 struct NuratesParams {
-  Real nb_min;           // minimum baryon number density [bns_nurates units] below which
-                         //   opacities are set to zero
+  Real nb_min;           // minimum baryon number density [fm^-3, i.e. EOS number
+                         //   density units] below which opacities are set to zero
   Real temp_min_mev;     // minimum temperature [MeV] below which opacities are set to zero
 
   bool use_abs_em;           // include absorption/emission (beta processes)
@@ -406,7 +406,9 @@ void bns_nurates_gray(Real nb, Real temp, Real yp, Real yn,
   const Real unit_ene_dens  = code_units.EnergyDensityConversion(nurates_units);
 
   // zero outputs if below floor values
-  if ((nb * unit_eos_num_dens < nurates_params.nb_min) ||
+  // nb_min is in fm^-3 (the EOS number-density unit), so compare nb before the
+  // conversion to bns_nurates units -- this is what radiation_m1_nurates.hpp does.
+  if ((nb < nurates_params.nb_min) ||
       (temp < nurates_params.temp_min_mev)) {
     for (int idx = 0; idx < 4; ++idx) {
       eta_0[idx]  = 0.;
@@ -614,7 +616,9 @@ void bns_nurates_spectral_bin(Real e_lo_code, Real e_hi_code,
     scat_1[idx] = 0.;
   }
 
-  if ((nb * unit_eos_num_dens < nurates_params.nb_min) ||
+  // nb_min is in fm^-3 (the EOS number-density unit), so compare nb before the
+  // conversion to bns_nurates units -- this is what radiation_m1_nurates.hpp does.
+  if ((nb < nurates_params.nb_min) ||
       (temp < nurates_params.temp_min_mev) ||
       (e_hi_code <= e_lo_code)) {
     return;
