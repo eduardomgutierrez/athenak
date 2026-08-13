@@ -35,21 +35,42 @@ TaskStatus Radiation::ChiralSources(Driver *pdriver, int stage) {
     return TaskStatus::complete;
   }
 
-  // Apply once per cycle, on the final stage, with the full timestep -- exactly
-  // as the M1 kernel does (radiation_m1_update.cpp guards on stage == 2).
+  // Applied on every RK stage with the stage-weighted timestep
+  // beta[stage-1]*dt, exactly as the radiation-fluid coupling does in
+  // radiation_source_nurates.cpp.  An earlier version instead ran once per cycle
+  // on the final stage with the full dt; that was a workaround for using the
+  // full dt on intermediate stages, and is unnecessary once the stage weighting
+  // is respected.
   //
-  // This is not cosmetic.  The Gamma_m sink is a multiplicative implicit update,
-  // U <- U/(1 + dt*alpha*Gamma_m), and that does not compose with the RK stage
-  // weighting: at stage 2 the integrator forms u0 = gam0*u0 + gam1*u1 + ...,
-  // which discards whatever stage 1 applied to u0 and mixes back in an undamped
-  // gam1*u1.  Running at every stage therefore gives an effective per-cycle
-  // factor of gam1/(1 + beta*dt*alpha*Gamma_m) instead of
-  // 1/(1 + dt*alpha*Gamma_m).  The two agree asymptotically for
-  // dt*Gamma_m >> 1, which is why the shock problems do not show it, but in the
-  // weakly-damped limit the former spuriously decays Y5 by gam1 every cycle.
-  if (stage != pdriver->nexp_stages) {
-    return TaskStatus::complete;
-  }
+  // Both pieces enter u0 additively -- the E.B term directly, and the Gamma_m
+  // sink as U <- U/(1 + beta_dt*alpha*Gamma_m), i.e. an increment
+  // -beta_dt*alpha*Gamma_m*U_new -- so they compose with the RK stage weighting
+  // the same way the flux divergence does.  Writing the accumulated source over
+  // a cycle as sum_k w_k*beta_k*dt*S_k, with w_k the product of the later
+  // stages' gam0 factors, gives sum_k w_k*beta_k = 1 for rk2 (1/2 + 1/2) and for
+  // rk3 (1/6 + 1/6 + 2/3), so this is consistent under either integrator.
+  //
+  // For rk2 the sink telescopes exactly.  With a = dt*alpha*Gamma_m,
+  //     U1 = U^n/(1+a)
+  //     U2 = [U1/2 + U^n/2]/(1+a/2) = U^n/(1+a)
+  // i.e. backward Euler over the whole step -- which is precisely what the
+  // previous final-stage-only form computed, so rk2 results do not move.
+  //
+  // Consistent is not the same as high order, and this inherits the same first
+  // order accuracy as Rad_Coupl.  Reusing the explicit SSP weights for an
+  // implicitly-treated operator induces an implicit tableau whose abscissae sit
+  // wherever the stage *results* land, and those do not satisfy the second-order
+  // coupling conditions.  Under rk2 the explicit abscissae are (0, 1), so both
+  // stage results sit at t^{n+1} and the accumulated source quadrature is the
+  // right-endpoint rule.  Under rk3 the weights (1/6, 1/6, 2/3) attach to stage
+  // results at (t+dt, t+dt/2, t+dt), giving (5/6) S(t+dt) + (1/6) S(t+dt/2),
+  // which misses the midpoint value by (5/12) dt S' -- local O(dt^2), global
+  // O(dt).  Measured global order is 1.00 for both integrators.
+  //
+  // So raising <time>/integrator does not raise the order of this term, and any
+  // future move to a genuine additive IMEX pair (a separate implicit tableau
+  // satisfying sum b_i ctilde_i = sum btilde_i c_i = 1/2, e.g. ARS(2,2,2) or
+  // Pareschi-Russo SSP2(3,3,2)) should change Rad_Coupl and this kernel together.
 
   auto *ptest_nqt =
       dynamic_cast<dyngr::DynGRMHDPS<Primitive::EOSCompOSE<Primitive::NQTLogs>,
@@ -105,8 +126,8 @@ TaskStatus Radiation::ChiralSources_(Driver *pdriver, int stage) {
   auto &u0_ = pmy_pack->pmhd->u0;
   auto &bcc0_ = pmy_pack->pmhd->bcc0;
 
-  // full timestep: this runs once per cycle, after the last RK stage
-  const Real dt_ = pmy_pack->pmesh->dt;
+  // stage-weighted timestep, matching Rad_Coupl (radiation_source_nurates.cpp)
+  const Real dt_ = (pdriver->beta[stage-1])*(pmy_pack->pmesh->dt);
 
   par_for("rad_chiral_sources", DevExeSpace(), 0, nmb1, ks, ke, js, je, is, ie,
   KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
