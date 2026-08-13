@@ -38,6 +38,61 @@
 #include "radiation_m1/radiation_m1_nurates.hpp"
 #endif
 
+namespace {
+
+//----------------------------------------------------------------------------------------
+//! \fn Real FermiDiracEnergyWeight(Real x_lo, Real x_hi, Real eta)
+//! \brief Bin-integrated LTE energy weight, \int_{x_lo}^{x_hi} x^3/(exp(x-eta)+1) dx,
+//!        in units of x = E/T.
+//!
+//! Simpson's rule.  The integrand is smooth and this runs once, at
+//! initialisation, so a modest number of sub-intervals is ample; the result is
+//! used only as a relative weight between bins (see the caller, which
+//! renormalises by the sum over bins).
+
+KOKKOS_INLINE_FUNCTION
+Real FermiDiracEnergyWeight(Real x_lo, Real x_hi, Real eta) {
+  constexpr int nsub = 16;  // even, as Simpson requires
+  const Real h = (x_hi - x_lo)/static_cast<Real>(nsub);
+  if (!(h > 0.0)) return 0.0;
+  Real acc = 0.0;
+  for (int s = 0; s <= nsub; ++s) {
+    const Real x = x_lo + s*h;
+    const Real a = x - eta;
+    // Guard the exponential at both ends: the occupation saturates to 1 for
+    // a << 0 and decays as exp(-a) for a >> 0, so this is exact to round-off
+    // outside the guarded band and avoids overflow in exp().
+    const Real occ = (a > 60.0) ? Kokkos::exp(-a)
+                   : ((a < -60.0) ? 1.0 : 1.0/(Kokkos::exp(a) + 1.0));
+    const Real wgt = (s == 0 || s == nsub) ? 1.0 : ((s % 2) ? 4.0 : 2.0);
+    acc += wgt*x*x*x*occ;
+  }
+  return acc*h/3.0;
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void FreqBinEdgesMeV(...)
+//! \brief Lower/upper edge of frequency bin ifr, in MeV.
+//!
+//! freq_grid holds bin lower edges in code energy units, with freq_grid(0) = 0
+//! and freq_grid(nfreq-1) = nu_max.  The top bin is open-ended; this reproduces
+//! exactly the extent radiation_nurates.cpp assigns to it, so the initial data
+//! and the transport agree on where the bins are.
+
+KOKKOS_INLINE_FUNCTION
+void FreqBinEdgesMeV(const DvceArray1D<Real> freq_grid, int ifr, int nfreq,
+                     Real nu_unit, Real temp_mev, Real &e_lo, Real &e_hi) {
+  e_lo = freq_grid(ifr)*nu_unit;
+  if (ifr < nfreq - 1) {
+    e_hi = freq_grid(ifr+1)*nu_unit;
+  } else {
+    const Real g_prev = freq_grid(ifr-1)*nu_unit;
+    e_hi = e_lo + Kokkos::fmax(e_lo - g_prev, 20.0*temp_mev - e_lo);
+  }
+}
+
+}  // namespace
+
 // Forward declaration
 template <class EOSPolicy, class ErrorPolicy>
 void NeutrinoDominatedShock(Mesh *pmesh, ParameterInput* pin);
@@ -406,6 +461,10 @@ void NeutrinoDominatedShock(Mesh *pmesh, ParameterInput* pin) {
     auto &nh_c = pmbp->prad->nh_c;
     auto &tet_c = pmbp->prad->tet_c;
     auto &tetcov_c = pmbp->prad->tetcov_c;
+    auto &freq_grid = pmbp->prad->freq_grid;
+    // freq_grid is stored in code energy units; SetFrequencyGrid built it as
+    // nu_min/nu_max [MeV] divided by this factor, so multiplying returns MeV.
+    const Real nu_unit_mev = code_units.EnergyConversion(nurates_units);
 
     par_for("pgen_shock1_multifreq", DevExeSpace(),
             0,(pmbp->nmb_thispack-1),ks,ke,js,je,is,ie,
@@ -447,11 +506,51 @@ void NeutrinoDominatedShock(Mesh *pmesh, ParameterInput* pin) {
                    norm_to_tet(m,a,3,k,j,i)*w_lorentz*v3z;
       }
 
+      // Degeneracy parameters, matching NeutrinoDens exactly (it uses these to
+      // build the very nuJ[] we are about to distribute).
+      const Real eta_nue = (mu_p + mu_e - mu_n)/temp;
+
       for (int isp = 0; isp < nspecies_; ++isp) {
-        // spread the species energy density uniformly over the frequency bins,
-        // matching rad_neutrino_singlezone.cpp
-        Real erad_freq = nuJ[isp]/static_cast<Real>(nfreq);
+        // Distribute the species energy over the frequency bins with the LTE
+        // Fermi-Dirac spectrum, dJ/dE ~ E^3/(exp(E/T - eta) + 1), rather than
+        // spreading it flat.  Bin weights are integrals of x^3/(exp(x-eta)+1)
+        // over x = E/T.
+        //
+        // The weights are normalised by their own sum, not by the analytic
+        // Fermi integral F3(eta).  That keeps the total energy per species
+        // exactly equal to nuJ[isp] -- the same total the M1 branch above
+        // deposits -- so the two solvers still start from identical total
+        // energy and differ only in how it is distributed spectrally, which is
+        // the point of this pgen.  It also folds the energy belonging above the
+        // grid into the open-ended top bin, which is where the transport keeps
+        // it in any case.
+        const Real eta = (isp == 0) ? eta_nue : ((isp == 1) ? -eta_nue : 0.0);
+
+        // Grey Boltzmann (<radiation>/multi_freq = false) reaches this branch too,
+        // since has_multifreq only tests for a <radiation> block.  There nfreq = 1
+        // and freq_grid is never allocated, so there is nothing to distribute and
+        // nothing safe to index: the single bin carries the whole species energy.
+        Real wsum = 0.0;
+        if (nfreq > 1) {
+          for (int ifr = 0; ifr < nfreq; ++ifr) {
+            Real e_lo, e_hi;
+            FreqBinEdgesMeV(freq_grid, ifr, nfreq, nu_unit_mev, temp, e_lo, e_hi);
+            wsum += FermiDiracEnergyWeight(e_lo/temp, e_hi/temp, eta);
+          }
+        }
+        const bool use_spectrum = (nfreq > 1) && (wsum > 0.0);
+        const Real inv_wsum = use_spectrum ? 1.0/wsum : 0.0;
+
         for (int ifr = 0; ifr < nfreq; ++ifr) {
+          // Fall back to an even spread if the weights underflow, so that the
+          // species energy is conserved rather than silently zeroed.
+          Real erad_freq = nuJ[isp]/static_cast<Real>(nfreq);
+          if (use_spectrum) {
+            Real e_lo, e_hi;
+            FreqBinEdgesMeV(freq_grid, ifr, nfreq, nu_unit_mev, temp, e_lo, e_hi);
+            erad_freq =
+                nuJ[isp]*FermiDiracEnergyWeight(e_lo/temp, e_hi/temp, eta)*inv_wsum;
+          }
           for (int n = 0; n < nang; ++n) {
             Real un_t = u_tet[1]*nh_c.d_view(n,1) +
                         u_tet[2]*nh_c.d_view(n,2) +
