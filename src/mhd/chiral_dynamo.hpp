@@ -90,6 +90,29 @@ void OhmsLawEMF(const Real xi, const Real iW,
 }
 
 //----------------------------------------------------------------------------------------
+//! \fn void chiral::ChiralEMF
+//! \brief the non-ideal part of the dynamo EMF, OhmsLawEMF(xi) - OhmsLawEMF(0)
+//!
+//! Constructive-transport schemes build the ideal EMF from upwinded Riemann
+//! fluxes; a non-ideal contribution is then added to the edge field on top of
+//! it, as Resistivity::OhmicEField does with eta*J.  This returns exactly that
+//! contribution, so the ideal EMF is never recomputed and never double counted.
+//!
+//! At v = 0 this reduces to e^i = xi b^i.
+KOKKOS_INLINE_FUNCTION
+void ChiralEMF(const Real xi, const Real iW,
+               const Real v1, const Real v2, const Real v3,
+               const Real b1, const Real b2, const Real b3,
+               Real &e1, Real &e2, Real &e3) {
+  Real e1_id, e2_id, e3_id;
+  OhmsLawEMF(0.0, iW, v1, v2, v3, b1, b2, b3, e1_id, e2_id, e3_id);
+  OhmsLawEMF(xi, iW, v1, v2, v3, b1, b2, b3, e1, e2, e3);
+  e1 -= e1_id;
+  e2 -= e2_id;
+  e3 -= e3_id;
+}
+
+//----------------------------------------------------------------------------------------
 //! \fn Real chiral::GammaM
 //! \brief chirality-flip rate Gamma_m, converted from MeV to code units
 //!

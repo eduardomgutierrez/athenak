@@ -20,6 +20,41 @@
 #include "coordinates/cell_locations.hpp"
 
 namespace mhd {
+
+namespace {
+//----------------------------------------------------------------------------------------
+//! \fn void CellChiralEMF
+//! \brief the non-ideal chiral EMF at the centre of cell (m,k,j,i)
+//!
+//! Templated on the view types so the ADM struct does not have to be named in a
+//! device-function signature.  Evaluated on the fly rather than cached, so no
+//! extra cell-centred arrays are needed; it is a handful of flops and a cbrt.
+
+template <class WView, class BView, class AView>
+KOKKOS_INLINE_FUNCTION
+void CellChiralEMF(const WView &w0_, const BView &bcc_, const AView &adm,
+                   const int m, const int k, const int j, const int i,
+                   Real &e1, Real &e2, Real &e3) {
+  const Real ux = w0_(m,IVX,k,j,i);
+  const Real uy = w0_(m,IVY,k,j,i);
+  const Real uz = w0_(m,IVZ,k,j,i);
+  const Real iW = 1.0/sqrt(1.0
+              + adm.g_dd(m,0,0,k,j,i)*ux*ux + 2.0*adm.g_dd(m,0,1,k,j,i)*ux*uy
+              + 2.0*adm.g_dd(m,0,2,k,j,i)*ux*uz + adm.g_dd(m,1,1,k,j,i)*uy*uy
+              + 2.0*adm.g_dd(m,1,2,k,j,i)*uy*uz + adm.g_dd(m,2,2,k,j,i)*uz*uz);
+  const Real alpha = adm.alpha(m,k,j,i);
+  const Real v1 = alpha*ux*iW - adm.beta_u(m,0,k,j,i);
+  const Real v2 = alpha*uy*iW - adm.beta_u(m,1,k,j,i);
+  const Real v3 = alpha*uz*iW - adm.beta_u(m,2,k,j,i);
+
+  const Real xi = chiral::Xi(w0_(m,IYF+1,k,j,i), w0_(m,IYF,k,j,i),
+                             chiral::kAlphaEM);
+
+  chiral::ChiralEMF(xi, iW, v1, v2, v3, bcc_(m,IBX,k,j,i), bcc_(m,IBY,k,j,i),
+                    bcc_(m,IBZ,k,j,i), e1, e2, e3);
+}
+}  // namespace
+
 //----------------------------------------------------------------------------------------
 //! \fn  void MHD::CornerE
 //  \brief calculate the corner electric fields.
@@ -150,37 +185,6 @@ TaskStatus MHD::CornerE(Driver *pdriver, int stage) {
       KOKKOS_LAMBDA(int m, int j, int i) {
         e3cc_(m,ks,j,i) = w0_(m,IVY,ks,j,i)*bcc_(m,IBX,ks,j,i) -
                           w0_(m,IVX,ks,j,i)*bcc_(m,IBY,ks,j,i);
-      });
-    }
-
-    // chiral dynamo correction (2D, dynGRMHD only)
-    if (chiral_dynamo) {
-      auto &adm = pmy_pack->padm->adm;
-      par_for("e_cc_2d_chiral", DevExeSpace(), 0, nmb1, js-1, je+1, is-1, ie+1,
-      KOKKOS_LAMBDA(int m, int j, int i) {
-        const Real ux = w0_(m,IVX,ks,j,i);
-        const Real uy = w0_(m,IVY,ks,j,i);
-        const Real uz = w0_(m,IVZ,ks,j,i);
-        Real iW = 1.0/sqrt(1.0
-                    + adm.g_dd(m,0,0,ks,j,i)*ux*ux + 2.0*adm.g_dd(m,0,1,ks,j,i)*ux*uy
-                    + 2.0*adm.g_dd(m,0,2,ks,j,i)*ux*uz + adm.g_dd(m,1,1,ks,j,i)*uy*uy
-                    + 2.0*adm.g_dd(m,1,2,ks,j,i)*uy*uz + adm.g_dd(m,2,2,ks,j,i)*uz*uz);
-        const Real alpha = adm.alpha(m,ks,j,i);
-        const Real v1 = alpha*ux*iW - adm.beta_u(m, 0, ks, j, i);
-        const Real v2 = alpha*uy*iW - adm.beta_u(m, 1, ks, j, i);
-        const Real v3 = alpha*uz*iW - adm.beta_u(m, 2, ks, j, i);
-
-        const Real bx = bcc_(m,IBX,ks,j,i);
-        const Real by = bcc_(m,IBY,ks,j,i);
-        const Real bz = bcc_(m,IBZ,ks,j,i);
-
-        const Real xi = chiral::Xi(w0_(m,IYF+1,ks,j,i), w0_(m,IYF,ks,j,i),
-                                   chiral::kAlphaEM);
-
-        // in 2D only e3 enters the CT update; e1/e2 are computed and dropped
-        Real e1_loc, e2_loc, e3_loc;
-        chiral::OhmsLawEMF(xi, iW, v1, v2, v3, bx, by, bz, e1_loc, e2_loc, e3_loc);
-        e3cc_(m,ks,j,i) = e3_loc;
       });
     }
 
@@ -349,38 +353,6 @@ TaskStatus MHD::CornerE(Driver *pdriver, int stage) {
       });
     }
 
-    // chiral dynamo correction (3D, dynGRMHD only)
-    if (chiral_dynamo) {
-      auto &adm = pmy_pack->padm->adm;
-      par_for("e_cc_3d_chiral", DevExeSpace(), 0, nmb1, ks-1, ke+1, js-1, je+1, is-1, ie+1,
-      KOKKOS_LAMBDA(int m, int k, int j, int i) {
-        const Real ux = w0_(m,IVX,k,j,i);
-        const Real uy = w0_(m,IVY,k,j,i);
-        const Real uz = w0_(m,IVZ,k,j,i);
-        const Real iW = 1.0/sqrt(1.0
-            + adm.g_dd(m,0,0,k,j,i)*ux*ux + 2.0*adm.g_dd(m,0,1,k,j,i)*ux*uy
-            + 2.0*adm.g_dd(m,0,2,k,j,i)*ux*uz + adm.g_dd(m,1,1,k,j,i)*uy*uy
-            + 2.0*adm.g_dd(m,1,2,k,j,i)*uy*uz + adm.g_dd(m,2,2,k,j,i)*uz*uz);
-        const Real alpha = adm.alpha(m, k, j, i);
-        const Real v1 = alpha*ux*iW - adm.beta_u(m, 0, k, j, i);
-        const Real v2 = alpha*uy*iW - adm.beta_u(m, 1, k, j, i);
-        const Real v3 = alpha*uz*iW - adm.beta_u(m, 2, k, j, i);
-
-        const Real bx = bcc_(m,IBX,k,j,i);
-        const Real by = bcc_(m,IBY,k,j,i);
-        const Real bz = bcc_(m,IBZ,k,j,i);
-
-        const Real xi = chiral::Xi(w0_(m,IYF+1,k,j,i), w0_(m,IYF,k,j,i),
-                                   chiral::kAlphaEM);
-
-        Real e1_loc, e2_loc, e3_loc;
-        chiral::OhmsLawEMF(xi, iW, v1, v2, v3, bx, by, bz, e1_loc, e2_loc, e3_loc);
-        e1cc_(m,k,j,i) = e1_loc;
-        e2cc_(m,k,j,i) = e2_loc;
-        e3cc_(m,k,j,i) = e3_loc;
-      });
-    }
-
     // capture class variables for the kernels
     auto e1 = efld.x1e;
     auto e2 = efld.x2e;
@@ -476,6 +448,102 @@ TaskStatus MHD::CornerE(Driver *pdriver, int stage) {
       e3(m,k,j,i) = 0.25*(e3_l1 + e3_r1 + e3_l2 + e3_r2 +
                 e3x2_(m,k,j,i-1) + e3x2_(m,k,j,i) + e3x1_(m,k,j-1,i) + e3x1_(m,k,j,i));
     });
+  }
+
+  // Add the chiral dynamo electric field (if needed)
+  //
+  // The EMF assembled above is the ideal one: the Riemann solver supplies it on
+  // the faces and GS07 upwinds it to the edges.  The chiral piece is non-ideal
+  // and dispersive, so it is added on top of the finished edge field, exactly as
+  // Resistivity::OhmicEField adds eta*J below.
+  //
+  // It must NOT be folded into the cell-centred e1_cc/e2_cc/e3_cc instead.  GS07
+  // consumes those as derivative estimates against the Riemann face values, and
+  // in the uniform limit the blend reduces to e = 2*E_face - E_cc, so a term
+  // present only in E_cc arrives at the edge with coefficient -1.  Doing it that
+  // way ran the dynamo backwards; see runs/chiral_dynamo_1d.athinput, which
+  // measures the growth rate against the closed-form sigma*xi*k.
+  //
+  // The cell-centred chiral EMF is averaged onto each edge over the cells that
+  // share it: four in 3D, two along the one non-degenerate transverse direction
+  // in 2D, and none in 1D, where the edge sits at a face in x1 only.
+  if (chiral_dynamo) {
+    auto w0_ = w0;
+    auto bcc_ = bcc0;
+    auto &adm = pmy_pack->padm->adm;
+    auto e1 = efld.x1e;
+    auto e2 = efld.x2e;
+    auto e3 = efld.x3e;
+
+    if (pmy_pack->pmesh->one_d) {
+      // e1 is not used: it enters only through d_y and d_z, which vanish here
+      par_for("emf1_chiral", DevExeSpace(), 0, nmb1, is, ie+1,
+      KOKKOS_LAMBDA(int m, int i) {
+        Real ea1, ea2, ea3, eb1, eb2, eb3;
+        CellChiralEMF(w0_, bcc_, adm, m, ks, js, i-1, ea1, ea2, ea3);
+        CellChiralEMF(w0_, bcc_, adm, m, ks, js, i  , eb1, eb2, eb3);
+        const Real ec2 = 0.5*(ea2 + eb2);
+        const Real ec3 = 0.5*(ea3 + eb3);
+        e2(m,ks  ,js  ,i) += ec2;
+        e2(m,ke+1,js  ,i) += ec2;
+        e3(m,ks  ,js  ,i) += ec3;
+        e3(m,ks  ,je+1,i) += ec3;
+      });
+    } else if (pmy_pack->pmesh->two_d) {
+      par_for("emf2_chiral", DevExeSpace(), 0, nmb1, js, je+1, is, ie+1,
+      KOKKOS_LAMBDA(int m, int j, int i) {
+        Real e1a[3], e1b[3], e2a[3], e2b[3];
+        // e1 sits at a face in x2 (and the degenerate x3): average over j-1, j
+        CellChiralEMF(w0_, bcc_, adm, m, ks, j-1, i, e1a[0], e1a[1], e1a[2]);
+        CellChiralEMF(w0_, bcc_, adm, m, ks, j  , i, e1b[0], e1b[1], e1b[2]);
+        const Real ec1 = 0.5*(e1a[0] + e1b[0]);
+        // e2 sits at a face in x1 (and the degenerate x3): average over i-1, i
+        CellChiralEMF(w0_, bcc_, adm, m, ks, j, i-1, e2a[0], e2a[1], e2a[2]);
+        CellChiralEMF(w0_, bcc_, adm, m, ks, j, i  , e2b[0], e2b[1], e2b[2]);
+        const Real ec2 = 0.5*(e2a[1] + e2b[1]);
+        // e3 sits at a face in both x1 and x2: average over the four cells
+        Real c00[3], c01[3], c10[3], c11[3];
+        CellChiralEMF(w0_, bcc_, adm, m, ks, j-1, i-1, c00[0], c00[1], c00[2]);
+        CellChiralEMF(w0_, bcc_, adm, m, ks, j-1, i  , c01[0], c01[1], c01[2]);
+        CellChiralEMF(w0_, bcc_, adm, m, ks, j  , i-1, c10[0], c10[1], c10[2]);
+        CellChiralEMF(w0_, bcc_, adm, m, ks, j  , i  , c11[0], c11[1], c11[2]);
+        const Real ec3 = 0.25*(c00[2] + c01[2] + c10[2] + c11[2]);
+
+        e1(m,ks  ,j,i) += ec1;
+        e1(m,ke+1,j,i) += ec1;
+        e2(m,ks  ,j,i) += ec2;
+        e2(m,ke+1,j,i) += ec2;
+        e3(m,ks  ,j,i) += ec3;
+      });
+    } else {
+      par_for("emf3_chiral", DevExeSpace(), 0, nmb1, ks, ke+1, js, je+1, is, ie+1,
+      KOKKOS_LAMBDA(int m, int k, int j, int i) {
+        Real c[3];
+        // each edge is shared by the four cells around it
+        Real ec1 = 0.0, ec2 = 0.0, ec3 = 0.0;
+        for (int dk = -1; dk <= 0; ++dk) {
+          for (int dj = -1; dj <= 0; ++dj) {   // e1: faces in x2 and x3
+            CellChiralEMF(w0_, bcc_, adm, m, k+dk, j+dj, i, c[0], c[1], c[2]);
+            ec1 += 0.25*c[0];
+          }
+        }
+        for (int dk = -1; dk <= 0; ++dk) {
+          for (int di = -1; di <= 0; ++di) {   // e2: faces in x1 and x3
+            CellChiralEMF(w0_, bcc_, adm, m, k+dk, j, i+di, c[0], c[1], c[2]);
+            ec2 += 0.25*c[1];
+          }
+        }
+        for (int dj = -1; dj <= 0; ++dj) {
+          for (int di = -1; di <= 0; ++di) {   // e3: faces in x1 and x2
+            CellChiralEMF(w0_, bcc_, adm, m, k, j+dj, i+di, c[0], c[1], c[2]);
+            ec3 += 0.25*c[2];
+          }
+        }
+        e1(m,k,j,i) += ec1;
+        e2(m,k,j,i) += ec2;
+        e3(m,k,j,i) += ec3;
+      });
+    }
   }
 
   // Add resistive electric field (if needed)
