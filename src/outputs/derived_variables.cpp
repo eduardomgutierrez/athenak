@@ -1067,6 +1067,9 @@ void BaseTypeOutput::ComputeDerivedVariable(std::string name, Mesh *pm) {
     // Multi-frequency radiation
     bool multi_freq = pm->pmb_pack->prad->multi_freq;
     int nfreq_ = pm->pmb_pack->prad->nfreq;
+    // radnu_* moments carry one slot per species per group, ordered species-major
+    int nsf_ = pm->pmb_pack->prad->NFreqOut();
+    int nspecies_ = pm->pmb_pack->prad->nspecies;
 
     // Determine if coordinate and/or fluid frame moments required
     bool needs_coord_only = (name.compare("rad_coord") == 0);
@@ -1086,7 +1089,7 @@ void BaseTypeOutput::ComputeDerivedVariable(std::string name, Mesh *pm) {
     int moments_offset = (needs_both) ? 10 : 0;
     Kokkos::realloc(derived_var, nmb, mom_var_size, n3, n2, n1);
     auto dv = derived_var;
-    if (multi_freq) Kokkos::realloc(derived_var6d, nmb, mom_var_size, nfreq_, n3, n2, n1);
+    if (multi_freq) Kokkos::realloc(derived_var6d, nmb, mom_var_size, nsf_, n3, n2, n1);
     auto dv6d = derived_var6d;
 
     // Coordinates
@@ -1137,23 +1140,10 @@ void BaseTypeOutput::ComputeDerivedVariable(std::string name, Mesh *pm) {
       for (int n1=0, n12=0; n1<4; ++n1) {
         for (int n2=n1; n2<4; ++n2, ++n12) {
           if (!multi_freq) {
-            // gray radiation
+            // gray radiation: sum over species (i0 is indexed nspecies*nang here)
             dv(m,n12,k,j,i) = 0.0;
-            for (int n=0; n<=nang1; ++n) {
-              Real nmun1 = 0.0; Real nmun2 = 0.0; Real n_0 = 0.0;
-              for (int d=0; d<4; ++d) {
-                nmun1 += tet_c_   (m,d,n1,k,j,i)*nh_c_.d_view(n,d);
-                nmun2 += tet_c_   (m,d,n2,k,j,i)*nh_c_.d_view(n,d);
-                n_0   += tetcov_c_(m,d,0, k,j,i)*nh_c_.d_view(n,d);
-              }
-              dv(m,n12,k,j,i) += (nmun1*nmun2*(i0_(m,n,k,j,i)/(n0*n_0))*
-                                  solid_angles_.d_view(n));
-            } // endfor n
-          } else { // multi_freq
-            // multi-frequency radiation
-            dv(m,n12,k,j,i) = 0.0; // frequency-integrated moments
-            for (int ifr=0; ifr<nfreq_; ++ifr) {
-              dv6d(m,n12,ifr,k,j,i) = 0.0; // each frequency group
+            for (int isp=0; isp<nspecies_; ++isp) {
+              int sp_off = isp*nang;
               for (int n=0; n<=nang1; ++n) {
                 Real nmun1 = 0.0; Real nmun2 = 0.0; Real n_0 = 0.0;
                 for (int d=0; d<4; ++d) {
@@ -1161,12 +1151,32 @@ void BaseTypeOutput::ComputeDerivedVariable(std::string name, Mesh *pm) {
                   nmun2 += tet_c_   (m,d,n2,k,j,i)*nh_c_.d_view(n,d);
                   n_0   += tetcov_c_(m,d,0, k,j,i)*nh_c_.d_view(n,d);
                 }
-                int i_fr_ang = getFreqAngIndex(ifr, n, nang);
-                dv6d(m,n12,ifr,k,j,i) += (nmun1*nmun2*(i0_(m,i_fr_ang,k,j,i)/(n0*n_0))*
+                dv(m,n12,k,j,i) += (nmun1*nmun2*(i0_(m,sp_off+n,k,j,i)/(n0*n_0))*
+                                    solid_angles_.d_view(n));
+              } // endfor n
+            } // endfor isp
+          } else { // multi_freq
+            // multi-frequency radiation
+            dv(m,n12,k,j,i) = 0.0; // frequency-integrated moments
+            for (int isf=0; isf<nsf_; ++isf) {
+              int isp = isf/nfreq_;              // species index
+              int ifr = isf - isp*nfreq_;        // group index within that species
+              int sp_off = isp*nfreq_*nang;      // i0 is indexed nspecies*nfreq*nang
+              dv6d(m,n12,isf,k,j,i) = 0.0; // each species and frequency group
+              for (int n=0; n<=nang1; ++n) {
+                Real nmun1 = 0.0; Real nmun2 = 0.0; Real n_0 = 0.0;
+                for (int d=0; d<4; ++d) {
+                  nmun1 += tet_c_   (m,d,n1,k,j,i)*nh_c_.d_view(n,d);
+                  nmun2 += tet_c_   (m,d,n2,k,j,i)*nh_c_.d_view(n,d);
+                  n_0   += tetcov_c_(m,d,0, k,j,i)*nh_c_.d_view(n,d);
+                }
+                int i_fr_ang = sp_off + getFreqAngIndex(ifr, n, nang);
+                dv6d(m,n12,isf,k,j,i) += (nmun1*nmun2*(i0_(m,i_fr_ang,k,j,i)/(n0*n_0))*
                                           solid_angles_.d_view(n));
               } // endfor n
-              dv(m,n12,k,j,i) += dv6d(m,n12,ifr,k,j,i);
-            } // endfor ifr
+              // frequency-integrated moments sum over every group and species
+              dv(m,n12,k,j,i) += dv6d(m,n12,isf,k,j,i);
+            } // endfor isf
           } // endelse (!multi_freq)
         } // endfor n2
       } // endfor n1
@@ -1245,18 +1255,18 @@ void BaseTypeOutput::ComputeDerivedVariable(std::string name, Mesh *pm) {
           } // endfor n1
         } else {
           // multi-frequency radiation
-          for (int ifr=0; ifr<nfreq_; ++ifr) {
+          for (int isf=0; isf<nsf_; ++isf) {
             Real moments_coord_f[4][4];
-            moments_coord_f[0][0] = dv6d(m,0,ifr,k,j,i);
-            moments_coord_f[0][1] = dv6d(m,1,ifr,k,j,i);
-            moments_coord_f[0][2] = dv6d(m,2,ifr,k,j,i);
-            moments_coord_f[0][3] = dv6d(m,3,ifr,k,j,i);
-            moments_coord_f[1][1] = dv6d(m,4,ifr,k,j,i);
-            moments_coord_f[1][2] = dv6d(m,5,ifr,k,j,i);
-            moments_coord_f[1][3] = dv6d(m,6,ifr,k,j,i);
-            moments_coord_f[2][2] = dv6d(m,7,ifr,k,j,i);
-            moments_coord_f[2][3] = dv6d(m,8,ifr,k,j,i);
-            moments_coord_f[3][3] = dv6d(m,9,ifr,k,j,i);
+            moments_coord_f[0][0] = dv6d(m,0,isf,k,j,i);
+            moments_coord_f[0][1] = dv6d(m,1,isf,k,j,i);
+            moments_coord_f[0][2] = dv6d(m,2,isf,k,j,i);
+            moments_coord_f[0][3] = dv6d(m,3,isf,k,j,i);
+            moments_coord_f[1][1] = dv6d(m,4,isf,k,j,i);
+            moments_coord_f[1][2] = dv6d(m,5,isf,k,j,i);
+            moments_coord_f[1][3] = dv6d(m,6,isf,k,j,i);
+            moments_coord_f[2][2] = dv6d(m,7,isf,k,j,i);
+            moments_coord_f[2][3] = dv6d(m,8,isf,k,j,i);
+            moments_coord_f[3][3] = dv6d(m,9,isf,k,j,i);
             moments_coord_f[1][0] = moments_coord_f[0][1];
             moments_coord_f[2][0] = moments_coord_f[0][2];
             moments_coord_f[3][0] = moments_coord_f[0][3];
@@ -1265,23 +1275,23 @@ void BaseTypeOutput::ComputeDerivedVariable(std::string name, Mesh *pm) {
             moments_coord_f[3][2] = moments_coord_f[2][3];
             for (int n1=0, n12=0; n1<4; ++n1) {
               for (int n2=n1; n2<4; ++n2, ++n12) {
-                dv6d(m,moments_offset+n12,ifr,k,j,i) = 0.0;
+                dv6d(m,moments_offset+n12,isf,k,j,i) = 0.0;
                 for (int m1=0; m1<4; ++m1) {
                   for (int m2=0; m2<4; ++m2) {
-                    dv6d(m,moments_offset+n12,ifr,k,j,i) += (tetcov_c_(m,n1,m1,k,j,i)*
+                    dv6d(m,moments_offset+n12,isf,k,j,i) += (tetcov_c_(m,n1,m1,k,j,i)*
                                                              tetcov_c_(m,n2,m2,k,j,i)*
                                                              moments_coord_f[m1][m2]);
                   } // endfor m2
                 } // endfor m1
               } // endfor n2
             } // endfor n1
-          } // endfor ifr
+          } // endfor isf
 
           for (int n12=0; n12<10; ++n12) {
             dv(m,moments_offset+n12,k,j,i) = 0.0;
-            for (int ifr=0; ifr<nfreq_; ++ifr) {
-              dv(m,moments_offset+n12,k,j,i) += dv6d(m,moments_offset+n12,ifr,k,j,i);
-            } // endfor ifr
+            for (int isf=0; isf<nsf_; ++isf) {
+              dv(m,moments_offset+n12,k,j,i) += dv6d(m,moments_offset+n12,isf,k,j,i);
+            } // endfor isf
           } // endfor n12
         } // endelse (!multi_freq)
 
@@ -1289,11 +1299,11 @@ void BaseTypeOutput::ComputeDerivedVariable(std::string name, Mesh *pm) {
         dv(m,moments_offset+2,k,j,i) *= -1.0;
         dv(m,moments_offset+3,k,j,i) *= -1.0;
         if (multi_freq) {
-          for (int ifr=0; ifr<nfreq_; ++ifr) {
-            dv6d(m,moments_offset+1,ifr,k,j,i) *= -1.0;
-            dv6d(m,moments_offset+2,ifr,k,j,i) *= -1.0;
-            dv6d(m,moments_offset+3,ifr,k,j,i) *= -1.0;
-          } // endfor ifr
+          for (int isf=0; isf<nsf_; ++isf) {
+            dv6d(m,moments_offset+1,isf,k,j,i) *= -1.0;
+            dv6d(m,moments_offset+2,isf,k,j,i) *= -1.0;
+            dv6d(m,moments_offset+3,isf,k,j,i) *= -1.0;
+          } // endfor isf
         } // endelse (!multi_freq)
 
         // stash tetrad frame moments
@@ -1332,18 +1342,18 @@ void BaseTypeOutput::ComputeDerivedVariable(std::string name, Mesh *pm) {
           } // endfor n1
         } else {
           // multi-frequency radiation
-          for (int ifr=0; ifr<nfreq_; ++ifr) {
+          for (int isf=0; isf<nsf_; ++isf) {
             Real moments_tetrad_f[4][4];
-            moments_tetrad_f[0][0] = dv6d(m,moments_offset+0,ifr,k,j,i);
-            moments_tetrad_f[0][1] = dv6d(m,moments_offset+1,ifr,k,j,i);
-            moments_tetrad_f[0][2] = dv6d(m,moments_offset+2,ifr,k,j,i);
-            moments_tetrad_f[0][3] = dv6d(m,moments_offset+3,ifr,k,j,i);
-            moments_tetrad_f[1][1] = dv6d(m,moments_offset+4,ifr,k,j,i);
-            moments_tetrad_f[1][2] = dv6d(m,moments_offset+5,ifr,k,j,i);
-            moments_tetrad_f[1][3] = dv6d(m,moments_offset+6,ifr,k,j,i);
-            moments_tetrad_f[2][2] = dv6d(m,moments_offset+7,ifr,k,j,i);
-            moments_tetrad_f[2][3] = dv6d(m,moments_offset+8,ifr,k,j,i);
-            moments_tetrad_f[3][3] = dv6d(m,moments_offset+9,ifr,k,j,i);
+            moments_tetrad_f[0][0] = dv6d(m,moments_offset+0,isf,k,j,i);
+            moments_tetrad_f[0][1] = dv6d(m,moments_offset+1,isf,k,j,i);
+            moments_tetrad_f[0][2] = dv6d(m,moments_offset+2,isf,k,j,i);
+            moments_tetrad_f[0][3] = dv6d(m,moments_offset+3,isf,k,j,i);
+            moments_tetrad_f[1][1] = dv6d(m,moments_offset+4,isf,k,j,i);
+            moments_tetrad_f[1][2] = dv6d(m,moments_offset+5,isf,k,j,i);
+            moments_tetrad_f[1][3] = dv6d(m,moments_offset+6,isf,k,j,i);
+            moments_tetrad_f[2][2] = dv6d(m,moments_offset+7,isf,k,j,i);
+            moments_tetrad_f[2][3] = dv6d(m,moments_offset+8,isf,k,j,i);
+            moments_tetrad_f[3][3] = dv6d(m,moments_offset+9,isf,k,j,i);
             moments_tetrad_f[1][0] = moments_tetrad_f[0][1];
             moments_tetrad_f[2][0] = moments_tetrad_f[0][2];
             moments_tetrad_f[3][0] = moments_tetrad_f[0][3];
@@ -1352,23 +1362,23 @@ void BaseTypeOutput::ComputeDerivedVariable(std::string name, Mesh *pm) {
             moments_tetrad_f[3][2] = moments_tetrad_f[2][3];
             for (int n1=0, n12=0; n1<4; ++n1) {
               for (int n2=n1; n2<4; ++n2, ++n12) {
-                dv6d(m,moments_offset+n12,ifr,k,j,i) = 0.0;
+                dv6d(m,moments_offset+n12,isf,k,j,i) = 0.0;
                 for (int m1=0; m1<4; ++m1) {
                   for (int m2=0; m2<4; ++m2) {
-                    dv6d(m,moments_offset+n12,ifr,k,j,i) += (tet_to_fluid[n1][m1]*
+                    dv6d(m,moments_offset+n12,isf,k,j,i) += (tet_to_fluid[n1][m1]*
                                                              tet_to_fluid[n2][m2]*
                                                              moments_tetrad_f[m1][m2]);
                   } // endfor m2
                 } // endfor m1
               } // endfor n2
             } // endfor n1
-          } // endfor ifr
+          } // endfor isf
 
           for (int n12=0; n12<10; ++n12) {
             dv(m,moments_offset+n12,k,j,i) = 0.0;
-            for (int ifr=0; ifr<nfreq_; ++ifr) {
-              dv(m,moments_offset+n12,k,j,i) += dv6d(m,moments_offset+n12,ifr,k,j,i);
-            } // endfor ifr
+            for (int isf=0; isf<nsf_; ++isf) {
+              dv(m,moments_offset+n12,k,j,i) += dv6d(m,moments_offset+n12,isf,k,j,i);
+            } // endfor isf
           } // endfor n12
         } // endelse (!multi_freq)
       } // endif fluid-frame output
@@ -1401,5 +1411,11 @@ void BaseTypeOutput::ComputeDerivedVariable(std::string name, Mesh *pm) {
       pdens(m,0,kp,jp,ip) += 1.0;
     });
   }
-  i_dv = i_dv % n_dv; // reset derived variable index
+  // n_dv is zero for outputs whose variables are all 6D (the radnu_* multi-frequency
+  // moments bump n_derived_6d only), so guard the reset against a division by zero.
+  if (n_dv > 0) {
+    i_dv = i_dv % n_dv; // reset derived variable index
+  } else {
+    i_dv = 0;
+  }
 }

@@ -160,6 +160,10 @@ class Radiation {
   int nspecies = 1;            // number of radiation species (1 for photons, 3-4 for neutrinos)
   bool multi_freq = false;
   int nfreq = 1;               // for multi-frequency, nfreq >= 3
+  // Number of (species, frequency) slots in the multi-frequency output arrays.
+  // i0 is indexed nspecies*nfreq*nangles, so the radnu_* moments carry one slot
+  // per species per group, ordered species-major: slot = isp*nfreq + ifr.
+  int NFreqOut() const { return nspecies*nfreq; }
   int flag_fscale;             // 0: linear, 1: log, 2: customize
   Real nu_max, nu_min;         // minimum and maximum frequency (excluding zero and infinity)
   bool freq_fluxes;            // flag to enable/disable frequency fluxes

@@ -976,8 +976,8 @@ void BaseTypeOutput::LoadOutputData(Mesh *pm) {
     Kokkos::realloc(outarray, nout_vars, nout_mbs, nout3, nout2, nout1);
     if (out_params.n_derived_6d > 0) { // multi-frequency radiation
       int nout_ = out_params.n_derived_6d;
-      int nfreq_ = pm->pmb_pack->prad->nfreq;
-      Kokkos::realloc(outarray_6d, nout_, nout_mbs, nfreq_, nout3, nout2, nout1);
+      int nsf_ = pm->pmb_pack->prad->NFreqOut();
+      Kokkos::realloc(outarray_6d, nout_, nout_mbs, nsf_, nout3, nout2, nout1);
     } // endif (out_params.n_derived_6d > 0)
   }
 
@@ -1016,12 +1016,12 @@ void BaseTypeOutput::LoadOutputData(Mesh *pm) {
   // Now copy multi-frequency data to host (outarray_6d) and MeshBlocks
   // note: data extraction for multi-frequency radiation has to be the last
   if (out_params.n_derived_6d > 0) {
-    int nfreq_ = pm->pmb_pack->prad->nfreq;
-    // extract multi-frequency data
+    int nsf_ = pm->pmb_pack->prad->NFreqOut();
+    // extract multi-frequency data (one slot per species per group)
     for (int n=0; n<outvars_6d.size(); ++n) {
       for (int m=0; m<nout_mbs; ++m) {
         int mbi = pm->FindMeshBlockIndex(outmbs[m].mb_gid);
-        std::pair<int,int> frange = std::make_pair(0, nfreq_);
+        std::pair<int,int> frange = std::make_pair(0, nsf_);
         std::pair<int,int> irange = std::make_pair(outmbs[m].ois, outmbs[m].oie+1);
         std::pair<int,int> jrange = std::make_pair(outmbs[m].ojs, outmbs[m].oje+1);
         std::pair<int,int> krange = std::make_pair(outmbs[m].oks, outmbs[m].oke+1);
@@ -1030,7 +1030,7 @@ void BaseTypeOutput::LoadOutputData(Mesh *pm) {
         int nout3 = (outmbs[0].oke - outmbs[0].oks + 1);
 
         // copy output variable to new device View
-        DvceArray4D<Real> d_output_6d("d_output_6d",nfreq_,nout3,nout2,nout1);
+        DvceArray4D<Real> d_output_6d("d_output_6d",nsf_,nout3,nout2,nout1);
         auto d_slice = Kokkos::subview(*(outvars_6d[n].data6d_ptr), mbi, outvars_6d[n].data_index,
                                        frange,krange,jrange,irange);
         Kokkos::deep_copy(d_output_6d,d_slice);

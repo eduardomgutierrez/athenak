@@ -145,7 +145,7 @@ void MeshBinaryOutput::WriteOutputFile(Mesh *pm, ParameterInput *pin) {
   int n_freq_ = 1;
   bool save_radnu = (out_params.n_derived_6d > 0);
   if (save_radnu) {
-    n_freq_ = pm->pmb_pack->prad->nfreq;
+    n_freq_ = pm->pmb_pack->prad->NFreqOut();
     nout_vars = outvars_6d.size();
     cells *= n_freq_;
   }
