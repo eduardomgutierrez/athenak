@@ -107,6 +107,9 @@ class Radiation {
   bool nurates_debug_opacity = false;
   Real nurates_baryon_mass = 1.0;    // baryon mass in code units (for Ye update)
   Real nurates_code_num_to_eos_num = 1.0; // code number density -> EOS number density
+  // Neutrino number densities (nurates_eta_0*, and the N reconstructed from them in
+  // the source terms) are in the EOS number-density unit, fm^-3, as in radiation_m1/;
+  // everything else below is in code units.
   DvceArray5D<Real> nurates_eta_0;   // number emissivity    [nspecies, nk, nj, ni]
   DvceArray5D<Real> nurates_eta_1;   // energy emissivity
   DvceArray5D<Real> nurates_abs_0;   // number absorption opacity

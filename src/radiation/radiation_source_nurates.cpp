@@ -91,7 +91,6 @@ TaskStatus Radiation::RadFluidCouplingNurates(Driver *pdriver, int stage) {
   auto &nurates_abs_1_ = nurates_abs_1;
   auto &nurates_scat_1_ = nurates_scat_1;
   Real mb_code_ = nurates_baryon_mass;
-  Real code_num_to_eos_num_ = nurates_code_num_to_eos_num;
 
   // Update primitives before source term application
   if (!(fixed_fluid_)) {
@@ -265,6 +264,8 @@ TaskStatus Radiation::RadFluidCouplingNurates(Driver *pdriver, int stage) {
         Real abs0 = nurates_abs_0_(m, isp, k, j, i);
         Real abs1 = nurates_abs_1_(m, isp, k, j, i);
         // Estimate gray number density so J=eta1/abs1 implies N=eta0/abs0.
+        // eta_0 and abs_0 come from nurates with eta_0 in fm^-3 per code time,
+        // so eps_eq is a code energy density per fm^-3 and N is in fm^-3.
         Real eps_eq = (eta0 > 0.0 && abs0 > 0.0 && abs1 > 0.0) ?
                       (eta1/abs1)/(eta0/abs0) : 0.0;
         Real N_old = (eps_eq > 0.0) ? J_old/eps_eq : 0.0;
@@ -306,7 +307,9 @@ TaskStatus Radiation::RadFluidCouplingNurates(Driver *pdriver, int stage) {
             dN_anue = gamma*dJ_fluid[1]/eps_anue;
           }
         }
-        Real dDYe = mb_code_*code_num_to_eos_num_*(-dN_nue + dN_anue);
+        // dN_* are in fm^-3, matching the EOS number-density unit that
+        // GetBaryonMass() is defined against.
+        Real dDYe = mb_code_*(-dN_nue + dN_anue);
 
         Real cons_dens = u0_(m,IDN,k,j,i);
         if (cons_dens > 0.0) {
@@ -590,6 +593,8 @@ TaskStatus Radiation::MultiFreqRadFluidCouplingNurates(Driver *pdriver, int stag
     }
     for (int isp=0; isp<4; ++isp) {
       dN_rad_moment[isp] /= wght_sum;
+      // the moment sum is in code units; number densities are carried in fm^-3
+      dN_rad_moment[isp] *= code_num_to_eos_num_;
     }
 
     if (affect_fluid_) {
@@ -609,7 +614,7 @@ TaskStatus Radiation::MultiFreqRadFluidCouplingNurates(Driver *pdriver, int stag
       if (evolve_ye_ && nsp_ > 1 && is_mhd_enabled_) {
         Real dN_nue = dN_rad_moment[0];
         Real dN_anue = dN_rad_moment[1];
-        Real dDYe = mb_code_*code_num_to_eos_num_*(-dN_nue + dN_anue);
+        Real dDYe = mb_code_*(-dN_nue + dN_anue);
         Real cons_dens = u0_(m,IDN,k,j,i);
         if (cons_dens > 0.0) {
           Real ye_old = w0_(m,IYF,k,j,i);

@@ -373,9 +373,9 @@ SpectralOpacities RadiationComputeSpectralOpacitiesStimulatedAbs(
 //! \param[in]  mu_n        neutron chemical potential (MeV)
 //! \param[in]  mu_p        proton chemical potential (MeV)
 //! \param[in]  mu_e        electron chemical potential (MeV)
-//! \param[in]  nudens_0    neutrino number densities [4] (code units, per species)
+//! \param[in]  nudens_0    neutrino number densities [4] (fm^-3, per species)
 //! \param[in]  nudens_1    neutrino energy densities [4] (code units, per species)
-//! \param[out] eta_0       number emissivity [nspecies] (code units)
+//! \param[out] eta_0       number emissivity [nspecies] (fm^-3 per code time)
 //! \param[out] eta_1       energy emissivity [nspecies] (code units)
 //! \param[out] abs_0       number absorption opacity [nspecies] (code units)
 //! \param[out] abs_1       energy absorption opacity [nspecies] (code units)
@@ -402,14 +402,11 @@ void bns_nurates_gray(Real nb, Real temp, Real yp, Real yn,
 
   const Real unit_length    = code_units.LengthConversion(nurates_units);
   const Real unit_time      = code_units.TimeConversion(nurates_units);
-  const Real unit_eos_num_dens  = eos_units.NumberDensityConversion(nurates_units);
-  // nudens_0 reaches this function in CODE units (see the \param docs above): the
-  // multi-frequency solver builds it from the intensity moments, unlike M1 whose N
-  // moment is already fm^-3. largesim-m1 made UnitSystem::numberDensity a constant
-  // fm^-3 for every system, so NumberDensityConversion no longer carries the code
-  // length scale that this conversion needs -- 1/VolumeConversion does, and equals
-  // the pre-merge project/cme factor (3.105892e-37 for GeometricSolar) exactly.
-  const Real unit_code_num_dens = 1.0/code_units.VolumeConversion(nurates_units);
+  // Every number density crossing this interface -- the baryon density nb, the
+  // neutrino densities nudens_0 and the number emissivity eta_0 -- is in the EOS
+  // number-density unit (fm^-3), as in radiation_m1/.  Energy densities stay in
+  // code units, per the G = c = 1 convention.
+  const Real unit_num_dens  = eos_units.NumberDensityConversion(nurates_units);
   const Real unit_ene_dens  = code_units.EnergyDensityConversion(nurates_units);
 
   // zero outputs if below floor values
@@ -450,7 +447,7 @@ void bns_nurates_gray(Real nb, Real temp, Real yp, Real yn,
       nurates_params.use_BRT_brem ? BREM_BRT06 : BREM_HR98;
 
   // EOS quantities (convert to bns_nurates/nuclear units)
-  grey_op_params.eos_pars.nb   = nb * unit_eos_num_dens;  // [baryon/nm^3]
+  grey_op_params.eos_pars.nb   = nb * unit_num_dens;  // [baryon/nm^3]
   grey_op_params.eos_pars.temp = temp;                 // [MeV]
   grey_op_params.eos_pars.yp   = yp;                  // [dimensionless]
   grey_op_params.eos_pars.yn   = yn;                  // [dimensionless]
@@ -475,10 +472,10 @@ void bns_nurates_gray(Real nb, Real temp, Real yp, Real yn,
     // reconstruct from gray radiation moments (frequency-integrated)
     // nudens_0[isp] = number density, nudens_1[isp] = energy density
     // factor 1/2 for nux/anux: bns_nurates uses "mu or tau", gray rad uses "mu+tau"
-    grey_op_params.m1_pars.n[id_nue]  = nudens_0[0] * unit_code_num_dens;
-    grey_op_params.m1_pars.n[id_anue] = nudens_0[1] * unit_code_num_dens;
-    grey_op_params.m1_pars.n[id_nux]  = 0.5 * nudens_0[2] * unit_code_num_dens;
-    grey_op_params.m1_pars.n[id_anux] = 0.5 * nudens_0[3] * unit_code_num_dens;
+    grey_op_params.m1_pars.n[id_nue]  = nudens_0[0] * unit_num_dens;
+    grey_op_params.m1_pars.n[id_anue] = nudens_0[1] * unit_num_dens;
+    grey_op_params.m1_pars.n[id_nux]  = 0.5 * nudens_0[2] * unit_num_dens;
+    grey_op_params.m1_pars.n[id_anux] = 0.5 * nudens_0[3] * unit_num_dens;
 
     grey_op_params.m1_pars.J[id_nue]  = nudens_1[0] * unit_ene_dens;
     grey_op_params.m1_pars.J[id_anue] = nudens_1[1] * unit_ene_dens;
@@ -547,14 +544,14 @@ void bns_nurates_gray(Real nb, Real temp, Real yp, Real yn,
   //     eta_nuclear = eta_code * (unit_ene_dens / unit_time)
   //     => eta_code = eta_nuclear * unit_time / unit_ene_dens
   //
-  //   number emissivity [code_number_density / time]:
-  //     eta_0_nuclear = eta_0_code * (unit_code_num_dens / unit_time)
-  //     => eta_0_code = eta_0_nuclear * unit_time / unit_code_num_dens
+  //   number emissivity [fm^-3 / time]:
+  //     eta_0_nuclear = eta_0_eos * (unit_num_dens / unit_time)
+  //     => eta_0_eos = eta_0_nuclear * unit_time / unit_num_dens
   const Real kap_to_code  = unit_length;
   const Real eta1_to_code = unit_time / unit_ene_dens;
-  const Real eta0_to_code = unit_time / unit_code_num_dens;
+  const Real eta0_to_eos  = unit_time / unit_num_dens;
 
-  Real eq_n_code[4] = {0., 0., 0., 0.};
+  Real eq_n_eos[4] = {0., 0., 0., 0.};
   Real eq_J_code[4] = {0., 0., 0., 0.};
   if (nurates_params.use_kirchhoff_law) {
     M1Quantities eq_m1_pars = {0};
@@ -564,10 +561,10 @@ void bns_nurates_gray(Real nb, Real temp, Real yp, Real yn,
                          &eq_distr_pars,
                          &eq_m1_pars);
 
-    eq_n_code[0] = eq_m1_pars.n[id_nue] / unit_code_num_dens;
-    eq_n_code[1] = eq_m1_pars.n[id_anue] / unit_code_num_dens;
-    eq_n_code[2] = 2.0 * eq_m1_pars.n[id_nux] / unit_code_num_dens;
-    eq_n_code[3] = 2.0 * eq_m1_pars.n[id_anux] / unit_code_num_dens;
+    eq_n_eos[0] = eq_m1_pars.n[id_nue] / unit_num_dens;
+    eq_n_eos[1] = eq_m1_pars.n[id_anue] / unit_num_dens;
+    eq_n_eos[2] = 2.0 * eq_m1_pars.n[id_nux] / unit_num_dens;
+    eq_n_eos[3] = 2.0 * eq_m1_pars.n[id_anux] / unit_num_dens;
 
     eq_J_code[0] = eq_m1_pars.J[id_nue] / unit_ene_dens;
     eq_J_code[1] = eq_m1_pars.J[id_anue] / unit_ene_dens;
@@ -576,7 +573,7 @@ void bns_nurates_gray(Real nb, Real temp, Real yp, Real yn,
   }
 
   for (int idx = 0; idx < 4; ++idx) {
-    eta_0[idx]  *= eta0_to_code;
+    eta_0[idx]  *= eta0_to_eos;
     eta_1[idx]  *= eta1_to_code;
     abs_0[idx]  *= kap_to_code;
     abs_1[idx]  *= kap_to_code;
@@ -584,7 +581,7 @@ void bns_nurates_gray(Real nb, Real temp, Real yp, Real yn,
     // scat_0 is set to zero above; conversion unnecessary
 
     if (nurates_params.use_kirchhoff_law) {
-      eta_0[idx] = (abs_0[idx] > 0.0) ? abs_0[idx] * eq_n_code[idx] : eta_0[idx];
+      eta_0[idx] = (abs_0[idx] > 0.0) ? abs_0[idx] * eq_n_eos[idx] : eta_0[idx];
       eta_1[idx] = (abs_1[idx] > 0.0) ? abs_1[idx] * eq_J_code[idx] : eta_1[idx];
     }
   }
@@ -594,7 +591,8 @@ void bns_nurates_gray(Real nb, Real temp, Real yp, Real yn,
 //! \fn void bns_nurates_spectral_bin
 //! \brief Midpoint/quadrature wrapper for bns_nurates spectral opacity coefficients.
 //!        The frequency bin bounds are code-energy values; outputs are bin-integrated
-//!        emissivities and bin-centered opacities in code units.
+//!        emissivities and bin-centered opacities in code units, except the number
+//!        emissivity eta_0, which is in fm^-3 per code time (as is the input nudens_0).
 KOKKOS_INLINE_FUNCTION
 void bns_nurates_spectral_bin(Real e_lo_code, Real e_hi_code,
                               int freq_scale,
@@ -610,14 +608,11 @@ void bns_nurates_spectral_bin(Real e_lo_code, Real e_hi_code,
 
   const Real unit_length    = code_units.LengthConversion(nurates_units);
   const Real unit_time      = code_units.TimeConversion(nurates_units);
-  const Real unit_eos_num_dens  = eos_units.NumberDensityConversion(nurates_units);
-  // nudens_0 reaches this function in CODE units (see the \param docs above): the
-  // multi-frequency solver builds it from the intensity moments, unlike M1 whose N
-  // moment is already fm^-3. largesim-m1 made UnitSystem::numberDensity a constant
-  // fm^-3 for every system, so NumberDensityConversion no longer carries the code
-  // length scale that this conversion needs -- 1/VolumeConversion does, and equals
-  // the pre-merge project/cme factor (3.105892e-37 for GeometricSolar) exactly.
-  const Real unit_code_num_dens = 1.0/code_units.VolumeConversion(nurates_units);
+  // Every number density crossing this interface -- the baryon density nb, the
+  // neutrino densities nudens_0 and the number emissivity eta_0 -- is in the EOS
+  // number-density unit (fm^-3), as in radiation_m1/.  Energy densities stay in
+  // code units, per the G = c = 1 convention.
+  const Real unit_num_dens  = eos_units.NumberDensityConversion(nurates_units);
   const Real unit_ene_dens  = code_units.EnergyDensityConversion(nurates_units);
   const Real unit_energy    = code_units.EnergyConversion(nurates_units);
 
@@ -654,7 +649,7 @@ void bns_nurates_spectral_bin(Real e_lo_code, Real e_hi_code,
   grey_op_params.opacity_pars.brem_implementation  =
       nurates_params.use_BRT_brem ? BREM_BRT06 : BREM_HR98;
 
-  grey_op_params.eos_pars.nb   = nb * unit_eos_num_dens;
+  grey_op_params.eos_pars.nb   = nb * unit_num_dens;
   grey_op_params.eos_pars.temp = temp;
   grey_op_params.eos_pars.yp   = yp;
   grey_op_params.eos_pars.yn   = yn;
@@ -673,10 +668,10 @@ void bns_nurates_spectral_bin(Real e_lo_code, Real e_hi_code,
       grey_op_params.m1_pars.chi[idx] = 1./3.;
     }
   } else {
-    grey_op_params.m1_pars.n[id_nue]  = nudens_0[0] * unit_code_num_dens;
-    grey_op_params.m1_pars.n[id_anue] = nudens_0[1] * unit_code_num_dens;
-    grey_op_params.m1_pars.n[id_nux]  = 0.5 * nudens_0[2] * unit_code_num_dens;
-    grey_op_params.m1_pars.n[id_anux] = 0.5 * nudens_0[3] * unit_code_num_dens;
+    grey_op_params.m1_pars.n[id_nue]  = nudens_0[0] * unit_num_dens;
+    grey_op_params.m1_pars.n[id_anue] = nudens_0[1] * unit_num_dens;
+    grey_op_params.m1_pars.n[id_nux]  = 0.5 * nudens_0[2] * unit_num_dens;
+    grey_op_params.m1_pars.n[id_anux] = 0.5 * nudens_0[3] * unit_num_dens;
 
     grey_op_params.m1_pars.J[id_nue]  = nudens_1[0] * unit_ene_dens;
     grey_op_params.m1_pars.J[id_anue] = nudens_1[1] * unit_ene_dens;
@@ -718,11 +713,11 @@ void bns_nurates_spectral_bin(Real e_lo_code, Real e_hi_code,
   eta_1[3] *= 2.;
 
   const Real kap_to_code  = unit_length;
-  const Real eta0_to_code = unit_time / unit_code_num_dens;
+  const Real eta0_to_eos  = unit_time / unit_num_dens;
   const Real eta1_to_code = unit_time / unit_ene_dens;
 
   for (int idx = 0; idx < 4; ++idx) {
-    eta_0[idx]  *= eta0_to_code;
+    eta_0[idx]  *= eta0_to_eos;
     eta_1[idx]  *= eta1_to_code;
     abs_0[idx]   = op_mid.kappa[idx] * kap_to_code;
     abs_1[idx]   = op_mid.kappa[idx] * kap_to_code;

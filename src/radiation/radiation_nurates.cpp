@@ -103,6 +103,11 @@ TaskStatus Radiation::CalcOpacityNurates_(Driver *pdrive, int stage) {
   // Unit systems
   auto code_units    = eos.GetCodeUnitSystem();
   auto eos_units_loc = eos.GetEOSUnitSystem();
+  // Neutrino number densities are carried in the EOS number-density unit (fm^-3)
+  // throughout the nurates interface, as in radiation_m1/.  The multi-frequency
+  // solver builds them from the intensity moments, which are in code units, so
+  // the conversion is applied once, at the single production site below.
+  const Real code_to_eos_num_dens = nurates_code_num_to_eos_num;
   bool debug_opacity_ = nurates_debug_opacity;
 
   // Nurates params (captured by value for use inside KOKKOS_LAMBDA)
@@ -161,8 +166,9 @@ TaskStatus Radiation::CalcOpacityNurates_(Driver *pdrive, int stage) {
     Real mu_p  = mu_b + mu_q;
     Real mu_e  = mu_le - mu_q;
 
-    // Neutrino number/energy densities in code units.  For multifrequency
-    // transport, derive number density directly from bin-integrated energy.
+    // Neutrino number densities in fm^-3, energy densities in code units.  For
+    // multifrequency transport, derive number density directly from the
+    // bin-integrated energy.
     Real nudens_0[4] = {0., 0., 0., 0.};
     Real nudens_1[4] = {0., 0., 0., 0.};
     if (multi_freq_ && !nurates_params_.use_equilibrium_distribution) {
@@ -235,6 +241,7 @@ TaskStatus Radiation::CalcOpacityNurates_(Driver *pdrive, int stage) {
         }
         nudens_1[isp] /= wght_sum;
         nudens_0[isp] /= wght_sum;
+        nudens_0[isp] *= code_to_eos_num_dens;
       }
     }
 
