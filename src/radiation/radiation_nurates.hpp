@@ -78,6 +78,7 @@ Primitive::UnitSystem MakeNuratesUnitSystem() {
     1e7,
     1.0,
     1e-21,
+    1e21,
     1.0,
     1.0 / mev_cgs,
     1e-21 / mev_cgs,
@@ -402,7 +403,13 @@ void bns_nurates_gray(Real nb, Real temp, Real yp, Real yn,
   const Real unit_length    = code_units.LengthConversion(nurates_units);
   const Real unit_time      = code_units.TimeConversion(nurates_units);
   const Real unit_eos_num_dens  = eos_units.NumberDensityConversion(nurates_units);
-  const Real unit_code_num_dens = code_units.NumberDensityConversion(nurates_units);
+  // nudens_0 reaches this function in CODE units (see the \param docs above): the
+  // multi-frequency solver builds it from the intensity moments, unlike M1 whose N
+  // moment is already fm^-3. largesim-m1 made UnitSystem::numberDensity a constant
+  // fm^-3 for every system, so NumberDensityConversion no longer carries the code
+  // length scale that this conversion needs -- 1/VolumeConversion does, and equals
+  // the pre-merge project/cme factor (3.105892e-37 for GeometricSolar) exactly.
+  const Real unit_code_num_dens = 1.0/code_units.VolumeConversion(nurates_units);
   const Real unit_ene_dens  = code_units.EnergyDensityConversion(nurates_units);
 
   // zero outputs if below floor values
@@ -604,7 +611,13 @@ void bns_nurates_spectral_bin(Real e_lo_code, Real e_hi_code,
   const Real unit_length    = code_units.LengthConversion(nurates_units);
   const Real unit_time      = code_units.TimeConversion(nurates_units);
   const Real unit_eos_num_dens  = eos_units.NumberDensityConversion(nurates_units);
-  const Real unit_code_num_dens = code_units.NumberDensityConversion(nurates_units);
+  // nudens_0 reaches this function in CODE units (see the \param docs above): the
+  // multi-frequency solver builds it from the intensity moments, unlike M1 whose N
+  // moment is already fm^-3. largesim-m1 made UnitSystem::numberDensity a constant
+  // fm^-3 for every system, so NumberDensityConversion no longer carries the code
+  // length scale that this conversion needs -- 1/VolumeConversion does, and equals
+  // the pre-merge project/cme factor (3.105892e-37 for GeometricSolar) exactly.
+  const Real unit_code_num_dens = 1.0/code_units.VolumeConversion(nurates_units);
   const Real unit_ene_dens  = code_units.EnergyDensityConversion(nurates_units);
   const Real unit_energy    = code_units.EnergyConversion(nurates_units);
 

@@ -13,6 +13,8 @@
 #include "coordinates.hpp"
 #include "cell_locations.hpp"
 #include "coordinates/adm.hpp"
+#include "z4c/z4c.hpp"
+#include "z4c/fastflow.hpp"
 
 // inlined spherical Kerr-Schild r evaluated at CKS x1, x2, x3
 KOKKOS_INLINE_FUNCTION
@@ -56,12 +58,6 @@ void Coordinates::SetExcisionMasks(DvceArray4D<bool> &excision_floor,
     Real &x2max = size.d_view(m).x2max;
     Real &x3min = size.d_view(m).x3min;
     Real &x3max = size.d_view(m).x3max;
-
-    // We calculate the distance to the corner to make sure that only cells completely
-    // inside the horizon are excised.
-    Real &dx1 = size.d_view(m).dx1;
-    Real &dx2 = size.d_view(m).dx2;
-    Real &dx3 = size.d_view(m).dx3;
 
     Real x1v   = CellCenterX(i  -is, indcs.nx1, x1min, x1max);
     Real x1vm1 = CellCenterX(i-1-is, indcs.nx1, x1min, x1max);
@@ -184,6 +180,99 @@ void Coordinates::UpdateExcisionMasks() {
     par_for("set_excision", DevExeSpace(), 0, nmb1, 0, (n3-1), 0, (n2-1), 0, (n1-1),
     KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
       bool excise = (adm.alpha(m,k,j,i) < excise_lapse);
+      floor(m,k,j,i) = excise;
+      flux(m,k,j,i) = excise;
+    });
+  }
+
+  if (coord_data.excision_scheme == ExcisionScheme::horizon) {
+    // capture variables for kernel
+    auto &indcs = pmy_pack->pmesh->mb_indcs;
+    auto &size = pmy_pack->pmb->mb_size;
+    int &ng = indcs.ng;
+    int is = indcs.is; int js = indcs.js; int ks = indcs.ks;
+    int n1 = indcs.nx1 + 2 * ng;
+    int n2 = (indcs.nx2 > 1) ? (indcs.nx2 + 2 * ng) : 1;
+    int n3 = (indcs.nx3 > 1) ? (indcs.nx3 + 2 * ng) : 1;
+    int nmb1 = pmy_pack->nmb_thispack - 1;
+    auto &floor = excision_floor;
+    auto &flux = excision_flux;
+
+    // set up arrays to hold horizon information
+    Real &horizon_factor = coord_data.horizon_factor;
+    int hsize = pmy_pack->pz4c->pfastflow.size();
+    DualArray2D<Real> hcenter("hcenter", hsize, 3);
+    DualArray2D<Real> hradius("hradius", hsize, 1);
+    DualArray2D<bool> hfound("hfound", hsize, 1);
+
+    // fill horizon arrays on host
+    bool freeze_r = (coord_data.freeze_excision && coord_data.freeze_excision_radius);
+    bool freeze_c = (coord_data.freeze_excision && coord_data.freeze_excision_center);
+    Real mesh_time = pmy_pack->pmesh->time;
+    for (int h = 0; h < hsize; ++h) {
+      auto &pahf = pmy_pack->pz4c->pfastflow[h];
+      // Excise only once the horizon finder has flagged this horizon as settled
+      // (ah_excise_ready, auto-detected in FastFlow::Find once the BH has stopped
+      // forming, and latched across restarts).
+      bool active = (pahf->ah_found && pahf->ah_excise_ready);
+      // Latch the snapshot the first time excision becomes active.  rr_min is reset to
+      // -1 by the constructor and not carried through restarts, so wait for a find in
+      // this execution to set it -- otherwise a restart would freeze a garbage radius.
+      if ((freeze_r || freeze_c) &&
+          (pahf->ah_frozen || (active && pahf->rr_min > 0.0))) {
+        pahf->FreezeExcisionRegion(mesh_time);
+      }
+      bool frozen_r = (freeze_r && pahf->ah_frozen);
+      bool frozen_c = (freeze_c && pahf->ah_frozen);
+
+      // The tracked center comes from the compact object tracker, so it stays valid in
+      // cycles where the horizon find does not converge.
+      hcenter.h_view(h,0) = frozen_c ? pahf->frozen_center[0] : pahf->center[0];
+      hcenter.h_view(h,1) = frozen_c ? pahf->frozen_center[1] : pahf->center[1];
+      hcenter.h_view(h,2) = frozen_c ? pahf->frozen_center[2] : pahf->center[2];
+
+      // rr_min is the only part needing a converged find, so once frozen the region
+      // stays excised even when ah_found is false.
+      hradius.h_view(h,0) = frozen_r ? pahf->frozen_radius : pahf->rr_min;
+      hfound.h_view(h,0) = frozen_r ? true : active;
+    }
+
+    // sync to device
+    hcenter.template modify<HostMemSpace>();
+    hcenter.template sync<DevExeSpace>();
+    hradius.template modify<HostMemSpace>();
+    hradius.template sync<DevExeSpace>();
+    hfound.template modify<HostMemSpace>();
+    hfound.template sync<DevExeSpace>();
+
+    par_for("set_excision_horizon", DevExeSpace(),0,nmb1,0,(n3-1),0,(n2-1),0,(n1-1),
+    KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
+      // Set MB specifics
+      Real &x1min = size.d_view(m).x1min;
+      Real &x1max = size.d_view(m).x1max;
+      Real &x2min = size.d_view(m).x2min;
+      Real &x2max = size.d_view(m).x2max;
+      Real &x3min = size.d_view(m).x3min;
+      Real &x3max = size.d_view(m).x3max;
+
+      Real x1 = CellCenterX(i - is, indcs.nx1, x1min, x1max);
+      Real x2 = CellCenterX(j - js, indcs.nx2, x2min, x2max);
+      Real x3 = CellCenterX(k - ks, indcs.nx3, x3min, x3max);
+
+      bool excise = false;
+      for (int h = 0; h < hsize; ++h) {
+        if (!hfound.d_view(h,0)) continue;
+
+        const Real r2 = SQR(x1 - hcenter.d_view(h,0)) +
+                        SQR(x2 - hcenter.d_view(h,1)) +
+                        SQR(x3 - hcenter.d_view(h,2));
+
+        if (r2 < SQR(hradius.d_view(h,0) * horizon_factor)) {
+          excise = true;
+          break;
+        }
+      }
+
       floor(m,k,j,i) = excise;
       flux(m,k,j,i) = excise;
     });

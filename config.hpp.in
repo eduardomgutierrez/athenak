@@ -25,17 +25,17 @@
 // use OpenMP parallelization? default=0 (false)
 #define OPENMP_PARALLEL_ENABLED @OPENMP_PARALLEL_ENABLED@
 
+// use bns_nurates
+#define ENABLE_NURATES @ENABLE_NURATES@
+
+// number of species for radiation_m1
+#define M1_TOTAL_NUM_SPECIES @M1_TOTAL_NUM_SPECIES@
+
 // Kokkos tight loop layout
 //#define @PAR_LOOP_LAYOUT@
 
 // Kokkos nested loop layout (inner)
 //#define @PAR_LOOP_INNER_LAYOUT@
-
-// use bns-nurates opacity library? default=0 (false)
-#define ENABLE_NURATES @ENABLE_NURATES@
-
-// number of neutrino species evolved by radiation_m1
-#define M1_TOTAL_NUM_SPECIES @M1_TOTAL_NUM_SPECIES@
 
 // compiler options
 #define COMPILED_WITH "@COMPILER_CHOICE@"

@@ -34,8 +34,8 @@ endif()
 option(Athena_SINGLE_PRECISION "Compile for single precision" OFF)
 option(Athena_ENABLE_MPI "Compile with MPI parallelism enabled" OFF)
 option(Athena_ENABLE_OPENMP "Compile with OpenMP parallelism enabled" OFF)
-option(Athena_ENABLE_RNS "Compile with RNS support enabled" OFF)
 option(Athena_ENABLE_NURATES "Compile with bns_nurates enabled" OFF)
+option(Athena_ENABLE_RNS "Compile with RNS support enabled" OFF)
 set(PROBLEM built_in_pgens CACHE STRING "Name of problem generator function")
 
 #------ set macros exported to config.hpp ------------------------------------------------
@@ -79,6 +79,16 @@ else()
   set(OPENMP_PARALLEL_ENABLED 0)
 endif()
 
+# set nurates macro (true/false)
+if(Athena_ENABLE_NURATES)
+  set(ENABLE_NURATES 1)
+  set(M1_TOTAL_NUM_SPECIES 4)
+  message(STATUS "Compiling with bns-nurates")
+else()
+  set(ENABLE_NURATES 0)
+  set(M1_TOTAL_NUM_SPECIES 1)
+endif ()
+
 #set user problem generator flag
 if (NOT ${PROBLEM} STREQUAL "built_in_pgens")
   message(STATUS "Including user-specified problem generator file: ${PROBLEM}")
@@ -101,6 +111,7 @@ endif()
 
 # If this is a debug build, set kokkos debug on
 if (${CMAKE_BUILD_TYPE} STREQUAL "Debug")
+  add_definitions(-DDEBUG_BUILD)
   message(STATUS "Enabling Kokkos debug mode")
   set(Kokkos_ENABLE_DEBUG ON CACHE BOOL "Most general debug settings")
   set(Kokkos_ENABLE_DEBUG_BOUNDS_CHECK ON CACHE BOOL
@@ -116,6 +127,9 @@ add_subdirectory(src)
 add_subdirectory(kokkos)
 include_directories(${Kokkos_INCLUDE_DIRS_RET})
 
+find_package(Threads REQUIRED)
+target_link_libraries(athena PUBLIC Threads::Threads)
+
 target_link_libraries(athena PUBLIC Kokkos::kokkos)
 if (ENABLE_MPI)
   target_link_libraries(athena PUBLIC MPI::MPI_CXX)
@@ -123,7 +137,7 @@ endif()
 if (ENABLE_OPENMP)
   target_link_libraries(athena PUBLIC OpenMP::OpenMP_CXX)
 endif()
-if (${PROBLEM} STREQUAL "z4c_two_puncture")
+if (${PROBLEM} MATCHES "z4c/two_punctures/*")
 	target_include_directories(athena PRIVATE ${CMAKE_SOURCE_DIR}/twopuncturesc/include)
 	target_link_libraries(athena PUBLIC ${CMAKE_SOURCE_DIR}/twopuncturesc/lib/libTwoPunctures.a)
 	#target_include_directories(athena PRIVATE ${CMAKE_SOURCE_DIR}/gsl/include)
@@ -136,7 +150,12 @@ else()
 	set(TWO_PUNCTURES 0)
 endif()
 
-if (${PROBLEM} STREQUAL "z4c_spectre_bbh")
+# Optionally include bns_nurates headers
+if (ENABLE_NURATES)
+  target_include_directories(athena PRIVATE ${CMAKE_SOURCE_DIR}/bns_nurates/include)
+endif()
+
+if (${PROBLEM} MATCHES "z4c/spectre/*")
   # Load binary black hole initial data from the SpECTRE code:
   # https://spectre-code.org
   #
@@ -162,7 +181,7 @@ if (${PROBLEM} STREQUAL "z4c_spectre_bbh")
   target_link_libraries(athena PRIVATE spectre::Exporter)
 endif()
 
-if (${PROBLEM} STREQUAL "elliptica_bns")
+if (${PROBLEM} MATCHES "dyn_grmhd/elliptica/*")
   target_include_directories(athena PRIVATE
       ${CMAKE_SOURCE_DIR}/Elliptica_ID_Reader/include)
   target_link_libraries(athena PUBLIC
@@ -174,7 +193,7 @@ if (${PROBLEM} STREQUAL "elliptica_bns")
   endif()
 endif()
 
-if (Athena_ENABLE_RNS)
+if (${PROBLEM} MATCHES "dyn_grmhd/rns/*")
   # Support for RNS library for rotating neutron stars. See
   # https://github.com/computationalrelativity/RNSC
   target_include_directories(athena PRIVATE
@@ -183,24 +202,46 @@ if (Athena_ENABLE_RNS)
       ${CMAKE_SOURCE_DIR}/rnsc/lib/libRNS.a)
 endif()
 
-# set nurates macro (true/false)
-if(Athena_ENABLE_NURATES)
-  set(ENABLE_NURATES 1)
-  # The M1 solver sizes its per-zone scratch arrays from this at compile time.
-  set(M1_TOTAL_NUM_SPECIES 4)
-  message(STATUS "Compiling with bns-nurates")
-  target_include_directories(athena PRIVATE ${CMAKE_SOURCE_DIR}/src/bns_nurates/include)
-else()
-  set(ENABLE_NURATES 0)
-  set(M1_TOTAL_NUM_SPECIES 1)
-endif()
-
-if (${PROBLEM} STREQUAL "sgrid_bns")
+if (${PROBLEM} MATCHES "dyn_grmhd/sgrid/*")
   target_link_libraries(athena PUBLIC
       ${CMAKE_SOURCE_DIR}/sgrid/lib/libsgrid.a)
 endif()
 
-if (${PROBLEM} STREQUAL "lorene_bns")
+if (${PROBLEM} MATCHES "dyn_grmhd/kadath/*")
+  # Kadath (FUKa) BNS initial data reader.
+  # Expects Kadath to be linked at ${CMAKE_SOURCE_DIR}/kadath
+  # with libkadath.a in its lib/ directory.
+  find_package(Boost REQUIRED)
+  target_include_directories(athena PRIVATE
+      ${CMAKE_SOURCE_DIR}/kadath/include
+      ${CMAKE_SOURCE_DIR}/kadath/include/Kadath_point_h
+      #${CMAKE_SOURCE_DIR}/kadath/include/Solvers
+      ${Boost_INCLUDE_DIRS})
+  target_link_libraries(athena PUBLIC
+      ${CMAKE_SOURCE_DIR}/kadath/lib/libkadath.a)
+  # Kadath depends on Boost, FFTW3 (spectral transforms) and LAPACK (linear algebra)
+  find_package(PkgConfig QUIET)
+  if (PKG_CONFIG_FOUND)
+    pkg_check_modules(FFTW3 fftw3)
+  endif()
+  if (FFTW3_FOUND)
+    target_link_libraries(athena PUBLIC ${FFTW3_LIBRARIES})
+  else()
+    find_library(FFTW3_LIB NAMES fftw3)
+    target_link_libraries(athena PUBLIC ${FFTW3_LIB})
+  endif()
+  find_package(LAPACK REQUIRED)
+  target_link_libraries(athena PUBLIC ${LAPACK_LIBRARIES})
+  find_package(GSL REQUIRED)
+  target_link_libraries(athena PUBLIC GSL::gsl GSL::gslcblas)
+  if (Athena_ENABLE_OPENMP)
+  else ()
+    find_package(OpenMP COMPONENTS CXX)
+    target_link_libraries(athena PUBLIC OpenMP::OpenMP_CXX)
+  endif()
+endif()
+
+if (${PROBLEM} MATCHES "dyn_grmhd/lorene/*")
   # FIXME(user): The way the Fortran libraries here are linked is not great. Because these
   # are implicit libraries, we shouldn't have to add them manually, but at least on some
   # machines this seems to be necessary. We should find out if there's a better way to

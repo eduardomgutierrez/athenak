@@ -19,10 +19,10 @@
 #include "geodesic-grid/geodesic_grid.hpp"
 #include "radiation.hpp"
 #include "radiation_multi_freq.hpp"
-#include "reconstruct/dc.hpp"
 #include "reconstruct/plm.hpp"
 #include "reconstruct/ppm.hpp"
 #include "reconstruct/wenoz.hpp"
+#include "reconstruct/teno.hpp"
 
 namespace radiation {
 //----------------------------------------------------------------------------------------
@@ -99,6 +99,10 @@ TaskStatus Radiation::CalculateFluxes(Driver *pdriver, int stage) {
         if (n1 > 0.0) WENOZ(iim3, iim2, iim1, iicc, iip1, iiu, scr);
         else          WENOZ(iim2, iim1, iicc, iip1, iip2, scr, iiu);
         break;
+      case ReconstructionMethod::teno:
+        if (n1 > 0.0) TENO(iim3, iim2, iim1, iicc, iip1, iiu, scr);
+        else          TENO(iim2, iim1, iicc, iip1, iip2, scr, iiu);
+        break;
       default:
         break;
     }
@@ -158,6 +162,10 @@ TaskStatus Radiation::CalculateFluxes(Driver *pdriver, int stage) {
         case ReconstructionMethod::wenoz:
           if (n2 > 0.0) WENOZ(iim3, iim2, iim1, iicc, iip1, iiu, scr);
           else          WENOZ(iim2, iim1, iicc, iip1, iip2, scr, iiu);
+          break;
+        case ReconstructionMethod::teno:
+          if (n2 > 0.0) TENO(iim3, iim2, iim1, iicc, iip1, iiu, scr);
+          else          TENO(iim2, iim1, iicc, iip1, iip2, scr, iiu);
           break;
         default:
           break;
@@ -219,6 +227,10 @@ TaskStatus Radiation::CalculateFluxes(Driver *pdriver, int stage) {
         case ReconstructionMethod::wenoz:
           if (n3 > 0.0) WENOZ(iim3, iim2, iim1, iicc, iip1, iiu, scr);
           else          WENOZ(iim2, iim1, iicc, iip1, iip2, scr, iiu);
+          break;
+        case ReconstructionMethod::teno:
+          if (n3 > 0.0) TENO(iim3, iim2, iim1, iicc, iip1, iiu, scr);
+          else          TENO(iim2, iim1, iicc, iip1, iip2, scr, iiu);
           break;
         default:
           break;

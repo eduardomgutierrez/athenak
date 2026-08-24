@@ -27,7 +27,9 @@
 class Coordinates;
 class Driver;
 class CompactObjectTracker;
+class FastFlow;
 class HorizonDump;
+class DriftControl;
 
 namespace z4c {
 class Z4c_AMR;
@@ -143,6 +145,7 @@ class Z4c {
     // in non-differentiated chi
     Real chi_div_floor;
     Real chi_min_floor;   // minimum of chi, only used in slow-start-lapse
+    bool floor_chi;       // used as a safe guard after RK update
     // where a square root is necessary.
     Real diss;            // amount of numerical dissipation
     Real eps_floor;       // a small number O(10^-12)
@@ -176,6 +179,19 @@ class Z4c {
     int extrap_order;
     // Value of chi to specify the excision region for constraint evaluation
     Real excise_chi;
+
+    // Flag if drift control for COT should be used.
+    bool enable_driftcontrol;
+    int dc_variety;
+    int dc_tracker_index;
+    Real dc_fixed_x, dc_fixed_y, dc_fixed_z;
+    Real dc_damping_time, dc_damping_scale, dc_damping_coeff;
+    Real dc_Kp, dc_Ki, dc_Kd;
+    Real dc_omega_c, dc_omega_o, dc_zeta;
+    Real dc_relaxation_time, dc_kappa;
+    Real dc_gamma_suppress;
+    Real dc_gain_x, dc_gain_y, dc_gain_z;
+    int dc_gaussian_center;
   };
   Options opt;
   Real diss;              // Dissipation parameter
@@ -218,6 +234,7 @@ class Z4c {
   TaskStatus Prolongate(Driver *pdrive, int stage);
   TaskStatus ProlongateWeyl(Driver *pdrive, int stage);
   TaskStatus ExpRKUpdate(Driver *d, int stage);
+  TaskStatus Z4cFloorChi(Driver *pdrive, int stage);
   TaskStatus NewTimeStep(Driver *d, int stage);
   TaskStatus ApplyPhysicalBCs(Driver *d, int stage);
   TaskStatus EnforceAlgConstr(Driver *d, int stage);
@@ -230,6 +247,7 @@ class Z4c {
   TaskStatus RestrictWeyl(Driver *d, int stage);
   TaskStatus CCEDump(Driver *pdrive, int stage);
   TaskStatus TrackCompactObjects(Driver *d, int stage);
+  TaskStatus FindHorizon(Driver *d, int stage);
   TaskStatus CalcWeylScalar(Driver *d, int stage);
   TaskStatus CalcWaveForm(Driver *d, int stage);
   TaskStatus DumpHorizons(Driver *d, int stage);
@@ -249,7 +267,9 @@ class Z4c {
 
   Z4c_AMR *pamr;
   std::vector<std::unique_ptr<CompactObjectTracker>> ptracker;
+  std::vector<std::unique_ptr<FastFlow>> pfastflow;
   std::vector<std::unique_ptr<HorizonDump>> phorizon_dump;
+  std::unique_ptr<DriftControl> pdrift_control;
 
   /*
   std::list<CartesianGrid> horizon_dump;

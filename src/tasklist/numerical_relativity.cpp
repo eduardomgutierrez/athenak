@@ -14,6 +14,7 @@
 #include "numerical_relativity.hpp"
 #include "z4c/z4c.hpp"
 #include "dyn_grmhd/dyn_grmhd.hpp"
+#include "radiation_m1/radiation_m1.hpp"
 
 namespace numrel {
 
@@ -42,12 +43,12 @@ std::vector<QueuedTask>& NumericalRelativity::SelectQueue(TaskLocation loc) {
 PhysicsDependency NumericalRelativity::NeedsPhysics(TaskName task) {
   if (task < MHD_NTASKS) {
     return Phys_MHD;
+  } else if (task < M1_NTASKS) {
+    return Phys_M1;
   } else if (task < Z4c_NTASKS) {
     return Phys_Z4c;
   } else if (task < Rad_NTASKS) {
     return Phys_Rad;
-  } else if (task < M1_NTASKS) {
-    return Phys_M1;
   } else {
     return Phys_None;
   }
@@ -59,12 +60,12 @@ bool NumericalRelativity::DependencyAvailable(PhysicsDependency dep) {
       return true;
     case Phys_MHD:
       return pmy_pack->pdyngr != nullptr;
+    case Phys_M1:
+      return pmy_pack->pradm1 != nullptr;
     case Phys_Z4c:
       return pmy_pack->pz4c != nullptr;
     case Phys_Rad:
       return pmy_pack->prad != nullptr;
-    case Phys_M1:
-      return pmy_pack->pradm1 != nullptr;
     default:
       std::cout << "NumericalRelativity: Unknown dependency\n";
   }

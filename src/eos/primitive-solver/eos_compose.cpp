@@ -66,7 +66,7 @@ void EOSCompOSE<LogPolicy>::ReadTableFromFile(std::string fname) {
     // nearest table values at or below a specified i and yq.
     { // read nb
       Real * table_nb = table["nb"];
-
+      
       for (size_t in=0; in<m_nn; ++in) {
         host_log_nb(in) = log2_(table_nb[in]);
       }
@@ -88,11 +88,11 @@ void EOSCompOSE<LogPolicy>::ReadTableFromFile(std::string fname) {
 
     { // read T
       Real * table_t = table["t"];
-
+      
       for (size_t it=0; it<m_nt; ++it) {
         host_log_t(it) = log2_(table_t[it]);
       }
-
+     
       m_id_log_t = 1.0/(host_log_t(1) - host_log_t(0));
       min_T = table_t[0];
       max_T = table_t[m_nt-1];
@@ -184,38 +184,31 @@ void EOSCompOSE<LogPolicy>::ReadTableFromFile(std::string fname) {
       }
     }
 
-    if (table.HasField("Y[p]") && table.HasField("Y[n]")) {
-      { // Read proton fraction -> Y[p]
-        Real * table_yp = table["Y[p]"];
-        for (size_t in=0; in<m_nn; ++in) {
-          for (size_t iy=0; iy<m_ny; ++iy) {
-            for (size_t it=0; it<m_nt; ++it) {
-              size_t iflat = it + m_nt*(iy + m_ny*in);
-              host_table(ECYP,in,iy,it) = table_yp[iflat];
-            }
-          }
-        }
+    { // Read proton and neutron fractions -> Y[p], Y[n]
+      // Tables written before these two fields became mandatory do not carry them, and
+      // TableReader::operator[] returns a null pointer for a field that is absent. Fall
+      // back on free npe matter, Y[p] = Yq and Y[n] = 1 - Yq, which keeps such a table
+      // usable: exact where there are no nuclei, wrong where there are, so say so.
+      // Only the bns_nurates opacities read these two variables.
+      const bool has_yp = table.HasField("Y[p]");
+      const bool has_yn = table.HasField("Y[n]");
+      if (!has_yp || !has_yn) {
+        std::cout << "### WARNING in " << __FILE__ << std::endl
+                  << "The EOS table does not provide "
+                  << (has_yp ? "Y[n]" : (has_yn ? "Y[p]" : "Y[p] or Y[n]"))
+                  << ". Approximating the nucleon fractions as free npe matter,"
+                  << " Y[p] = Yq and Y[n] = 1 - Yq. That is only exact where no nuclei"
+                  << " are present: regenerate the table before using it with"
+                  << " bns_nurates.\n";
       }
-
-      { // Read neutron fraction -> Y[n]
-        Real * table_yn = table["Y[n]"];
-        for (size_t in=0; in<m_nn; ++in) {
-          for (size_t iy=0; iy<m_ny; ++iy) {
-            for (size_t it=0; it<m_nt; ++it) {
-              size_t iflat = it + m_nt*(iy + m_ny*in);
-              host_table(ECYN,in,iy,it) = table_yn[iflat];
-            }
-          }
-        }
-      }
-    } else {
-      std::cout << "WARNING: Missing Y[p]/Y[n] in EOS table. "
-                << "Falling back to Y[p]=yq and Y[n]=1-yq." << std::endl;
+      Real * table_yp = has_yp ? table["Y[p]"] : nullptr;
+      Real * table_yn = has_yn ? table["Y[n]"] : nullptr;
       for (size_t in=0; in<m_nn; ++in) {
         for (size_t iy=0; iy<m_ny; ++iy) {
           for (size_t it=0; it<m_nt; ++it) {
-            host_table(ECYP,in,iy,it) = host_yq(iy);
-            host_table(ECYN,in,iy,it) = 1.0 - host_yq(iy);
+            size_t iflat = it + m_nt*(iy + m_ny*in);
+            host_table(ECYP,in,iy,it) = has_yp ? table_yp[iflat] : host_yq(iy);
+            host_table(ECYN,in,iy,it) = has_yn ? table_yn[iflat] : 1.0 - host_yq(iy);
           }
         }
       }
@@ -230,19 +223,61 @@ void EOSCompOSE<LogPolicy>::ReadTableFromFile(std::string fname) {
     m_initialized = true;
 
     m_min_h = std::numeric_limits<Real>::max();
-    // Compute minimum enthalpy
-    for (int in = 0; in < m_nn; ++in) {
+    // New form of bound based on properties of NQT functions and their
+    // departure from 'true' log behaviour
+    size_t it = 0; // T = T_min is a safe assumption for the minimum enthalpy
+    for (size_t in = 0; in < m_nn-1; ++in) {
       Real const nb = exp2_(host_log_nb(in));
-      for (int iy = 0; iy < m_ny; ++iy) {
-        for (int it = 0; it < m_nt; ++it) {
-          // This would use GPU memory, and we are currently on the CPU, so Enthalpy is
-          // hardcoded
-          Real e = exp2_(host_table(ECLOGE,in,iy,it));
-          Real p = exp2_(host_table(ECLOGP,in,iy,it));
-          Real h = (e + p) / nb;
-          m_min_h = fmin(m_min_h, h);
-        }
+      for (size_t iy = 0; iy < m_ny-1; ++iy) {
+        Real min_log2_e_in = Kokkos::fmin(host_table(ECLOGE,in,iy,it),
+                                          host_table(ECLOGE,in,iy+1,it));
+        Real max_log2_e_in = Kokkos::fmax(host_table(ECLOGE,in,iy,it),
+                                          host_table(ECLOGE,in,iy+1,it));
+
+        Real min_log2_e_inp1 = Kokkos::fmin(host_table(ECLOGE,in+1,iy,it),
+                                            host_table(ECLOGE,in+1,iy+1,it));
+        Real max_log2_e_inp1 = Kokkos::fmax(host_table(ECLOGE,in+1,iy,it),
+                                            host_table(ECLOGE,in+1,iy+1,it));
+
+        Real pow_e = Kokkos::fmax(
+                     Kokkos::fmax(Kokkos::fabs(min_log2_e_inp1-min_log2_e_in),
+                                  Kokkos::fabs(max_log2_e_inp1-min_log2_e_in)),
+                     Kokkos::fmax(Kokkos::fabs(min_log2_e_inp1-max_log2_e_in),
+                                  Kokkos::fabs(max_log2_e_inp1-max_log2_e_in)));
+
+        Real min_log2_p_in = Kokkos::fmin(host_table(ECLOGP,in,iy,it),
+                                          host_table(ECLOGP,in,iy+1,it));
+        Real max_log2_p_in = Kokkos::fmax(host_table(ECLOGP,in,iy,it),
+                                          host_table(ECLOGP,in,iy+1,it));
+
+        Real min_log2_p_inp1 = Kokkos::fmin(host_table(ECLOGP,in+1,iy,it),
+                                            host_table(ECLOGP,in+1,iy+1,it));
+        Real max_log2_p_inp1 = Kokkos::fmax(host_table(ECLOGP,in+1,iy,it),
+                                            host_table(ECLOGP,in+1,iy+1,it));
+
+        Real pow_p = Kokkos::fmax(
+                     Kokkos::fmax(Kokkos::fabs(min_log2_p_inp1-min_log2_p_in),
+                                  Kokkos::fabs(max_log2_p_inp1-min_log2_p_in)),
+                     Kokkos::fmax(Kokkos::fabs(min_log2_p_inp1-max_log2_p_in),
+                                  Kokkos::fabs(max_log2_p_inp1-max_log2_p_in)));
+
+        Real k0 =  3.696e-3; // Exact number rounded up
+        Real k1 = -9.709e-3; // Exact number rounded down
+
+        Real fac_e = (1-k0)*Kokkos::exp2(pow_e*k1); // N.B. not exp2_
+        Real fac_p = (1-k0)*Kokkos::exp2(pow_p*k1);
+
+        Real e_over_n_min = fac_e*Kokkos::fmin(exp2_(min_log2_e_in)/nb,
+                                         exp2_(min_log2_e_inp1)/exp2_(host_log_nb(in+1)));
+
+        Real p_over_n_min = fac_p*Kokkos::fmin(exp2_(min_log2_p_in)/nb,
+                                         exp2_(min_log2_p_inp1)/exp2_(host_log_nb(in+1)));
+
+        m_min_h = Kokkos::fmin(m_min_h,e_over_n_min+p_over_n_min);
       }
+    }
+    if (m_min_h <= 0.0) {
+      Kokkos::abort("There was a problem computing the minimum enthalpy in the table!");
     }
   } // if (m_initialized==false)
 }

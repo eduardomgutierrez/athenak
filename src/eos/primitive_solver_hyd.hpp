@@ -64,7 +64,7 @@ class PrimitiveSolverHydro {
     }
     // Parameters for CompOSE EoS
     if constexpr (
-         std::is_same_v<Primitive::EOSCompOSE<Primitive::NormalLogs>, EOSPolicy> ||
+         std::is_same_v<Primitive::EOSCompOSE<Primitive::NormalLogs>, EOSPolicy> || 
          std::is_same_v<Primitive::EOSCompOSE<Primitive::NQTLogs>, EOSPolicy>) {
       // Get and set number of scalars in table. This will currently fail if not 1.
       ps.GetEOSMutable().SetNSpecies(pin->GetOrAddInteger(block, "nscalars", 1));
@@ -96,11 +96,10 @@ class PrimitiveSolverHydro {
     }
         // Parameters for Hybrid EoS
     if constexpr (
-         std::is_same_v<Primitive::EOSHybrid<Primitive::NormalLogs>, EOSPolicy> ||
+         std::is_same_v<Primitive::EOSHybrid<Primitive::NormalLogs>, EOSPolicy> || 
          std::is_same_v<Primitive::EOSHybrid<Primitive::NQTLogs>, EOSPolicy>) {
       // Get and set number of scalars in table. This will currently fail if not 0.
-      ps.GetEOSMutable().SetThermalGamma(pin->GetOrAddReal(block, "gamma_thermal",
-                                         5.0/3.0));
+      ps.GetEOSMutable().SetThermalGamma(pin->GetOrAddReal(block, "gamma_thermal", 5.0/3.0));
       ps.GetEOSMutable().SetNSpecies(pin->GetOrAddInteger(block, "nscalars", 0));
       std::string units = pin->GetOrAddString(block, "units", "geometric_solar");
       if (!units.compare("geometric_solar")) {
@@ -162,6 +161,7 @@ class PrimitiveSolverHydro {
       ps.GetEOSMutable().SetSpeciesAtmosphere(
           pin->GetOrAddReal(block, spec_name.str(), 0.0), n);
     }
+
   }
 
   // The prim to con function used on the reconstructed states inside the Riemann solver.
@@ -197,8 +197,8 @@ class PrimitiveSolverHydro {
     // FIXME(JF): Is this needed if the first-order flux correction is enabled?
     prim_pt[PTM] = prim_pt_old[PTM] = eos.GetTemperatureFromP(prim_pt[PRH],
                                         prim_pt[PPR], &prim_pt[PYF]);
-    bool floored = ps.GetEOS().ApplyPrimitiveFloor(prim_pt[PRH], &prim_pt[PVX],
-                                         prim_pt[PPR], prim_pt[PTM], &prim_pt[PYF]);
+    ps.GetEOS().ApplyPrimitiveFloor(prim_pt[PRH], &prim_pt[PVX],
+                                    prim_pt[PPR], prim_pt[PTM], &prim_pt[PYF]);
 
     ps.PrimToCon(prim_pt, cons_pt, bin, g3d);
 
@@ -314,7 +314,7 @@ class PrimitiveSolverHydro {
   }
 
   void ConsToPrim(DvceArray5D<Real> &cons, const DvceFaceFld4D<Real> &bfc,
-                  DvceArray5D<Real> &bcc0, DvceArray5D<Real> &prim,
+                  DvceArray5D<Real> &bcc0, DvceArray5D<Real> &prim, 
                   DvceArray5D<Real> &temperature,
                   const int il, const int iu, const int jl, const int ju,
                   const int kl, const int ku, bool floors_only=false) {
@@ -325,10 +325,11 @@ class PrimitiveSolverHydro {
 
     // Some problem-specific parameters
     auto &excise = pmy_pack->pcoord->coord_data.bh_excise;
+    auto &smoothing = pmy_pack->pcoord->coord_data.smooth_excision;
     auto &excision_floor_ = pmy_pack->pcoord->excision_floor;
     auto &excision_flux_ = pmy_pack->pcoord->excision_flux;
     auto &dexcise_ = pmy_pack->pcoord->coord_data.dexcise;
-    auto &pexcise_ = pmy_pack->pcoord->coord_data.pexcise;
+    auto &texcise_ = pmy_pack->pcoord->coord_data.texcise;
 
     auto &adm  = pmy_pack->padm->adm;
     auto &eos_ = ps.GetEOS();
@@ -336,8 +337,11 @@ class PrimitiveSolverHydro {
 
     auto &indcs = pmy_pack->pmesh->mb_indcs;
     int &is = indcs.is;
+    //int &ie = indcs.ie;
     int &js = indcs.js;
+    //int &je = indcs.je;
     int &ks = indcs.ks;
+    //int &ke = indcs.ke;
     auto &size = pmy_pack->pmb->mb_size;
 
     const int ni = (iu - il + 1);
@@ -352,7 +356,7 @@ class PrimitiveSolverHydro {
     Real mb = eos_.GetBaryonMass();
 
     // FIXME: This only works for a flooring policy that has these functions!
-    bool prim_failure, cons_failure;
+    bool prim_failure=false, cons_failure=false;
     if (floors_only) {
       prim_failure = ps.GetEOSMutable().IsPrimitiveFlooringFailure();
       cons_failure = ps.GetEOSMutable().IsConservedFlooringFailure();
@@ -427,27 +431,31 @@ class PrimitiveSolverHydro {
       // If we're in an excised region, set the primitives to some default value.
       Primitive::SolverResult result;
       if (excise) {
-        if (excision_floor_(m,k,j,i)) {
-          prim_pt[PRH] = dexcise_/mb;
-          prim_pt[PVX] = 0.0;
-          prim_pt[PVY] = 0.0;
-          prim_pt[PVZ] = 0.0;
-          prim_pt[PPR] = pexcise_;
-          for (int n = 0; n < nscal; n++) {
-            // FIXME: Particle abundances should probably be set to a
-            // default inside an excised region.
-            prim_pt[PYF + n] = cons_pt[CYD]/cons_pt[CDN];
-          }
-          prim_pt[PTM] =
-            eos_.GetTemperatureFromP(prim_pt[PRH], prim_pt[PPR], &prim_pt[PYF]);
-          result.error = Primitive::Error::SUCCESS;
-          result.iterations = 0;
-          result.cons_floor = false;
-          result.prim_floor = false;
-          result.cons_adjusted = true;
-          ps_.PrimToCon(prim_pt, cons_pt, b3u, g3d);
-        } else {
+        // If smooth excision is enabled, do C2P everywhere.
+        if (smoothing) {
           result = ps_.ConToPrim(prim_pt, cons_pt, b3u, g3d, g3u);
+        } else {
+          if (excision_floor_(m,k,j,i)) {
+            prim_pt[PRH] = dexcise_/mb;
+            prim_pt[PVX] = 0.0;
+            prim_pt[PVY] = 0.0;
+            prim_pt[PVZ] = 0.0;
+            for (int n = 0; n < nscal; n++) {
+              // FIXME: Particle abundances should probably be set to a
+              // default inside an excised region.
+              prim_pt[PYF + n] = cons_pt[CYD]/cons_pt[CDN];
+            }
+            prim_pt[PPR] = eos_.GetPressure(prim_pt[PRH], texcise_, &prim_pt[PYF]);
+            prim_pt[PTM] = texcise_;
+            result.error = Primitive::Error::SUCCESS;
+            result.iterations = 0;
+            result.cons_floor = false;
+            result.prim_floor = false;
+            result.cons_adjusted = true;
+            ps_.PrimToCon(prim_pt, cons_pt, b3u, g3d);
+          } else {
+            result = ps_.ConToPrim(prim_pt, cons_pt, b3u, g3d, g3u);
+          }
         }
       } else {
         result = ps_.ConToPrim(prim_pt, cons_pt, b3u, g3d, g3u);
@@ -602,9 +610,9 @@ class PrimitiveSolverHydro {
     Real cmsq = csq + vasq - csq*vasq;
 
     // Set fast magnetosonic speed in appropriate coordinates
-    Real a = u0*u0 - (g00 + u0*u0)*cmsq;
-    Real b = -2.0 * (u0 * u1 - (g01 + u0 * u1) *cmsq);
-    Real c = u1*u1 - (g11 + u1*u1)*cmsq;
+    Real a = u0*u0*(1.0 - cmsq) - g00*cmsq;
+    Real b = -2.0*(u0*u1*(1.0 - cmsq) - g01*cmsq);
+    Real c = u1*u1*(1.0 - cmsq) - g11*cmsq;
     Real a1 = b / a;
     Real a0 = c / a;
     Real s = fmax(a1*a1 - 4.0 * a0, 0.0);

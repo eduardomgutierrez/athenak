@@ -1,5 +1,9 @@
 # build directories
 build*/
+__pycache__
+
+# Temporary testing files
+tst/test_log.txt
 
 # Athena output files
 *.tab
@@ -20,3 +24,7 @@ Lorene
 
 # local convenience symlink to the sibling bns_nurates checkout
 /bns_nurates
+# bns_nurates
+src/bns_nurates/
+
+# python cache

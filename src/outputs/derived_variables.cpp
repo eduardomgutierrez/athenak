@@ -12,6 +12,7 @@
 //!   - z-component of current density Jz  [non-relativistic]
 //!   - magnitude of current density J^2  [non-relativistic]
 
+#include <algorithm>
 #include <iostream>
 #include <sstream>
 #include <string>   // std::string, to_string()
@@ -23,11 +24,16 @@
 #include "geodesic-grid/geodesic_grid.hpp"
 #include "mesh/mesh.hpp"
 #include "eos/eos.hpp"
+#include "dyn_grmhd/dyn_grmhd.hpp"
+#include "eos/primitive-solver/unit_system.hpp"
 #include "hydro/hydro.hpp"
 #include "mhd/mhd.hpp"
 #include "radiation/radiation.hpp"
 #include "radiation/radiation_tetrad.hpp"
 #include "radiation/radiation_multi_freq.hpp"
+#include "radiation_m1/radiation_m1.hpp"
+#include "radiation_m1/radiation_m1_helpers.hpp"
+#include "coordinates/adm.hpp"
 #include "particles/particles.hpp"
 #include "outputs.hpp"
 #include "utils/current.hpp"
@@ -76,6 +82,7 @@ void ComputeUcBcFromPrimitive(const Real uu1, const Real uu2, const Real uu3,
 
 void BaseTypeOutput::ComputeDerivedVariable(std::string name, Mesh *pm) {
   int nmb = pm->pmb_pack->nmb_thispack;
+  int nmb_alloc = std::max(nmb, pm->pmb_pack->pmesh->nmb_maxperrank);
   auto &indcs = pm->mb_indcs;
   int &ng = indcs.ng;
   int n1 = indcs.nx1 + 2*ng;
@@ -93,16 +100,22 @@ void BaseTypeOutput::ComputeDerivedVariable(std::string name, Mesh *pm) {
   int &i_dv = out_params.i_derived;
   int &n_dv = out_params.n_derived;
 
-  // temperature = pressure / density
+  // specific internal energy proxy = eint / density
   if (name.compare("temperature") == 0) {
     if (derived_var.extent(4) <= 1)
-      Kokkos::realloc(derived_var, nmb, n_dv, n3, n2, n1);
+      Kokkos::realloc(derived_var, nmb_alloc, n_dv, n3, n2, n1);
     auto dv = derived_var;
-    auto &w0_ = (name.compare("hydro_wz") == 0)?
+    if (pm->pmb_pack->phydro == nullptr && pm->pmb_pack->pmhd == nullptr) {
+      std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+                << std::endl << "Temperature output requested but no hydro or MHD "
+                << "module constructed." << std::endl;
+      exit(EXIT_FAILURE);
+    }
+    auto &w0_ = (pm->pmb_pack->phydro != nullptr) ?
       pm->pmb_pack->phydro->w0 : pm->pmb_pack->pmhd->w0;
     par_for("temperature", DevExeSpace(), 0, (nmb-1), ks, ke, js, je, is, ie,
     KOKKOS_LAMBDA(int m, int k, int j, int i) {
-      dv(m,i_dv,k,j,i) = (w0_(m,IEN,k,j,i+1) / w0_(m,IDN,k,j,i-1));
+      dv(m,i_dv,k,j,i) = w0_(m,IEN,k,j,i) / w0_(m,IDN,k,j,i);
     });
     i_dv += 1; // increment derived variable index
   }
@@ -112,7 +125,7 @@ void BaseTypeOutput::ComputeDerivedVariable(std::string name, Mesh *pm) {
   if (name.compare("hydro_wz") == 0 ||
       name.compare("mhd_wz") == 0) {
     if (derived_var.extent(4) <= 1)
-      Kokkos::realloc(derived_var, nmb, n_dv, n3, n2, n1);
+      Kokkos::realloc(derived_var, nmb_alloc, n_dv, n3, n2, n1);
     auto dv = derived_var;
     auto &w0_ = (name.compare("hydro_wz") == 0)?
       pm->pmb_pack->phydro->w0 : pm->pmb_pack->pmhd->w0;
@@ -122,6 +135,7 @@ void BaseTypeOutput::ComputeDerivedVariable(std::string name, Mesh *pm) {
       if (multi_d) {
         dv(m,i_dv,k,j,i) -=(w0_(m,IVX,k,j+1,i) - w0_(m,IVX,k,j-1,i))/size.d_view(m).dx2;
       }
+      dv(m,i_dv,k,j,i) *= 0.5; // accounts for divide by 2*dx
     });
     i_dv += 1; // increment derived variable index
   }
@@ -131,7 +145,7 @@ void BaseTypeOutput::ComputeDerivedVariable(std::string name, Mesh *pm) {
   if (name.compare("hydro_w2") == 0 ||
       name.compare("mhd_w2") == 0) {
     if (derived_var.extent(4) <= 1)
-      Kokkos::realloc(derived_var, nmb, n_dv, n3, n2, n1);
+      Kokkos::realloc(derived_var, nmb_alloc, n_dv, n3, n2, n1);
     auto dv = derived_var;
     auto &w0_ = (name.compare("hydro_w2") == 0)?
       pm->pmb_pack->phydro->w0 : pm->pmb_pack->pmhd->w0;
@@ -148,7 +162,7 @@ void BaseTypeOutput::ComputeDerivedVariable(std::string name, Mesh *pm) {
         w1 -= (w0_(m,IVY,k+1,j,i) - w0_(m,IVY,k-1,j,i))/size.d_view(m).dx3;
         w2 += (w0_(m,IVX,k+1,j,i) - w0_(m,IVX,k-1,j,i))/size.d_view(m).dx3;
       }
-      dv(m,i_dv,k,j,i) = w1*w1 + w2*w2 + w3*w3;
+      dv(m,i_dv,k,j,i) = 0.25*(w1*w1 + w2*w2 + w3*w3); // accounts for divide by 2*dx
     });
     i_dv += 1; // increment derived variable index
   }
@@ -158,7 +172,7 @@ void BaseTypeOutput::ComputeDerivedVariable(std::string name, Mesh *pm) {
   // Not computed in ghost zones since requires derivative
   if (name.compare("mhd_jz") == 0) {
     if (derived_var.extent(4) <= 1)
-      Kokkos::realloc(derived_var, nmb, n_dv, n3, n2, n1);
+      Kokkos::realloc(derived_var, nmb_alloc, n_dv, n3, n2, n1);
     auto dv = derived_var;
     auto &bcc = pm->pmb_pack->pmhd->bcc0;
     par_for("jz", DevExeSpace(), 0, (nmb-1), ks, ke, js, je, is, ie,
@@ -167,6 +181,7 @@ void BaseTypeOutput::ComputeDerivedVariable(std::string name, Mesh *pm) {
       if (multi_d) {
         dv(m,i_dv,k,j,i) -=(bcc(m,IBX,k,j+1,i) - bcc(m,IBX,k,j-1,i))/size.d_view(m).dx2;
       }
+      dv(m,i_dv,k,j,i) *= 0.5; // accounts for divide by 2*dx
     });
     i_dv += 1; // increment derived variable index
   }
@@ -175,7 +190,7 @@ void BaseTypeOutput::ComputeDerivedVariable(std::string name, Mesh *pm) {
   // Not computed in ghost zones since requires derivative
   if (name.compare("mhd_j2") == 0) {
     if (derived_var.extent(4) <= 1)
-      Kokkos::realloc(derived_var, nmb, n_dv, n3, n2, n1);
+      Kokkos::realloc(derived_var, nmb_alloc, n_dv, n3, n2, n1);
     auto dv = derived_var;
     auto &bcc = pm->pmb_pack->pmhd->bcc0;
     par_for("j2", DevExeSpace(), 0, (nmb-1), ks, ke, js, je, is, ie,
@@ -191,7 +206,7 @@ void BaseTypeOutput::ComputeDerivedVariable(std::string name, Mesh *pm) {
         j1 -= (bcc(m,IBY,k+1,j,i) - bcc(m,IBY,k-1,j,i))/size.d_view(m).dx3;
         j2 += (bcc(m,IBX,k+1,j,i) - bcc(m,IBX,k-1,j,i))/size.d_view(m).dx3;
       }
-      dv(m,i_dv,k,j,i) = j1*j1 + j2*j2 + j3*j3;
+      dv(m,i_dv,k,j,i) = 0.25*(j1*j1 + j2*j2 + j3*j3); // accounts for divide by 2*dx
     });
     i_dv += 1; // increment derived variable index
   }
@@ -202,7 +217,7 @@ void BaseTypeOutput::ComputeDerivedVariable(std::string name, Mesh *pm) {
   // Not computed in ghost zones since requires derivative
   if (name.compare("mhd_curv") == 0) {
     if (derived_var.extent(4) <= 1)
-      Kokkos::realloc(derived_var, nmb, n_dv, n3, n2, n1);
+      Kokkos::realloc(derived_var, nmb_alloc, n_dv, n3, n2, n1);
     auto dv = derived_var;
     auto &bcc = pm->pmb_pack->pmhd->bcc0;
     par_for("curv", DevExeSpace(), 0, (nmb-1), ks, ke, js, je, is, ie,
@@ -270,7 +285,7 @@ void BaseTypeOutput::ComputeDerivedVariable(std::string name, Mesh *pm) {
   // Not computed in ghost zones since requires derivative
   if (name.compare("mhd_curv_alt") == 0) {
     if (derived_var.extent(4) <= 1)
-      Kokkos::realloc(derived_var, nmb, n_dv, n3, n2, n1);
+      Kokkos::realloc(derived_var, nmb_alloc, n_dv, n3, n2, n1);
     auto dv = derived_var;
     auto &bcc = pm->pmb_pack->pmhd->bcc0;
     par_for("curv_alt", DevExeSpace(), 0, (nmb-1), ks, ke, js, je, is, ie,
@@ -355,7 +370,7 @@ void BaseTypeOutput::ComputeDerivedVariable(std::string name, Mesh *pm) {
   // contravariant four-current jcon.  Calculated from cell-centered fields.
   // Not computed in ghost zones since requires derivative
   if (name.compare("mhd_jcon") == 0) {
-    Kokkos::realloc(derived_var, nmb, 4, n3, n2, n1);
+    Kokkos::realloc(derived_var, nmb_alloc, 4, n3, n2, n1);
     auto jcon = derived_var;
 
     // Coordinates
@@ -519,7 +534,7 @@ void BaseTypeOutput::ComputeDerivedVariable(std::string name, Mesh *pm) {
   // get all sgs terms for the MHD equations
   if (name.compare("mhd_sgs") == 0) {
     int n_sgs = 59;
-    Kokkos::realloc(derived_var, nmb, n_sgs, n3, n2, n1);
+    Kokkos::realloc(derived_var, nmb_alloc, n_sgs, n3, n2, n1);
     auto dv = derived_var;
     auto u0_ = pm->pmb_pack->pmhd->u0;
     auto &bcc = pm->pmb_pack->pmhd->bcc0;
@@ -606,7 +621,7 @@ void BaseTypeOutput::ComputeDerivedVariable(std::string name, Mesh *pm) {
 // get all sgs terms for the MHD equations
   if (name.compare("hydro_sgs") == 0) {
     int n_sgs = 23;
-    Kokkos::realloc(derived_var, nmb, n_sgs, n3, n2, n1);
+    Kokkos::realloc(derived_var, nmb_alloc, n_sgs, n3, n2, n1);
     auto dv = derived_var;
     auto u0_ = pm->pmb_pack->phydro->u0;
     par_for("hydro_sgs", DevExeSpace(), 0, (nmb-1), ks, ke, js, je, is, ie,
@@ -649,7 +664,7 @@ void BaseTypeOutput::ComputeDerivedVariable(std::string name, Mesh *pm) {
 // get all moments terms for |v| and |B|
   if (name.compare("mhd_v_B_moments") == 0) {
     int n_moments = 8;
-    Kokkos::realloc(derived_var, n_moments, 1, n3, n2, n1);
+    Kokkos::realloc(derived_var, nmb_alloc, n_moments, n3, n2, n1);
     auto dv = derived_var;
     auto &w0_ = pm->pmb_pack->pmhd->w0;
     auto &bcc = pm->pmb_pack->pmhd->bcc0;
@@ -677,7 +692,7 @@ void BaseTypeOutput::ComputeDerivedVariable(std::string name, Mesh *pm) {
 // get all moments terms for v_i and B_i
   if (name.compare("mhd_vi_Bi_moments") == 0) {
     int n_moments = 24;
-    Kokkos::realloc(derived_var, n_moments, 1, n3, n2, n1);
+    Kokkos::realloc(derived_var, nmb_alloc, n_moments, n3, n2, n1);
     auto dv = derived_var;
     auto &w0_ = pm->pmb_pack->pmhd->w0;
     auto &bcc = pm->pmb_pack->pmhd->bcc0;
@@ -721,7 +736,7 @@ void BaseTypeOutput::ComputeDerivedVariable(std::string name, Mesh *pm) {
 // get all moments terms for |v|
   if (name.compare("hydro_v_moments") == 0) {
     int n_moments = 4;
-    Kokkos::realloc(derived_var, n_moments, 1, n3, n2, n1);
+    Kokkos::realloc(derived_var, nmb_alloc, n_moments, n3, n2, n1);
     auto dv = derived_var;
     auto &w0_ = pm->pmb_pack->phydro->w0;
     par_for("hydro_v_moments", DevExeSpace(), 0, (nmb-1), ks, ke, js, je, is, ie,
@@ -740,7 +755,7 @@ void BaseTypeOutput::ComputeDerivedVariable(std::string name, Mesh *pm) {
 // get all moments terms for v_i and B_i
   if (name.compare("hydro_vi_moments") == 0) {
     int n_moments = 12;
-    Kokkos::realloc(derived_var, n_moments, 1, n3, n2, n1);
+    Kokkos::realloc(derived_var, nmb_alloc, n_moments, n3, n2, n1);
     auto dv = derived_var;
     auto &w0_ = pm->pmb_pack->phydro->w0;
     par_for("hydro_moments", DevExeSpace(), 0, (nmb-1), ks, ke, js, je, is, ie,
@@ -771,7 +786,7 @@ void BaseTypeOutput::ComputeDerivedVariable(std::string name, Mesh *pm) {
   // Not computed in ghost zones since requires derivative
   if (name.compare("mhd_k_jxb") == 0) {
     if (derived_var.extent(4) <= 1)
-      Kokkos::realloc(derived_var, nmb, n_dv, n3, n2, n1);
+      Kokkos::realloc(derived_var, nmb_alloc, n_dv, n3, n2, n1);
     auto dv = derived_var;
     auto &bcc = pm->pmb_pack->pmhd->bcc0;
     par_for("mhd_k_jxb", DevExeSpace(), 0, (nmb-1), ks, ke, js, je, is, ie,
@@ -801,6 +816,7 @@ void BaseTypeOutput::ComputeDerivedVariable(std::string name, Mesh *pm) {
       // calculate | j x B | / B^2
       dv(m,i_dv,k,j,i) = sqrt(jxB1*jxB1 + jxB2*jxB2 + jxB3*jxB3) / B_mag_sq;
     });
+    i_dv += 1; // increment derived variable index
   }
 
   // magnitude of curv_perp = |(j x B / B^2) - b_hat dot nabla b_hat|
@@ -808,7 +824,7 @@ void BaseTypeOutput::ComputeDerivedVariable(std::string name, Mesh *pm) {
   // Not computed in ghost zones since requires derivative
   if (name.compare("mhd_curv_perp") == 0) {
     if (derived_var.extent(4) <= 1)
-      Kokkos::realloc(derived_var, nmb, n_dv, n3, n2, n1);
+      Kokkos::realloc(derived_var, nmb_alloc, n_dv, n3, n2, n1);
     auto dv = derived_var;
     auto &bcc = pm->pmb_pack->pmhd->bcc0;
     par_for("curv_perp", DevExeSpace(), 0, (nmb-1), ks, ke, js, je, is, ie,
@@ -918,7 +934,7 @@ void BaseTypeOutput::ComputeDerivedVariable(std::string name, Mesh *pm) {
   // Not computed in ghost zones since requires derivative
   if (name.compare("mhd_bmag") == 0) {
     if (derived_var.extent(4) <= 1)
-      Kokkos::realloc(derived_var, nmb, n_dv, n3, n2, n1);
+      Kokkos::realloc(derived_var, nmb_alloc, n_dv, n3, n2, n1);
     auto dv = derived_var;
     auto &bcc = pm->pmb_pack->pmhd->bcc0;
     par_for("bmag", DevExeSpace(), 0, (nmb-1), ks, ke, js, je, is, ie,
@@ -941,7 +957,7 @@ void BaseTypeOutput::ComputeDerivedVariable(std::string name, Mesh *pm) {
     // 5 = < |B.J|^2 >
     // 6 = < U^2 >
     // 7 = < (d_j U_i)(d_j U_i) >
-    Kokkos::realloc(derived_var, nmb, 8, n3, n2, n1);
+    Kokkos::realloc(derived_var, nmb_alloc, 8, n3, n2, n1);
     auto dv = derived_var;
     auto &bcc = pm->pmb_pack->pmhd->bcc0;
     auto &b = pm->pmb_pack->pmhd->b0;
@@ -973,8 +989,8 @@ void BaseTypeOutput::ComputeDerivedVariable(std::string name, Mesh *pm) {
                             *(bcc(m,IBY,k+1,j,i)-bcc(m,IBY,k-1,j,i))
                       + 0.25*(bcc(m,IBZ,k,j,i+1)-bcc(m,IBZ,k,j,i-1))
                             *(bcc(m,IBZ,k,j,i+1)-bcc(m,IBZ,k,j,i-1))
-                      + 0.25*(bcc(m,IBZ,k,j+1,i)-bcc(m,IBZ,i,j-1,i))
-                            *(bcc(m,IBZ,k,j+1,i)-bcc(m,IBZ,i,j-1,i)))
+                      + 0.25*(bcc(m,IBZ,k,j+1,i)-bcc(m,IBZ,k,j-1,i))
+                            *(bcc(m,IBZ,k,j+1,i)-bcc(m,IBZ,k,j-1,i)))
                       / dx_squared;
       // 2 = < (B_j d_j B_i)(B_k d_k B_i) >
       Real bdb1 = bcc(m,IBX,k,j,i)*(b.x1f(m,k,j,i+1)-b.x1f(m,k,j,i))
@@ -1035,7 +1051,7 @@ void BaseTypeOutput::ComputeDerivedVariable(std::string name, Mesh *pm) {
   // divergence of B, including ghost zones
   if (name.compare("mhd_divb") == 0) {
     if (derived_var.extent(4) <= 1)
-      Kokkos::realloc(derived_var, nmb, n_dv, n3, n2, n1);
+      Kokkos::realloc(derived_var, nmb_alloc, n_dv, n3, n2, n1);
 
     // set the loop limits for 1D/2D/3D problems
     int jl = js, ju = je, kl = ks, ku = ke;
@@ -1063,7 +1079,7 @@ void BaseTypeOutput::ComputeDerivedVariable(std::string name, Mesh *pm) {
   }
 
   // radiation moments
-  if (name.compare(0, 3, "rad") == 0) {
+  if (name.compare(0, 3, "rad") == 0 && name.compare(0, 6, "rad_m1") != 0) {
     // Multi-frequency radiation
     bool multi_freq = pm->pmb_pack->prad->multi_freq;
     int nfreq_ = pm->pmb_pack->prad->nfreq;
@@ -1087,7 +1103,7 @@ void BaseTypeOutput::ComputeDerivedVariable(std::string name, Mesh *pm) {
 
     int mom_var_size = (needs_both) ? 20 : 10;
     int moments_offset = (needs_both) ? 10 : 0;
-    Kokkos::realloc(derived_var, nmb, mom_var_size, n3, n2, n1);
+    Kokkos::realloc(derived_var, nmb_alloc, mom_var_size, n3, n2, n1);
     auto dv = derived_var;
     if (multi_freq) Kokkos::realloc(derived_var6d, nmb, mom_var_size, nsf_, n3, n2, n1);
     auto dv6d = derived_var6d;
@@ -1385,9 +1401,265 @@ void BaseTypeOutput::ComputeDerivedVariable(std::string name, Mesh *pm) {
     }); // end par_for "moments"
   } // endif (name.compare(0, 3, "rad") == 0)
 
+  // M1 fluid-frame neutrino quanities: fluid frame energy density
+  // J = u_a u_b T^{ab}, fluid-frame flux H^i = -proj^i_a u_b T^{ab}, and
+  // comoving number density n = N/Gamma.
+  //
+  // The evolved N is carried in EOS number density units (fm^-3 for a nuclear
+  // EOS) whereas E and F_i are in code units, so J and H are rescaled into EOS
+  // energy density units (MeV/fm^3) on output. This keeps every dimensional
+  // quantity here in the same (nuclear) system and makes <e> = J/n come out in
+  // MeV rather than in a mixed code/nuclear hybrid.
+  if (name.compare("rad_m1_J") == 0 ||
+      name.compare("rad_m1_H") == 0 ||
+      name.compare("rad_m1_n") == 0 ||
+      name.compare("rad_m1_fnu") == 0 ||
+      name.compare("rad_m1_e") == 0 ||
+      name.compare("rad_m1_absF") == 0) {
+    using namespace radiationm1;
+    auto *pradm1        = pm->pmb_pack->pradm1;
+    const int nspecies_ = pradm1->nspecies;
+    const int nvars_    = pradm1->nvars;
+
+    // Select mode based on the variable for downstream computation
+    int mode = (name.compare("rad_m1_H") == 0)    ? 1
+             : (name.compare("rad_m1_n") == 0)    ? 2
+             : (name.compare("rad_m1_fnu") == 0)  ? 3
+             : (name.compare("rad_m1_e") == 0)    ? 4
+             : (name.compare("rad_m1_absF") == 0) ? 5 : 0;
+
+    int ncomp = (mode == 1) ? 3*nspecies_ : (mode == 3) ? 4*nspecies_ : nspecies_;
+    Kokkos::realloc(derived_var, nmb_alloc, ncomp, n3, n2, n1);
+    auto dv = derived_var;
+
+    auto u0_  = pradm1->u0;
+    auto chi_ = pradm1->chi;
+    auto &adm = pm->pmb_pack->padm->adm;
+    RadiationM1Params params_ = pradm1->params;
+
+    // Code energy density -> EOS energy density (MeV/fm^3 for a nuclear EOS).
+    Real ene_conv = 1.0;
+    if (pm->pmb_pack->pdyngr != nullptr) {
+      Primitive::UnitSystem code_units = pm->pmb_pack->pdyngr->GetCodeUnitSystem();
+      Primitive::UnitSystem eos_units  = pm->pmb_pack->pdyngr->GetEOSUnitSystem();
+      ene_conv = code_units.EnergyDensityConversion(eos_units);
+    }
+
+    // M1 requires dyn_grmhd primitives (fall back to hydro/mhd)
+    DvceArray5D<Real> w0_;
+    if (pm->pmb_pack->pmhd != nullptr) {
+      w0_ = pm->pmb_pack->pmhd->w0;
+    } else if (pm->pmb_pack->phydro != nullptr) {
+      w0_ = pm->pmb_pack->phydro->w0;
+    } else {
+      w0_ = pradm1->w0;
+    }
+
+    par_for("rad_m1_fluidframe", DevExeSpace(), 0, (nmb-1), ks, ke, js, je, is, ie,
+    KOKKOS_LAMBDA(int m, int k, int j, int i) {
+      // Load 4-metric, its inverse, shift and normal vector
+      Real garr_dd[16];
+      Real garr_uu[16];
+      AthenaPointTensor<Real, TensorSymm::SYM2, 4, 2> g_uu{};
+      AthenaPointTensor<Real, TensorSymm::SYM2, 4, 2> g_dd{};
+      AthenaPointTensor<Real, TensorSymm::NONE, 4, 1> beta_u{};
+      AthenaPointTensor<Real, TensorSymm::NONE, 4, 1> n_d{};
+      const Real alp = adm.alpha(m,k,j,i);
+      pack_n_d(alp, n_d);
+
+      adm::SpacetimeMetric(
+        alp, adm.beta_u(m,0,k,j,i), adm.beta_u(m,1,k,j,i),
+        adm.beta_u(m,2,k,j,i), adm.g_dd(m,0,0,k,j,i),
+        adm.g_dd(m,0,1,k,j,i), adm.g_dd(m,0,2,k,j,i),
+        adm.g_dd(m,1,1,k,j,i), adm.g_dd(m,1,2,k,j,i),
+        adm.g_dd(m,2,2,k,j,i), garr_dd);
+      adm::SpacetimeUpperMetric(
+        alp, adm.beta_u(m,0,k,j,i), adm.beta_u(m,1,k,j,i),
+        adm.beta_u(m,2,k,j,i), adm.g_dd(m,0,0,k,j,i),
+        adm.g_dd(m,0,1,k,j,i), adm.g_dd(m,0,2,k,j,i),
+        adm.g_dd(m,1,1,k,j,i), adm.g_dd(m,1,2,k,j,i),
+        adm.g_dd(m,2,2,k,j,i), garr_uu);
+
+      for (int a = 0; a < 4; ++a) {
+        for (int b = 0; b < 4; ++b) {
+          g_dd(a,b) = garr_dd[a + b * 4];
+          g_uu(a,b) = garr_uu[a + b * 4];
+        }
+      }
+      pack_beta_u(adm.beta_u(m,0,k,j,i), adm.beta_u(m,1,k,j,i),
+                  adm.beta_u(m,2,k,j,i), beta_u);
+
+      // Lorentz factor, 4-velocity, 3-velocity, fluid projector
+      AthenaPointTensor<Real, TensorSymm::NONE, 4, 1> u_u{};
+      AthenaPointTensor<Real, TensorSymm::NONE, 4, 1> u_d{};
+      AthenaPointTensor<Real, TensorSymm::NONE, 4, 1> v_u{};
+      AthenaPointTensor<Real, TensorSymm::NONE, 4, 1> v_d{};
+      AthenaPointTensor<Real, TensorSymm::NONE, 4, 2> proj_ud{};
+      const Real w_lorentz = get_w_lorentz(w0_(m,IVX,k,j,i), w0_(m,IVY,k,j,i),
+                                           w0_(m,IVZ,k,j,i), g_dd);
+      pack_u_u(w_lorentz / alp,
+               w0_(m,IVX,k,j,i) - w_lorentz * adm.beta_u(m,0,k,j,i) / alp,
+               w0_(m,IVY,k,j,i) - w_lorentz * adm.beta_u(m,1,k,j,i) / alp,
+               w0_(m,IVZ,k,j,i) - w_lorentz * adm.beta_u(m,2,k,j,i) / alp, u_u); // u^i
+      pack_v_u(u_u(0), u_u(1), u_u(2), u_u(3), alp, adm.beta_u(m,0,k,j,i),
+               adm.beta_u(m,1,k,j,i), adm.beta_u(m,2,k,j,i), v_u); // v^i
+      tensor_contract(g_dd, u_u, u_d);
+      tensor_contract(g_dd, v_u, v_d);
+      calc_proj(u_d, u_u, proj_ud); // proj^i_a
+
+      for (int nuidx = 0; nuidx < nspecies_; ++nuidx) {
+        const Real E = u0_(m, CombinedIdx(nuidx, M1_E_IDX, nvars_), k, j, i);
+        AthenaPointTensor<Real, TensorSymm::NONE, 4, 1> F_d{};
+        pack_F_d(beta_u(1), beta_u(2), beta_u(3),
+                 u0_(m, CombinedIdx(nuidx, M1_FX_IDX, nvars_), k, j, i),
+                 u0_(m, CombinedIdx(nuidx, M1_FY_IDX, nvars_), k, j, i),
+                 u0_(m, CombinedIdx(nuidx, M1_FZ_IDX, nvars_), k, j, i), F_d);
+
+        // Radiation stress tensor
+        AthenaPointTensor<Real, TensorSymm::SYM2, 4, 2> P_dd{};
+        apply_closure(g_dd, g_uu, n_d, w_lorentz, u_u, v_d, proj_ud, E, F_d,
+                      chi_(m,nuidx,k,j,i), P_dd, params_);
+        AthenaPointTensor<Real, TensorSymm::SYM2, 4, 2> T_dd{};
+        assemble_rT(n_d, E, F_d, P_dd, T_dd);
+
+        // Fluid-frame projections
+        Real J = calc_J_from_rT(T_dd, u_u);
+        AthenaPointTensor<Real, TensorSymm::NONE, 4, 1> H_d{};
+        calc_H_from_rT(T_dd, u_u, proj_ud, H_d);
+        apply_floor(g_uu, J, H_d, params_);
+
+        if (mode == 0) {
+          dv(m,nuidx,k,j,i) = J * ene_conv;
+        } else if (mode == 1) {
+          AthenaPointTensor<Real, TensorSymm::NONE, 4, 1> H_u{};
+          tensor_contract(g_uu, H_d, H_u);
+          dv(m,3*nuidx+0,k,j,i) = H_u(1) * ene_conv;
+          dv(m,3*nuidx+1,k,j,i) = H_u(2) * ene_conv;
+          dv(m,3*nuidx+2,k,j,i) = H_u(3) * ene_conv;
+        } else if (mode == 3) {
+          AthenaPointTensor<Real, TensorSymm::NONE, 4, 1> H_u{};
+          AthenaPointTensor<Real, TensorSymm::NONE, 4, 1> fnu_u{};
+          tensor_contract(g_uu, H_d, H_u);
+          assemble_fnu(u_u, J, H_u, fnu_u, params_);
+          dv(m,4*nuidx+0,k,j,i) = fnu_u(0);
+          dv(m,4*nuidx+1,k,j,i) = fnu_u(1);
+          dv(m,4*nuidx+2,k,j,i) = fnu_u(2);
+          dv(m,4*nuidx+3,k,j,i) = fnu_u(3);
+        } else if (mode == 4) {
+          Real nnu = 0.0;
+          if (nvars_ > M1_N_IDX) {
+            const Real N = u0_(m, CombinedIdx(nuidx, M1_N_IDX, nvars_), k, j, i);
+            const Real Gamma = compute_Gamma(w_lorentz, v_u, J, E, F_d, params_);
+            nnu = N / Gamma;
+          }
+          bool j_ok = Kokkos::isfinite(J) && J > params_.rad_E_floor;
+          Real e_val = (j_ok && nnu > params_.rad_N_floor) ? J * ene_conv / nnu : 0.0;
+          dv(m,nuidx,k,j,i) = Kokkos::isfinite(e_val) ? e_val : 0.0;
+        } else if (mode == 5) {
+          Real nnu = 0.0;
+          if (nvars_ > M1_N_IDX) {
+            const Real N = u0_(m, CombinedIdx(nuidx, M1_N_IDX, nvars_), k, j, i);
+            const Real Gamma = compute_Gamma(w_lorentz, v_u, J, E, F_d, params_);
+            nnu = N / Gamma;
+          }
+
+          Real gam = adm::SpatialDet(
+              adm.g_dd(m, 0, 0, k, j, i), adm.g_dd(m, 0, 1, k, j, i),
+              adm.g_dd(m, 0, 2, k, j, i), adm.g_dd(m, 1, 1, k, j, i),
+              adm.g_dd(m, 1, 2, k, j, i), adm.g_dd(m, 2, 2, k, j, i));
+          Real volform = Kokkos::sqrt(gam);
+
+          Real flux_fac = flux_factor(g_uu, J, H_d, params_.rad_E_floor);
+          dv(m,nuidx,k,j,i) = nnu * Kokkos::sqrt(flux_fac) / volform;
+        } else {
+          Real nnu = 0.0;
+          if (nvars_ > M1_N_IDX) {
+            const Real N = u0_(m, CombinedIdx(nuidx, M1_N_IDX, nvars_), k, j, i);
+            const Real Gamma = compute_Gamma(w_lorentz, v_u, J, E, F_d, params_);
+            nnu = N / Gamma;
+          }
+          dv(m,nuidx,k,j,i) = nnu;
+        }
+      }
+    });
+  }
+
+  // lower time-component of the fluid four velocity, u_t
+  if (name.compare("u_t") == 0) {
+    Kokkos::realloc(derived_var, nmb_alloc, 1, n3, n2, n1);
+    auto dv = derived_var;
+    auto &adm = pm->pmb_pack->padm->adm;
+    DvceArray5D<Real> w0_;
+    if (pm->pmb_pack->pmhd != nullptr) {
+      w0_ = pm->pmb_pack->pmhd->w0;
+    } else {
+      w0_ = pm->pmb_pack->phydro->w0;
+    }
+
+    par_for("u_t", DevExeSpace(), 0, (nmb-1), ks, ke, js, je, is, ie,
+    KOKKOS_LAMBDA(int m, int k, int j, int i) {
+      const Real alpha = adm.alpha(m,k,j,i);
+      const Real betax = adm.beta_u(m,0,k,j,i);
+      const Real betay = adm.beta_u(m,1,k,j,i);
+      const Real betaz = adm.beta_u(m,2,k,j,i);
+      const Real gxx = adm.g_dd(m,0,0,k,j,i);
+      const Real gxy = adm.g_dd(m,0,1,k,j,i);
+      const Real gxz = adm.g_dd(m,0,2,k,j,i);
+      const Real gyy = adm.g_dd(m,1,1,k,j,i);
+      const Real gyz = adm.g_dd(m,1,2,k,j,i);
+      const Real gzz = adm.g_dd(m,2,2,k,j,i);
+      const Real velx = w0_(m,IVX,k,j,i);
+      const Real vely = w0_(m,IVY,k,j,i);
+      const Real velz = w0_(m,IVZ,k,j,i);
+      const Real vsq = gxx*velx*velx + gyy*vely*vely + gzz*velz*velz
+                     + 2.0*(gxy*velx*vely + gxz*velx*velz + gyz*vely*velz);
+      const Real W = Kokkos::sqrt(1.0 + vsq);
+      dv(m,0,k,j,i) = -alpha*W
+          + gxx*betax*velx + gyy*betay*vely + gzz*betaz*velz
+          + gxy*(betax*vely + betay*velx)
+          + gxz*(betax*velz + betaz*velx)
+          + gyz*(betay*velz + betaz*vely);
+    });
+  }
+
+  // WinNet velocity V^i = \alpha v^i - \beta^i
+  if (name.compare("win_Vi") == 0) {
+    Kokkos::realloc(derived_var, nmb_alloc, 3, n3, n2, n1);
+    auto dv = derived_var;
+    auto &adm = pm->pmb_pack->padm->adm;
+    DvceArray5D<Real> w0_;
+    if (pm->pmb_pack->pmhd != nullptr) {
+      w0_ = pm->pmb_pack->pmhd->w0;
+    } else {
+      w0_ = pm->pmb_pack->phydro->w0;
+    }
+    par_for("win_Vi", DevExeSpace(), 0, (nmb-1), ks, ke, js, je, is, ie,
+    KOKKOS_LAMBDA(int m, int k, int j, int i) {
+      const Real alpha = adm.alpha(m,k,j,i);
+      const Real betax = adm.beta_u(m,0,k,j,i);
+      const Real betay = adm.beta_u(m,1,k,j,i);
+      const Real betaz = adm.beta_u(m,2,k,j,i);
+      const Real gxx = adm.g_dd(m,0,0,k,j,i);
+      const Real gxy = adm.g_dd(m,0,1,k,j,i);
+      const Real gxz = adm.g_dd(m,0,2,k,j,i);
+      const Real gyy = adm.g_dd(m,1,1,k,j,i);
+      const Real gyz = adm.g_dd(m,1,2,k,j,i);
+      const Real gzz = adm.g_dd(m,2,2,k,j,i);
+      const Real velx = w0_(m,IVX,k,j,i);
+      const Real vely = w0_(m,IVY,k,j,i);
+      const Real velz = w0_(m,IVZ,k,j,i);
+      const Real vsq = gxx*velx*velx + gyy*vely*vely + gzz*velz*velz
+                     + 2.0*(gxy*velx*vely + gxz*velx*velz + gyz*vely*velz);
+      const Real W = Kokkos::sqrt(1.0 + vsq);
+      dv(m,0,k,j,i) = alpha * (velx / W) - betax;
+      dv(m,1,k,j,i) = alpha * (vely / W) - betay;
+      dv(m,2,k,j,i) = alpha * (velz / W) - betaz;
+    });
+  }
+
   // Particle density binned to mesh.
   if (name.compare("prtcl_d") == 0) {
-    Kokkos::realloc(derived_var, nmb, 1, n3, n2, n1);
+    Kokkos::realloc(derived_var, nmb_alloc, 1, n3, n2, n1);
     auto pdens = derived_var;
     auto pr = pm->pmb_pack->ppart->prtcl_rdata;
     auto pi = pm->pmb_pack->ppart->prtcl_idata;
@@ -1410,6 +1682,28 @@ void BaseTypeOutput::ComputeDerivedVariable(std::string name, Mesh *pm) {
       }
       pdens(m,0,kp,jp,ip) += 1.0;
     });
+  }
+
+  // spherical coordinate radius r = sqrt(x^2 + y^2 + z^2) from cell centers
+  if (name.compare("r_sph") == 0) {
+    if (derived_var.extent(4) <= 1)
+      Kokkos::realloc(derived_var, nmb_alloc, n_dv, n3, n2, n1);
+    auto dv = derived_var;
+    int nx1_ = indcs.nx1;
+    int nx2_ = indcs.nx2;
+    int nx3_ = indcs.nx3;
+    int idv_local = i_dv;
+    par_for("r_sph", DevExeSpace(), 0, (nmb-1), ks, ke, js, je, is, ie,
+    KOKKOS_LAMBDA(int m, int k, int j, int i) {
+      Real x1v = CellCenterX(i-is, nx1_, size.d_view(m).x1min,
+                                         size.d_view(m).x1max);
+      Real x2v = CellCenterX(j-js, nx2_, size.d_view(m).x2min,
+                                         size.d_view(m).x2max);
+      Real x3v = CellCenterX(k-ks, nx3_, size.d_view(m).x3min,
+                                         size.d_view(m).x3max);
+      dv(m,idv_local,k,j,i) = sqrt(x1v*x1v + x2v*x2v + x3v*x3v);
+    });
+    i_dv += 1; // increment derived variable index
   }
   // n_dv is zero for outputs whose variables are all 6D (the radnu_* multi-frequency
   // moments bump n_derived_6d only), so guard the reset against a division by zero.

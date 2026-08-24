@@ -455,7 +455,7 @@ TaskStatus MHD::CornerE(Driver *pdriver, int stage) {
   // The EMF assembled above is the ideal one: the Riemann solver supplies it on
   // the faces and GS07 upwinds it to the edges.  The chiral piece is non-ideal
   // and dispersive, so it is added on top of the finished edge field, exactly as
-  // Resistivity::OhmicEField adds eta*J below.
+  // Resistivity::AddEMFConstantResist adds eta*J below.
   //
   // It must NOT be folded into the cell-centred e1_cc/e2_cc/e3_cc instead.  GS07
   // consumes those as derivative estimates against the Riemann face values, and
@@ -549,7 +549,7 @@ TaskStatus MHD::CornerE(Driver *pdriver, int stage) {
   // Add resistive electric field (if needed)
   if (presist != nullptr) {
     if (presist->eta_ohm > 0.0) {
-      presist->OhmicEField(b0, efld);
+      presist->AddEMFConstantResist(b0, efld);
     }
     // TODO(@user): Add more resistive effects here
   }

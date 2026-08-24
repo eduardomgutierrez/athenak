@@ -95,7 +95,7 @@ void OhmsLawEMF(const Real xi, const Real iW,
 //!
 //! Constructive-transport schemes build the ideal EMF from upwinded Riemann
 //! fluxes; a non-ideal contribution is then added to the edge field on top of
-//! it, as Resistivity::OhmicEField does with eta*J.  This returns exactly that
+//! it, as Resistivity::AddEMFConstantResist does with eta*J.  This returns exactly that
 //! contribution, so the ideal EMF is never recomputed and never double counted.
 //!
 //! At v = 0 this reduces to e^i = xi b^i.

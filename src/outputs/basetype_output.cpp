@@ -8,28 +8,29 @@
 
 #include <iostream>
 #include <sstream>
-#include <string>   // std::string, to_string()
-#include <cstdio> // snprintf
+#include <string>    // std::string, to_string()
+#include <cstdio>    // snprintf
 #include <algorithm> // min_element
-#include <utility> // pair<>
+#include <utility>   // pair<>
 #include <vector>
 
 #include "athena.hpp"
 #include "parameter_input.hpp"
+#include "coordinates/adm.hpp"
 #include "coordinates/cell_locations.hpp"
-#include "mesh/mesh.hpp"
 #include "eos/eos.hpp"
 #include "globals.hpp"
 #include "hydro/hydro.hpp"
+#include "mesh/mesh.hpp"
 #include "mhd/mhd.hpp"
 #include "dyn_grmhd/dyn_grmhd.hpp"
-#include "coordinates/adm.hpp"
 #include "radiation/radiation.hpp"
 #include "z4c/tmunu.hpp"
 #include "z4c/z4c.hpp"
 #include "radiation_m1/radiation_m1.hpp"
 #include "srcterms/srcterms.hpp"
 #include "srcterms/turb_driver.hpp"
+#include "gravity/gravity.hpp"
 #include "outputs.hpp"
 
 #if MPI_PARALLEL_ENABLED
@@ -41,12 +42,12 @@
 // Creates vector of output variable data
 
 BaseTypeOutput::BaseTypeOutput(ParameterInput *pin, Mesh *pm, OutputParameters opar) :
+    out_params(opar),
     derived_var("derived-var",1,1,1,1,1),
+    derived_var6d("radnu-var",1,1,1,1,1,1),
     outarray("cc_outvar",1,1,1,1,1),
     outfield("fc_outvar",1,1,1,1),
-    derived_var6d("radnu-var",1,1,1,1,1,1),
-    outarray_6d("cc_outvar_radnu",1,1,1,1,1,1),
-    out_params(opar) {
+    outarray_6d("cc_outvar_radnu",1,1,1,1,1,1) {
   // exit for history, restart, or event log files
   if (out_params.file_type.compare("hst") == 0 ||
       out_params.file_type.compare("rst") == 0 ||
@@ -88,8 +89,7 @@ BaseTypeOutput::BaseTypeOutput(ParameterInput *pin, Mesh *pm, OutputParameters o
     std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
        << "Output of DynMHD variable requested in <output> block '"
        << out_params.block_name << "' but no DynMHD object has been constructed."
-       << std::endl << "Input file is likely missing a <adm> or <z4c>, and/or <mhd> block"
-       << std::endl;
+       << std::endl << "Input file is likely missing a <adm> or <z4c>, and/or <mhd> block" << std::endl;
     exit(EXIT_FAILURE);
   }
   if ((ivar==50) && (pm->pmb_pack->pturb == nullptr)) {
@@ -172,14 +172,33 @@ BaseTypeOutput::BaseTypeOutput(ParameterInput *pin, Mesh *pm, OutputParameters o
        << std::endl << "Input file is likely missing corresponding block" << std::endl;
     exit(EXIT_FAILURE);
   }
-  if (ivar==153 && (pm->pmb_pack->prad == nullptr)) {
+  if (ivar==153 && (pm->pmb_pack->pgrav == nullptr)) {
+    std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
+       << "Output of gravity potential requested in <output> block '"
+       << out_params.block_name << "' but gravity object not constructed."
+       << std::endl << "Input file is likely missing a <gravity> block" << std::endl;
+    exit(EXIT_FAILURE);
+  }
+  // 154-171 is the whole contiguous rad_m1_* run, from rad_m1_N through rad_m1_absF;
+  // 172-174 (u_t, win_Vi, r_sph) are not radiation variables. 175 is rad_m1_opac, the
+  // cme-multifreq spelling of the grouped opacity output, which sits after largesim's
+  // block but dereferences pradm1 exactly the same way, so it is guarded here too.
+  if (((((ivar>=154) && (ivar<172))) || ivar==175) &&
+      (pm->pmb_pack->pradm1 == nullptr)) {
+    std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
+       << "Output of radiation m1 variables requested in <output> block '"
+       << out_params.block_name << "' but radiation M1 object not constructed."
+       << std::endl << "Input file is likely missing corresponding block" << std::endl;
+    exit(EXIT_FAILURE);
+  }
+  if (ivar==176 && (pm->pmb_pack->prad == nullptr)) {
     std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
        << "Output of Multi-Frequency Radiation moments requested in <output> block '"
        << out_params.block_name << "' but no Radiation object has been constructed."
        << std::endl << "Input file is likely missing a <radiation> block" << std::endl;
     exit(EXIT_FAILURE);
   }
-  if ((ivar==154 || ivar==155) &&
+  if ((ivar==177 || ivar==178) &&
       ((pm->pmb_pack->prad == nullptr) ||
        (pm->pmb_pack->phydro == nullptr && pm->pmb_pack->pmhd == nullptr))) {
     std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
@@ -188,18 +207,11 @@ BaseTypeOutput::BaseTypeOutput(ParameterInput *pin, Mesh *pm, OutputParameters o
        << " constructed, or corresponding Hydro or MHD object missing" << std::endl;
     exit(EXIT_FAILURE);
   }
-  if ((ivar>=153) && (ivar<156) && (!pm->pmb_pack->prad->multi_freq)) {
+  if ((ivar>=176) && (ivar<179) && (!pm->pmb_pack->prad->multi_freq)) {
     std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
        << "Output of Multi-Frequency Radiation moments requested in <output> block '"
        << out_params.block_name << "' but Multi-Frequency Radiation is not turned on."
        << std::endl << "Set multi_freq=true in <radiation> block to enable it" << std::endl;
-    exit(EXIT_FAILURE);
-  }
-  if ((ivar>=156) && (ivar<167) && (pm->pmb_pack->pradm1 == nullptr)) {
-    std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
-       << "Output of radiation M1 variables requested in <output> block '"
-       << out_params.block_name << "' but no RadiationM1 object has been constructed."
-       << std::endl << "Input file is likely missing a <radiation_m1> block" << std::endl;
     exit(EXIT_FAILURE);
   }
 
@@ -644,6 +656,11 @@ BaseTypeOutput::BaseTypeOutput(ParameterInput *pin, Mesh *pm, OutputParameters o
       outvars.emplace_back("force3",2,&(pm->pmb_pack->pturb->force));
     }
 
+    // gravity potential
+    if (variable.compare("grav_phi") == 0) {
+      outvars.emplace_back("grav_phi",0,&(pm->pmb_pack->pgrav->phi));
+    }
+
     // ADM variables, excluding gauge
     for (int v = 0; v < adm::ADM::nadm - 4; ++v) {
       if (variable.compare("adm") == 0 ||
@@ -775,7 +792,8 @@ BaseTypeOutput::BaseTypeOutput(ParameterInput *pin, Mesh *pm, OutputParameters o
   }
 
   // radiation m1 lab energy density
-  if (out_params.variable.compare("rad_m1_E") == 0) {
+  if (out_params.variable.compare("rad_m1_E") == 0 ||
+      out_params.variable.compare("rad_m1_moments") == 0) {
     for (int nuidx = 0; nuidx < pm->pmb_pack->pradm1->nspecies; ++nuidx) {
       outvars.emplace_back(
           "E:" + std::to_string(nuidx),
@@ -785,7 +803,8 @@ BaseTypeOutput::BaseTypeOutput(ParameterInput *pin, Mesh *pm, OutputParameters o
   }
 
   // radiation m1 lab number density
-  if (out_params.variable.compare("rad_m1_N") == 0) {
+  if (out_params.variable.compare("rad_m1_N") == 0 ||
+      out_params.variable.compare("rad_m1_moments") == 0) {
     for (int nuidx = 0; nuidx < pm->pmb_pack->pradm1->nspecies; ++nuidx) {
       outvars.emplace_back(
           "N:" + std::to_string(nuidx),
@@ -795,7 +814,8 @@ BaseTypeOutput::BaseTypeOutput(ParameterInput *pin, Mesh *pm, OutputParameters o
   }
 
   // radiation m1 lab momentum density
-  if (out_params.variable.compare("rad_m1_F") == 0) {
+  if (out_params.variable.compare("rad_m1_F") == 0 ||
+      out_params.variable.compare("rad_m1_moments") == 0) {
     for (int nuidx = 0; nuidx < pm->pmb_pack->pradm1->nspecies; ++nuidx) {
       outvars.emplace_back(
           "Fx:" + std::to_string(nuidx),
@@ -821,8 +841,9 @@ BaseTypeOutput::BaseTypeOutput(ParameterInput *pin, Mesh *pm, OutputParameters o
   }
 
   // radiation m1 eta_0
-  if (out_params.variable.compare("rad_m1_opac") == 0 ||
-      out_params.variable.compare("rad_m1_eta_0") == 0) {
+  if (out_params.variable.compare("rad_m1_eta_0") == 0 ||
+      out_params.variable.compare("rad_m1_opac") == 0 ||
+      out_params.variable.compare("rad_m1_opacities") == 0) {
     for (int nuidx = 0; nuidx < pm->pmb_pack->pradm1->nspecies; ++nuidx) {
       outvars.emplace_back("eta_0:" + std::to_string(nuidx), nuidx,
                            &(pm->pmb_pack->pradm1->eta_0));
@@ -830,8 +851,9 @@ BaseTypeOutput::BaseTypeOutput(ParameterInput *pin, Mesh *pm, OutputParameters o
   }
 
   // radiation m1 abs_0
-  if (out_params.variable.compare("rad_m1_opac") == 0 ||
-      out_params.variable.compare("rad_m1_abs_0") == 0) {
+  if (out_params.variable.compare("rad_m1_abs_0") == 0 ||
+      out_params.variable.compare("rad_m1_opac") == 0 ||
+      out_params.variable.compare("rad_m1_opacities") == 0) {
     for (int nuidx = 0; nuidx < pm->pmb_pack->pradm1->nspecies; ++nuidx) {
       outvars.emplace_back("abs_0:" + std::to_string(nuidx), nuidx,
                            &(pm->pmb_pack->pradm1->abs_0));
@@ -839,8 +861,9 @@ BaseTypeOutput::BaseTypeOutput(ParameterInput *pin, Mesh *pm, OutputParameters o
   }
 
   // radiation m1 eta_1
-  if (out_params.variable.compare("rad_m1_opac") == 0 ||
-      out_params.variable.compare("rad_m1_eta_1") == 0) {
+  if (out_params.variable.compare("rad_m1_eta_1") == 0 ||
+      out_params.variable.compare("rad_m1_opac") == 0 ||
+      out_params.variable.compare("rad_m1_opacities") == 0) {
     for (int nuidx = 0; nuidx < pm->pmb_pack->pradm1->nspecies; ++nuidx) {
       outvars.emplace_back("eta_1:" + std::to_string(nuidx), nuidx,
                            &(pm->pmb_pack->pradm1->eta_1));
@@ -848,8 +871,9 @@ BaseTypeOutput::BaseTypeOutput(ParameterInput *pin, Mesh *pm, OutputParameters o
   }
 
   // radiation m1 abs_1
-  if (out_params.variable.compare("rad_m1_opac") == 0 ||
-      out_params.variable.compare("rad_m1_abs_1") == 0) {
+  if (out_params.variable.compare("rad_m1_abs_1") == 0 ||
+      out_params.variable.compare("rad_m1_opac") == 0 ||
+      out_params.variable.compare("rad_m1_opacities") == 0) {
     for (int nuidx = 0; nuidx < pm->pmb_pack->pradm1->nspecies; ++nuidx) {
       outvars.emplace_back("abs_1:" + std::to_string(nuidx), nuidx,
                            &(pm->pmb_pack->pradm1->abs_1));
@@ -857,12 +881,108 @@ BaseTypeOutput::BaseTypeOutput(ParameterInput *pin, Mesh *pm, OutputParameters o
   }
 
   // radiation m1 scat_1
-  if (out_params.variable.compare("rad_m1_opac") == 0 ||
-      out_params.variable.compare("rad_m1_scat_1") == 0) {
+  if (out_params.variable.compare("rad_m1_scat_1") == 0 ||
+      out_params.variable.compare("rad_m1_opac") == 0 ||
+      out_params.variable.compare("rad_m1_opacities") == 0) {
     for (int nuidx = 0; nuidx < pm->pmb_pack->pradm1->nspecies; ++nuidx) {
       outvars.emplace_back("scat_1:" + std::to_string(nuidx), nuidx,
                            &(pm->pmb_pack->pradm1->scat_1));
     }
+  }
+
+  // radiation m1 fluid-frame energy density J = u_a u_b T^{ab} (per species)
+  if (out_params.variable.compare("rad_m1_J") == 0) {
+    int nspec = pm->pmb_pack->pradm1->nspecies;
+    out_params.contains_derived = true;
+    out_params.n_derived += nspec;
+    for (int nuidx = 0; nuidx < nspec; ++nuidx) {
+      outvars.emplace_back("J:" + std::to_string(nuidx), nuidx, &(derived_var));
+    }
+  }
+
+  // radiation m1 fluid frame flux H^i = -proj^i_a u_b T^{ab} (per species per comp),
+  // in EOS energy density units (MeV/fm^3 for a nuclear EOS)
+  if (out_params.variable.compare("rad_m1_H") == 0) {
+    int nspec = pm->pmb_pack->pradm1->nspecies;
+    out_params.contains_derived = true;
+    out_params.n_derived += 3 * nspec;
+    for (int nuidx = 0; nuidx < nspec; ++nuidx) {
+      outvars.emplace_back("Hx:" + std::to_string(nuidx), 3*nuidx + 0, &(derived_var));
+      outvars.emplace_back("Hy:" + std::to_string(nuidx), 3*nuidx + 1, &(derived_var));
+      outvars.emplace_back("Hz:" + std::to_string(nuidx), 3*nuidx + 2, &(derived_var));
+    }
+  }
+
+  // radiation m1 fluid frame number density n = N/Gamma (per species),
+  // in EOS number density units (fm^-3 for a nuclear EOS)
+  if (out_params.variable.compare("rad_m1_n") == 0) {
+    int nspec = pm->pmb_pack->pradm1->nspecies;
+    out_params.contains_derived = true;
+    out_params.n_derived += nspec;
+    for (int nuidx = 0; nuidx < nspec; ++nuidx) {
+      outvars.emplace_back("n:" + std::to_string(nuidx), nuidx, &(derived_var));
+    }
+  }
+
+  // radiation m1 number-current direction fnu^a = u^a + H^a/J (per species per comp)
+  if (out_params.variable.compare("rad_m1_fnu") == 0) {
+    int nspec = pm->pmb_pack->pradm1->nspecies;
+    out_params.contains_derived = true;
+    out_params.n_derived += 4 * nspec;
+    for (int nuidx = 0; nuidx < nspec; ++nuidx) {
+      outvars.emplace_back("fnu_t:" + std::to_string(nuidx), 4*nuidx + 0, &(derived_var));
+      outvars.emplace_back("fnu_x:" + std::to_string(nuidx), 4*nuidx + 1, &(derived_var));
+      outvars.emplace_back("fnu_y:" + std::to_string(nuidx), 4*nuidx + 2, &(derived_var));
+      outvars.emplace_back("fnu_z:" + std::to_string(nuidx), 4*nuidx + 3, &(derived_var));
+    }
+  }
+
+  // radiation m1 fluid frame average energy <e> = J/n (per species),
+  // in EOS energy units (MeV for a nuclear EOS)
+  if (out_params.variable.compare("rad_m1_e") == 0) {
+    int nspec = pm->pmb_pack->pradm1->nspecies;
+    out_params.contains_derived = true;
+    out_params.n_derived += nspec;
+    for (int nuidx = 0; nuidx < nspec; ++nuidx) {
+      outvars.emplace_back("e:" + std::to_string(nuidx), nuidx, &(derived_var));
+    }
+  }
+
+  // radiation m1 fluid frame absolute number flux |F| = n\sqrt{H^iH_i}/J/\sqrt{\gamma}
+  // (per species), in EOS number density units (fm^-3 for a nuclear EOS)
+  if (out_params.variable.compare("rad_m1_absF") == 0) {
+    int nspec = pm->pmb_pack->pradm1->nspecies;
+    out_params.contains_derived = true;
+    out_params.n_derived += nspec;
+    for (int nuidx = 0; nuidx < nspec; ++nuidx) {
+      outvars.emplace_back("|F|:" + std::to_string(nuidx), nuidx, &(derived_var));
+    }
+  }
+
+  // lower time-component of the fluid four-velocity u_t
+  if (out_params.variable.compare("u_t") == 0) {
+    out_params.contains_derived = true;
+    out_params.n_derived += 1;
+    int i_derived = out_params.n_derived - 1;
+    outvars.emplace_back("u_t", i_derived, &(derived_var));
+  }
+
+  // WinNet velocity V^i = \alpha v^i - \beta^i
+  if (out_params.variable.compare("win_Vi") == 0) {
+    out_params.contains_derived = true;
+    out_params.n_derived += 3;
+    outvars.emplace_back("win_Vx", 0, &(derived_var));
+    outvars.emplace_back("win_Vy", 1, &(derived_var));
+    outvars.emplace_back("win_Vz", 2, &(derived_var));
+  }
+
+  // spherical coordinate radius r = sqrt(x^2 + y^2 + z^2)
+  if (out_params.variable.compare("r_sph") == 0 ||
+      out_params.variable_2.compare("r_sph") == 0) {
+    out_params.contains_derived = true;
+    out_params.n_derived += 1;
+    int i_derived = out_params.n_derived - 1;
+    outvars.emplace_back("r_sph",i_derived,&(derived_var));
   }
 
   // initialize vector containing number of output MBs per rank
