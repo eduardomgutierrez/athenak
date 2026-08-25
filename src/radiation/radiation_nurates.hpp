@@ -590,11 +590,12 @@ void bns_nurates_gray(Real nb, Real temp, Real yp, Real yn,
 //----------------------------------------------------------------------------------------
 //! \fn void bns_nurates_spectral_bin
 //! \brief Midpoint/quadrature wrapper for bns_nurates spectral opacity coefficients.
-//!        The frequency bin bounds are code-energy values; outputs are bin-integrated
-//!        emissivities and bin-centered opacities in code units, except the number
-//!        emissivity eta_0, which is in fm^-3 per code time (as is the input nudens_0).
+//!        The frequency bin bounds are in MeV, as freq_grid holds them; outputs are
+//!        bin-integrated emissivities and bin-centered opacities in code units, except
+//!        the number emissivity eta_0, which is in fm^-3 per code time (as is the
+//!        input nudens_0).
 KOKKOS_INLINE_FUNCTION
-void bns_nurates_spectral_bin(Real e_lo_code, Real e_hi_code,
+void bns_nurates_spectral_bin(Real e_lo_mev, Real e_hi_mev,
                               int freq_scale,
                               Real nb, Real temp, Real yp, Real yn,
                               Real mu_n, Real mu_p, Real mu_e,
@@ -614,7 +615,6 @@ void bns_nurates_spectral_bin(Real e_lo_code, Real e_hi_code,
   // code units, per the G = c = 1 convention.
   const Real unit_num_dens  = eos_units.NumberDensityConversion(nurates_units);
   const Real unit_ene_dens  = code_units.EnergyDensityConversion(nurates_units);
-  const Real unit_energy    = code_units.EnergyConversion(nurates_units);
 
   for (int idx = 0; idx < 4; ++idx) {
     eta_0[idx]  = 0.;
@@ -628,7 +628,7 @@ void bns_nurates_spectral_bin(Real e_lo_code, Real e_hi_code,
   // conversion to bns_nurates units -- this is what radiation_m1_nurates.hpp does.
   if ((nb < nurates_params.nb_min) ||
       (temp < nurates_params.temp_min_mev) ||
-      (e_hi_code <= e_lo_code)) {
+      (e_hi_mev <= e_lo_mev)) {
     return;
   }
 
@@ -659,6 +659,7 @@ void bns_nurates_spectral_bin(Real e_lo_code, Real e_hi_code,
   grey_op_params.eos_pars.dU      = 0.;
   grey_op_params.eos_pars.dm_eff  = 0.;
 
+  // TODO(@dradice): are these needed for spectral opacities?
   if (nurates_params.use_equilibrium_distribution) {
     grey_op_params.distr_pars = NuEquilibriumParams(&grey_op_params.eos_pars);
     ComputeM1DensitiesEq(&grey_op_params.eos_pars,
@@ -685,8 +686,8 @@ void bns_nurates_spectral_bin(Real e_lo_code, Real e_hi_code,
         CalculateDistrParamsFromM1(&grey_op_params.m1_pars, &grey_op_params.eos_pars);
   }
 
-  const Real e_lo = e_lo_code * unit_energy;
-  const Real e_hi = e_hi_code * unit_energy;
+  const Real e_lo = e_lo_mev;
+  const Real e_hi = e_hi_mev;
   const Real de = e_hi - e_lo;
   const Real e_mid = (freq_scale == 1 && e_lo > 0.0) ? sqrt(e_lo*e_hi) :
                                                          0.5*(e_lo + e_hi);

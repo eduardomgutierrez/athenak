@@ -57,11 +57,17 @@ void Radiation::SetFrequencyGrid() {
       std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
                 << std::endl
                 << "Neutrino multifrequency nurates requires EOSCompOSE code units "
-                << "to convert nu_min/nu_max from MeV to code units." << std::endl;
+                << "to relate the MeV frequency grid to code energies." << std::endl;
       std::exit(EXIT_FAILURE);
     }
+    // The neutrino frequency grid stays in MeV: a code-unit neutrino energy is
+    // ~1e-60 in geometric-solar units and underflows single precision outright,
+    // and every consumer on the nurates path wants MeV anyway.  Only the
+    // blackbody tail estimate in the frequency-flux kernel needs code energies,
+    // so hand it the conversion instead of applying it to the grid.
     Primitive::UnitSystem nurates_units = Primitive::MakeNGS();
-    nu_unit = code_units.EnergyConversion(nurates_units);
+    nu_grid_to_code = 1.0/code_units.EnergyConversion(nurates_units);
+    nu_unit = 1.0;
   } else if (are_units_enabled_) {
     Real h_p = 6.62607015e-27; // Planck constant
     Real k_b = 1.380649e-16;   // Boltzman constant
@@ -77,9 +83,10 @@ void Radiation::SetFrequencyGrid() {
   auto &freq_grid_ = freq_grid;
   auto freq_grid_h = Kokkos::create_mirror_view(freq_grid_);
 
-  // convert frequency from cgs into sim unit
-  Real freq_min = nu_min_/nu_unit; // from cgs to sim unit
-  Real freq_max = nu_max_/nu_unit; // from cgs to sim unit
+  // convert frequency from cgs into sim unit (nu_unit = 1 leaves nu_min/nu_max
+  // as given, which is what the nurates neutrino path wants: MeV)
+  Real freq_min = nu_min_/nu_unit;
+  Real freq_max = nu_max_/nu_unit;
 
   // assign freq_min and freq_max
   int nfreq_grid = nfreq_; // frequency grid is defined starting from 0 but with inf excluded

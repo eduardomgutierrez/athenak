@@ -74,20 +74,19 @@ Real FermiDiracEnergyWeight(Real x_lo, Real x_hi, Real eta) {
 //! \fn void FreqBinEdgesMeV(...)
 //! \brief Lower/upper edge of frequency bin ifr, in MeV.
 //!
-//! freq_grid holds bin lower edges in code energy units, with freq_grid(0) = 0
-//! and freq_grid(nfreq-1) = nu_max.  The top bin is open-ended; this reproduces
+//! freq_grid holds bin lower edges in MeV, with freq_grid(0) = 0 and
+//! freq_grid(nfreq-1) = nu_max.  The top bin is open-ended; this reproduces
 //! exactly the extent radiation_nurates.cpp assigns to it, so the initial data
 //! and the transport agree on where the bins are.
 
 KOKKOS_INLINE_FUNCTION
 void FreqBinEdgesMeV(const DvceArray1D<Real> freq_grid, int ifr, int nfreq,
-                     Real nu_unit, Real temp_mev, Real &e_lo, Real &e_hi) {
-  e_lo = freq_grid(ifr)*nu_unit;
+                     Real temp_mev, Real &e_lo, Real &e_hi) {
+  e_lo = freq_grid(ifr);
   if (ifr < nfreq - 1) {
-    e_hi = freq_grid(ifr+1)*nu_unit;
+    e_hi = freq_grid(ifr+1);
   } else {
-    const Real g_prev = freq_grid(ifr-1)*nu_unit;
-    e_hi = e_lo + Kokkos::fmax(e_lo - g_prev, 20.0*temp_mev - e_lo);
+    e_hi = e_lo + Kokkos::fmax(e_lo - freq_grid(ifr-1), 20.0*temp_mev - e_lo);
   }
 }
 
@@ -462,9 +461,6 @@ void NeutrinoDominatedShock(Mesh *pmesh, ParameterInput* pin) {
     auto &tet_c = pmbp->prad->tet_c;
     auto &tetcov_c = pmbp->prad->tetcov_c;
     auto &freq_grid = pmbp->prad->freq_grid;
-    // freq_grid is stored in code energy units; SetFrequencyGrid built it as
-    // nu_min/nu_max [MeV] divided by this factor, so multiplying returns MeV.
-    const Real nu_unit_mev = code_units.EnergyConversion(nurates_units);
 
     par_for("pgen_shock1_multifreq", DevExeSpace(),
             0,(pmbp->nmb_thispack-1),ks,ke,js,je,is,ie,
@@ -534,7 +530,7 @@ void NeutrinoDominatedShock(Mesh *pmesh, ParameterInput* pin) {
         if (nfreq > 1) {
           for (int ifr = 0; ifr < nfreq; ++ifr) {
             Real e_lo, e_hi;
-            FreqBinEdgesMeV(freq_grid, ifr, nfreq, nu_unit_mev, temp, e_lo, e_hi);
+            FreqBinEdgesMeV(freq_grid, ifr, nfreq, temp, e_lo, e_hi);
             wsum += FermiDiracEnergyWeight(e_lo/temp, e_hi/temp, eta);
           }
         }
@@ -547,7 +543,7 @@ void NeutrinoDominatedShock(Mesh *pmesh, ParameterInput* pin) {
           Real erad_freq = nuJ[isp]/static_cast<Real>(nfreq);
           if (use_spectrum) {
             Real e_lo, e_hi;
-            FreqBinEdgesMeV(freq_grid, ifr, nfreq, nu_unit_mev, temp, e_lo, e_hi);
+            FreqBinEdgesMeV(freq_grid, ifr, nfreq, temp, e_lo, e_hi);
             erad_freq =
                 nuJ[isp]*FermiDiracEnergyWeight(e_lo/temp, e_hi/temp, eta)*inv_wsum;
           }

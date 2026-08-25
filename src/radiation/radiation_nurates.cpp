@@ -97,17 +97,18 @@ TaskStatus Radiation::CalcOpacityNurates_(Driver *pdrive, int stage) {
           ->eos.ps.GetEOSMutable();
   const Real mb = eos.GetBaryonMass();
   nurates_baryon_mass = mb;
-  nurates_code_num_to_eos_num =
-      1.0/eos.GetCodeUnitSystem().VolumeConversion(eos.GetEOSUnitSystem());
+  nurates_code_edens_to_eos =
+      eos.GetCodeUnitSystem().EnergyDensityConversion(eos.GetEOSUnitSystem());
 
   // Unit systems
   auto code_units    = eos.GetCodeUnitSystem();
   auto eos_units_loc = eos.GetEOSUnitSystem();
   // Neutrino number densities are carried in the EOS number-density unit (fm^-3)
   // throughout the nurates interface, as in radiation_m1/.  The multi-frequency
-  // solver builds them from the intensity moments, which are in code units, so
-  // the conversion is applied once, at the single production site below.
-  const Real code_to_eos_num_dens = nurates_code_num_to_eos_num;
+  // solver builds them from the intensity moments, so the conversion is applied
+  // once, at the single production site below: a code-unit energy density in
+  // MeV/fm^3, over a bin energy in MeV, is a number density in fm^-3.
+  const Real code_edens_to_eos = nurates_code_edens_to_eos;
   bool debug_opacity_ = nurates_debug_opacity;
 
   // Nurates params (captured by value for use inside KOKKOS_LAMBDA)
@@ -218,10 +219,8 @@ TaskStatus Radiation::CalcOpacityNurates_(Driver *pdrive, int stage) {
             e_mid = (freq_scale_ == 1 && e_lo > 0.0) ? sqrt(e_lo*e_hi) :
                                                         0.5*(e_lo + e_hi);
           } else {
-            Primitive::UnitSystem nurates_units_mom = MakeNuratesUnitSystem();
-            Real temp_code = T / code_units.EnergyConversion(nurates_units_mom);
             Real e_hi = freq_grid_(ifr) + fmax(freq_grid_(ifr) - freq_grid_(ifr-1),
-                                               20.0*temp_code - freq_grid_(ifr));
+                                               20.0*T - freq_grid_(ifr));
             e_mid = (freq_scale_ == 1 && freq_grid_(ifr) > 0.0) ?
                     sqrt(freq_grid_(ifr)*e_hi) : 0.5*(freq_grid_(ifr) + e_hi);
           }
@@ -241,7 +240,7 @@ TaskStatus Radiation::CalcOpacityNurates_(Driver *pdrive, int stage) {
         }
         nudens_1[isp] /= wght_sum;
         nudens_0[isp] /= wght_sum;
-        nudens_0[isp] *= code_to_eos_num_dens;
+        nudens_0[isp] *= code_edens_to_eos;
       }
     }
 
@@ -285,17 +284,15 @@ TaskStatus Radiation::CalcOpacityNurates_(Driver *pdrive, int stage) {
     }
 
     if (multi_freq_) {
-      Primitive::UnitSystem nurates_units_l = MakeNuratesUnitSystem();
-      Real unit_energy_l = code_units_l.EnergyConversion(nurates_units_l);
+      // freq_grid is in MeV, which is what bns_nurates_spectral_bin wants
       for (int ifr = 0; ifr < nfreq_; ++ifr) {
         Real e_lo = freq_grid_(ifr);
         Real e_hi = 0.0;
         if (ifr < nfreq_ - 1) {
           e_hi = freq_grid_(ifr+1);
         } else {
-          Real temp_code = T / unit_energy_l;
           e_hi = freq_grid_(ifr) + fmax(freq_grid_(ifr) - freq_grid_(ifr-1),
-                                        20.0*temp_code - freq_grid_(ifr));
+                                        20.0*T - freq_grid_(ifr));
         }
 
         Real loc_eta_0_f[4]  = {0.};
@@ -402,18 +399,12 @@ TaskStatus Radiation::CalcOpacityNurates_(Driver *pdrive, int stage) {
       }, scat_sum);
       Kokkos::fence();
       auto freq_grid_h = Kokkos::create_mirror_view_and_copy(HostMemSpace(), freq_grid);
-      Primitive::UnitSystem nurates_units = Primitive::MakeNGS();
       std::cout << "### Nurates opacity debug: nspecies=" << nspecies_
-                << " nfreq=" << nfreq_ << " energy_code_to_MeV="
-                << code_units.EnergyConversion(nurates_units)
-                << " freq_grid_code=[";
+                << " nfreq=" << nfreq_ << " edens_code_to_MeV_per_fm3="
+                << nurates_code_edens_to_eos
+                << " freq_grid_MeV=[";
       for (int ifr = 0; ifr < nfreq_; ++ifr) {
         std::cout << (ifr == 0 ? "" : ", ") << freq_grid_h(ifr);
-      }
-      std::cout << "] freq_grid_MeV=[";
-      for (int ifr = 0; ifr < nfreq_; ++ifr) {
-        std::cout << (ifr == 0 ? "" : ", ")
-                  << freq_grid_h(ifr)*code_units.EnergyConversion(nurates_units);
       }
       std::cout << "] sum(eta_0_freq)=" << eta0_sum
                 << " sum(eta_1_freq)=" << eta1_sum

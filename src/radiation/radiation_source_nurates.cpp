@@ -414,7 +414,7 @@ TaskStatus Radiation::MultiFreqRadFluidCouplingNurates(Driver *pdriver, int stag
   auto &abs_1_f_ = nurates_abs_1_freq;
   auto &scat_1_f_ = nurates_scat_1_freq;
   Real mb_code_ = nurates_baryon_mass;
-  Real code_num_to_eos_num_ = nurates_code_num_to_eos_num;
+  Real code_edens_to_eos_ = nurates_code_edens_to_eos;
 
   if (!(fixed_fluid_)) {
     if (is_dyngr) {
@@ -593,8 +593,10 @@ TaskStatus Radiation::MultiFreqRadFluidCouplingNurates(Driver *pdriver, int stag
     }
     for (int isp=0; isp<4; ++isp) {
       dN_rad_moment[isp] /= wght_sum;
-      // the moment sum is in code units; number densities are carried in fm^-3
-      dN_rad_moment[isp] *= code_num_to_eos_num_;
+      // the sum above is a code-unit energy density over a bin energy in MeV;
+      // rescaling the energy density to MeV/fm^3 makes it a number density in
+      // fm^-3, which is the convention throughout the nurates interface
+      dN_rad_moment[isp] *= code_edens_to_eos_;
     }
 
     if (affect_fluid_) {

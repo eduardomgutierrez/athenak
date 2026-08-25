@@ -106,7 +106,9 @@ class Radiation {
   NuratesParams nurates_params;
   bool nurates_debug_opacity = false;
   Real nurates_baryon_mass = 1.0;    // baryon mass in code units (for Ye update)
-  Real nurates_code_num_to_eos_num = 1.0; // code number density -> EOS number density
+  // code energy density -> EOS energy density (MeV/fm^3).  Dividing by a neutrino
+  // energy in MeV then turns a code-unit radiation energy density into fm^-3.
+  Real nurates_code_edens_to_eos = 1.0;
   // Neutrino number densities (nurates_eta_0*, and the N reconstructed from them in
   // the source terms) are in the EOS number-density unit, fm^-3, as in radiation_m1/;
   // everything else below is in code units.
@@ -170,7 +172,12 @@ class Radiation {
   int flag_fscale;             // 0: linear, 1: log, 2: customize
   Real nu_max, nu_min;         // minimum and maximum frequency (excluding zero and infinity)
   bool freq_fluxes;            // flag to enable/disable frequency fluxes
+  // Bin lower edges.  Photons: code frequency units.  Neutrinos with nurates: MeV,
+  // since a code-unit neutrino energy underflows single precision.
   DvceArray1D<Real> freq_grid;
+  // Multiplies a freq_grid entry to give a code energy/frequency.  1 except on the
+  // nurates neutrino path; only the blackbody tail in the frequency fluxes needs it.
+  Real nu_grid_to_code = 1.0;
   DvceArray5D<Real> nnu_coeff; // n^a n^b omega^0_{ab} for computing frequency fluxes
   Real tol_rel_tgas_compton;
   int num_iter_compton;

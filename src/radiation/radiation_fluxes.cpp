@@ -295,6 +295,11 @@ TaskStatus Radiation::CalculateFluxes(Driver *pdriver, int stage) {
     auto &divfa_ = divfa;
     auto &nu_tet = freq_grid;
     auto &nnu_coeff_ = nnu_coeff;
+    // The upwind frequency flux is invariant under a rescaling of nu (nnu_f ~ nu
+    // and inu ~ 1/nu), but the blackbody tail below is not: it needs a code-unit
+    // energy to pair with arad.  nu_grid_to_code is 1 except for nurates
+    // neutrinos, whose grid is in MeV.
+    Real nu_to_code_ = nu_grid_to_code;
 
     int order_freq_fluxes = 0;
     int nsp_ang1 = nsp*nang - 1;
@@ -366,10 +371,14 @@ TaskStatus Radiation::CalculateFluxes(Driver *pdriver, int stage) {
       // estimate inu at nu_tet[nfreq-1] assuming blackbody tail
       int sp_off = isp*nfrq*nang;  // species offset into combined index
       Real &nu_e = nu_tet(nfreq1);
+      Real nu_e_code = nu_e*nu_to_code_;
       int ne = sp_off + getFreqAngIndex(nfreq1, iang, nang);
       Real ir_cm_star_e = SQR(SQR(n0_cm))*i0_(m,ne,k,j,i)/(n0*n_0);
-      Real teff = GetEffTemperature(ir_cm_star_e, n0_cm*nu_e, arad_);
-      Real inu_e = fmax(BBSpectrum(n0_cm*nu_e, teff, arad_)/(4*M_PI)/SQR(SQR(n0_cm)), 0.0);
+      Real teff = GetEffTemperature(ir_cm_star_e, n0_cm*nu_e_code, arad_);
+      // BBSpectrum is per unit code frequency; the extra factor puts inu_e on the
+      // same per-unit-nu_tet footing as the inu_* built from i0_/(nu_f-nu_fm1)
+      Real inu_e = fmax(BBSpectrum(n0_cm*nu_e_code, teff, arad_)/(4*M_PI)
+                        /SQR(SQR(n0_cm)), 0.0)*nu_to_code_;
 
       // note: flux through nu_tet[0] is simply 0
       // compute flux at frequency faces from ifr=1 to ifr=nfreq-1
