@@ -23,6 +23,7 @@
 #include "mhd/mhd.hpp"
 #include "dyn_grmhd/dyn_grmhd.hpp"
 #include "radiation.hpp"
+#include "radiation/radiation_nurates.hpp"
 
 #include "radiation/radiation_tetrad.hpp"
 
@@ -523,19 +524,11 @@ TaskStatus Radiation::MultiFreqRadFluidCouplingNurates(Driver *pdriver, int stag
         Real dtcsiga = dt_*sigma_a(idx);
         Real dtcsigs = dt_*sigma_s(idx);
         Real jr_cm = (sum1_a(idx)*dtcsiga*eq_j(idx) + sum2_a(idx))/(1.0 - sum3_a(idx));
-        Real e_mid = 0.0;
-        if (ifr < nfrq_ - 1) {
-          Real e_lo = nu_tet(ifr);
-          Real e_hi = nu_tet(ifr+1);
-          e_mid = (freq_scale_ == 1 && e_lo > 0.0) ? sqrt(e_lo*e_hi) :
-                                                      0.5*(e_lo + e_hi);
-        } else {
-          Real e_hi = (freq_scale_ == 1 && nu_tet(ifr-1) > 0.0) ?
-                      nu_tet(ifr)*nu_tet(ifr)/nu_tet(ifr-1) :
-                      nu_tet(ifr) + (nu_tet(ifr) - nu_tet(ifr-1));
-          e_mid = (freq_scale_ == 1 && nu_tet(ifr) > 0.0) ? sqrt(nu_tet(ifr)*e_hi) :
-                                                            0.5*(nu_tet(ifr) + e_hi);
-        }
+        // Same bin geometry as CalcOpacityNurates_ -- these used to be two
+        // different formulas, disagreeing by 26% on the top bin's midpoint.
+        Real e_lo = 0.0, e_hi = 0.0;
+        FreqBinEdgesMeV(nu_tet, ifr, nfrq_, freq_scale_, e_lo, e_hi);
+        Real e_mid = FreqBinMidMeV(e_lo, e_hi, freq_scale_);
         for (int iang=0; iang<=nang1; ++iang) {
           int nn = sp_off + ifr*nang_ + iang;
           Real n_0 = tc(m,0,0,k,j,i)*nh_c_.d_view(iang,0) +

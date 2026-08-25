@@ -58,6 +58,47 @@ struct NuratesParams {
   MyQuadrature quadrature_2; // 2d quadrature for bns_nurates
 };
 
+//----------------------------------------------------------------------------------------
+//! \fn void FreqBinEdgesMeV
+//! \brief Lower/upper edge of frequency bin ifr, in MeV.
+//!
+//! freq_grid holds bin lower edges in MeV, with freq_grid(0) = 0 and
+//! freq_grid(nfreq-1) = nu_max.  The open top bin is closed by continuing the
+//! grid's own spacing -- geometric on a log grid, linear otherwise.
+//!
+//! Deliberately independent of temperature.  e_hi sets the energy at which the
+//! bin's neutrinos are counted (see FreqBinMidMeV), and dN = dE/e_mid is the one
+//! place a number is inferred from an energy.  A cutoff that tracked the local
+//! temperature would charge energy entering the bin and energy leaving it to
+//! different numbers of neutrinos, injecting spurious lepton number wherever the
+//! fluid heats or cools.  Widening the bin to span the thermal tail is not worth
+//! that: if 20*T exceeds nu_max the grid is under-resolved and should be extended.
+//!
+//! Single definition on purpose.  The opacity module, the source term and the
+//! initial data must agree on where the bins are; they used to disagree by 26%
+//! on the top bin's midpoint.
+KOKKOS_INLINE_FUNCTION
+void FreqBinEdgesMeV(const DvceArray1D<Real> freq_grid, int ifr, int nfreq,
+                     int freq_scale, Real &e_lo, Real &e_hi) {
+  e_lo = freq_grid(ifr);
+  if (ifr < nfreq - 1) {
+    e_hi = freq_grid(ifr+1);
+  } else {
+    e_hi = (freq_scale == 1 && freq_grid(ifr-1) > 0.0) ?
+           e_lo*e_lo/freq_grid(ifr-1) : e_lo + (e_lo - freq_grid(ifr-1));
+  }
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn Real FreqBinMidMeV
+//! \brief Representative energy of a frequency bin, in MeV: the geometric mean on a
+//!        log grid (freq_scale == 1), the arithmetic mean otherwise.
+
+KOKKOS_INLINE_FUNCTION
+Real FreqBinMidMeV(Real e_lo, Real e_hi, int freq_scale) {
+  return (freq_scale == 1 && e_lo > 0.0) ? sqrt(e_lo*e_hi) : 0.5*(e_lo + e_hi);
+}
+
 KOKKOS_INLINE_FUNCTION
 Primitive::UnitSystem MakeNuratesUnitSystem() {
   // bns_nurates internal unit system: energy = MeV, length = nm, time = s.

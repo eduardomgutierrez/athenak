@@ -212,18 +212,9 @@ TaskStatus Radiation::CalcOpacityNurates_(Driver *pdrive, int stage) {
       for (int isp = 0; isp < nspecies_; ++isp) {
         int sp_off = isp*nfreq_*nang_;
         for (int ifr = 0; ifr < nfreq_; ++ifr) {
-          Real e_mid = 0.0;
-          if (ifr < nfreq_ - 1) {
-            Real e_lo = freq_grid_(ifr);
-            Real e_hi = freq_grid_(ifr+1);
-            e_mid = (freq_scale_ == 1 && e_lo > 0.0) ? sqrt(e_lo*e_hi) :
-                                                        0.5*(e_lo + e_hi);
-          } else {
-            Real e_hi = freq_grid_(ifr) + fmax(freq_grid_(ifr) - freq_grid_(ifr-1),
-                                               20.0*T - freq_grid_(ifr));
-            e_mid = (freq_scale_ == 1 && freq_grid_(ifr) > 0.0) ?
-                    sqrt(freq_grid_(ifr)*e_hi) : 0.5*(freq_grid_(ifr) + e_hi);
-          }
+          Real e_lo = 0.0, e_hi = 0.0;
+          FreqBinEdgesMeV(freq_grid_, ifr, nfreq_, freq_scale_, e_lo, e_hi);
+          Real e_mid = FreqBinMidMeV(e_lo, e_hi, freq_scale_);
           for (int iang = 0; iang <= nang1; ++iang) {
             int n = sp_off + ifr*nang_ + iang;
             Real n_0 = tc(m,0,0,k,j,i)*nh_c_.d_view(iang,0) +
@@ -286,14 +277,8 @@ TaskStatus Radiation::CalcOpacityNurates_(Driver *pdrive, int stage) {
     if (multi_freq_) {
       // freq_grid is in MeV, which is what bns_nurates_spectral_bin wants
       for (int ifr = 0; ifr < nfreq_; ++ifr) {
-        Real e_lo = freq_grid_(ifr);
-        Real e_hi = 0.0;
-        if (ifr < nfreq_ - 1) {
-          e_hi = freq_grid_(ifr+1);
-        } else {
-          e_hi = freq_grid_(ifr) + fmax(freq_grid_(ifr) - freq_grid_(ifr-1),
-                                        20.0*T - freq_grid_(ifr));
-        }
+        Real e_lo = 0.0, e_hi = 0.0;
+        FreqBinEdgesMeV(freq_grid_, ifr, nfreq_, freq_scale_, e_lo, e_hi);
 
         Real loc_eta_0_f[4]  = {0.};
         Real loc_eta_1_f[4]  = {0.};
