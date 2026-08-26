@@ -73,19 +73,9 @@ struct SphereOpacities {
   }
 };
 
-struct DiffusionOpacitiesExplicit {
-  KOKKOS_INLINE_FUNCTION
-  void operator()(Real x1, Real x2, Real x3, Real dx, Real dy, Real dz, Real nuidx,
-                  Real &eta_0, Real &abs_0, Real &eta_1, Real &abs_1, Real &scat_1) {
-    eta_0 = 0;
-    abs_0 = 0;
-    eta_1 = 0;
-    abs_1 = 0;
-    scat_1 = 100;
-  }
-};
+struct DiffusionOpacities {
+  Real scat;
 
-struct DiffusionOpacitiesImplicit {
   KOKKOS_INLINE_FUNCTION
   void operator()(Real x1, Real x2, Real x3, Real dx, Real dy, Real dz, Real nuidx,
                   Real &eta_0, Real &abs_0, Real &eta_1, Real &abs_1, Real &scat_1) {
@@ -93,12 +83,13 @@ struct DiffusionOpacitiesImplicit {
     abs_0 = 0;
     eta_1 = 0;
     abs_1 = 0;
-    scat_1 = 1000;
+    scat_1 = scat;
   }
 };
 
 struct ToyOpacity {
   ToyOpacityModel model;
+  Real scat_1_val{0.0};  // diffusion models only; <=0 keeps the historical value
 
   KOKKOS_INLINE_FUNCTION
   void operator()(Real x1, Real x2, Real x3, Real dx, Real dy, Real dz, Real nuidx,
@@ -111,11 +102,11 @@ struct ToyOpacity {
       SphereOpacities{}(x1, x2, x3, dx, dy, dz, nuidx, eta_0, abs_0, eta_1, abs_1,
                         scat_1);
     } else if (model == ToyOpacityModel::DiffusionExplicit) {
-      DiffusionOpacitiesExplicit{}(x1, x2, x3, dx, dy, dz, nuidx, eta_0, abs_0, eta_1,
-                                   abs_1, scat_1);
+      DiffusionOpacities{scat_1_val > 0.0 ? scat_1_val : 100.0}(
+          x1, x2, x3, dx, dy, dz, nuidx, eta_0, abs_0, eta_1, abs_1, scat_1);
     } else if (model == ToyOpacityModel::DiffusionImplicit) {
-      DiffusionOpacitiesImplicit{}(x1, x2, x3, dx, dy, dz, nuidx, eta_0, abs_0, eta_1,
-                                   abs_1, scat_1);
+      DiffusionOpacities{scat_1_val > 0.0 ? scat_1_val : 1000.0}(
+          x1, x2, x3, dx, dy, dz, nuidx, eta_0, abs_0, eta_1, abs_1, scat_1);
     } else {
       // default behavior
     }

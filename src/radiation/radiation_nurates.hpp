@@ -99,6 +99,76 @@ Real FreqBinMidMeV(Real e_lo, Real e_hi, int freq_scale) {
   return (freq_scale == 1 && e_lo > 0.0) ? sqrt(e_lo*e_hi) : 0.5*(e_lo + e_hi);
 }
 
+//----------------------------------------------------------------------------------------
+//! \fn Real ShiftedBinValue
+//! \brief Per-bin quantity at a real-valued bin index.
+//!
+//! n0_cm is frequency independent, so on a log grid one ray's bins are the grid
+//! translated rigidly by delta = ln(n0_cm)/dlnnu.  Bins are uniform in ln(nu), so
+//! interpolating ln(q) against the index also carries the bin-width stretching and
+//! is exact for a power law.  Cubic, window slid to stay in range; lq holds log(q)
+//! or -1e30 where q is not positive, in which case q itself is interpolated.
+//! Linear grids need xpos per bin and the n0_cm width factor from the caller.
+KOKKOS_INLINE_FUNCTION
+Real ShiftedBinValue(const ScrArray1D<Real> &q, const ScrArray1D<Real> &lq,
+                     const int off, const int flo, const int fhi, const Real xpos) {
+  if (fhi - flo < 3) {
+    int jb = static_cast<int>(floor(xpos));
+    if (jb < flo) { jb = flo; }
+    if (jb > fhi - 1) { jb = fhi - 1; }
+    Real s = xpos - static_cast<Real>(jb);
+    int a = off + jb, b = off + jb + 1;
+    if (lq(a) > -1.0e29 && lq(b) > -1.0e29) {
+      return exp(lq(a) + s*(lq(b) - lq(a)));
+    }
+    return fmax(q(a) + s*(q(b) - q(a)), 0.0);
+  }
+  // Slide the window to stay inside [flo, fhi]; falling back to linear near the ends
+  // straddles the equilibrium peak and is wrong by tens of percent there.
+  int st = static_cast<int>(floor(xpos)) - 1;
+  if (st < flo) { st = flo; }
+  if (st > fhi - 3) { st = fhi - 3; }
+  Real t = xpos - static_cast<Real>(st);
+  Real w0 = -(t - 1.0)*(t - 2.0)*(t - 3.0)/6.0;
+  Real w1 = t*(t - 2.0)*(t - 3.0)/2.0;
+  Real w2 = -t*(t - 1.0)*(t - 3.0)/2.0;
+  Real w3 = t*(t - 1.0)*(t - 2.0)/6.0;
+  int a = off + st, b = off + st + 1, c = off + st + 2, d = off + st + 3;
+  if (lq(a) > -1.0e29 && lq(b) > -1.0e29 && lq(c) > -1.0e29 && lq(d) > -1.0e29) {
+    return exp(w0*lq(a) + w1*lq(b) + w2*lq(c) + w3*lq(d));
+  }
+  return fmax(w0*q(a) + w1*q(b) + w2*q(c) + w3*q(d), 0.0);
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn Real ShapeFactor
+//! \brief qbar(ifr + delta)/qbar(ifr): how a bin-integrated, comoving-isotropic
+//!        quantity varies across rays in lab bins.
+//!
+//! Multiplying the bin-mean intensity by this before comparing with each ray makes
+//! elastic scattering a no-op on an isotropic field.  qbar must come from the
+//! radiation field, not from any equilibrium spectrum.  Returns 1 at rest, for
+//! bin 0 (spans [0, nu_min], outside the log family), and for an empty spectrum.
+KOKKOS_INLINE_FUNCTION
+Real ShapeFactor(const ScrArray1D<Real> &qbar, const ScrArray1D<Real> &lqbar,
+                 const int off, const int ifr, const int iang, const int nfreq,
+                 const bool enabled, const int freq_scale,
+                 const ScrArray1D<Real> &dlt_iang, const Real n0_cm,
+                 const ScrArray1D<Real> &emid_f, const Real grid_dlin) {
+  if (!enabled || ifr <= 0 || nfreq < 5) { return 1.0; }
+  if (!(qbar(off+ifr) > 0.0)) { return 1.0; }
+  Real xpos, jac = 1.0;
+  if (freq_scale == 1) {
+    xpos = static_cast<Real>(ifr) + dlt_iang(iang);
+  } else {
+    xpos = static_cast<Real>(ifr) + (n0_cm - 1.0)*emid_f(ifr)/grid_dlin;
+    jac = n0_cm;
+  }
+  if (fabs(xpos - static_cast<Real>(ifr)) <= 1.0e-12) { return 1.0; }
+  Real qs = jac*ShiftedBinValue(qbar, lqbar, off, 1, nfreq-1, xpos);
+  return (qs > 0.0) ? qs/qbar(off+ifr) : 1.0;
+}
+
 KOKKOS_INLINE_FUNCTION
 Primitive::UnitSystem MakeNuratesUnitSystem() {
   // bns_nurates internal unit system: energy = MeV, length = nm, time = s.

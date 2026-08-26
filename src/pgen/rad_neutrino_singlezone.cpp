@@ -19,10 +19,25 @@
 #include "parameter_input.hpp"
 #include "pgen/pgen.hpp"
 #include "radiation/radiation.hpp"
+#ifdef ENABLE_NURATES
+#include "radiation/radiation_nurates.hpp"
+#endif
 
 namespace {
 template <class EOSPolicy, class ErrorPolicy>
 void SingleZoneImpl(Mesh *pmesh, ParameterInput *pin, const bool restart);
+
+//----------------------------------------------------------------------------------------
+//! \fn Real PlanckLikeIntegral
+//! \brief Indefinite integral of E^3 exp(-E/T), used to seed an exactly
+//!        comoving-isotropic radiation field with a non-trivial spectrum.
+//!
+//! d/dE [ -T exp(-E/T) (E^3 + 3T E^2 + 6T^2 E + 6T^3) ] = E^3 exp(-E/T), and the
+//! integral from 0 to infinity is 6 T^4.
+KOKKOS_INLINE_FUNCTION
+Real PlanckLikeIntegral(Real e, Real t) {
+  return -t*exp(-e/t)*(e*e*e + 3.0*t*e*e + 6.0*t*t*e + 6.0*t*t*t);
+}
 }
 
 void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
@@ -91,6 +106,14 @@ void SingleZoneImpl(Mesh *pmesh, ParameterInput *pin, const bool restart) {
   Real vz = pin->GetOrAddReal("problem", "vz", 0.0);
   Real ye = pin->GetReal("problem", "Y_e");
   Real erad = pin->GetOrAddReal("problem", "erad", 0.0);
+  // Seed an exactly comoving-isotropic field with a non-trivial spectrum:
+  // S(E) = A E^3 exp(-E/spec_temp), normalised so the comoving energy density
+  // is erad.  Each ray is given the integral of S over *its own* comoving bin
+  // n0_cm*[e_lo, e_hi], which is what a comoving-isotropic field actually looks
+  // like in lab-frame bins.  The default (spec_temp <= 0) keeps the old flat
+  // erad/nfreq per bin, which is isotropic in the lab-bin sense but does not
+  // correspond to any single comoving spectrum once the fluid moves.
+  Real spec_temp = pin->GetOrAddReal("problem", "spec_temp", 0.0);
   // Chiral imbalance seed and a uniform seed field, for the chiral unit tests.
   // Both default to zero, so the plain equilibration test is unaffected.
   Real y5 = pin->GetOrAddReal("problem", "Y_5", 0.0);
@@ -154,6 +177,10 @@ void SingleZoneImpl(Mesh *pmesh, ParameterInput *pin, const bool restart) {
   auto &nh_c = pmbp->prad->nh_c;
   auto &tet_c = pmbp->prad->tet_c;
   auto &tetcov_c = pmbp->prad->tetcov_c;
+  auto &freq_grid = pmbp->prad->freq_grid;
+  const int freq_scale = pmbp->prad->flag_fscale;
+  const Real spec_norm = (spec_temp > 0.0) ?
+                         erad/(6.0*SQR(SQR(spec_temp))) : 0.0;
   par_for("pgen_neutrino_singlezone_rad", DevExeSpace(), 0, nmb1, 0, n3 - 1, 0,
           n2 - 1, 0, n1 - 1,
           KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
@@ -189,8 +216,19 @@ void SingleZoneImpl(Mesh *pmesh, ParameterInput *pin, const bool restart) {
                     n_0 += tetcov_c(m,d,0,k,j,i)*nh_c.d_view(n,d);
                   }
                   int nn = (isp*nfreq + ifr)*nang + n;
+                  Real intensity_cm = erad_freq;
+#ifdef ENABLE_NURATES
+                  if (spec_temp > 0.0) {
+                    Real e_lo = 0.0, e_hi = 0.0;
+                    radiation::FreqBinEdgesMeV(freq_grid, ifr, nfreq, freq_scale,
+                                               e_lo, e_hi);
+                    intensity_cm = spec_norm*
+                        (PlanckLikeIntegral(n0_f*e_hi, spec_temp) -
+                         PlanckLikeIntegral(n0_f*e_lo, spec_temp));
+                  }
+#endif
                   i0(m, nn, k, j, i) =
-                      n0*n_0*(erad_freq/(4.0*M_PI))/SQR(SQR(n0_f));
+                      n0*n_0*(intensity_cm/(4.0*M_PI))/SQR(SQR(n0_f));
                 }
               }
             }

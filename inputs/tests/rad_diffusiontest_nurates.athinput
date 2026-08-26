@@ -1,0 +1,82 @@
+<comment>
+problem   = 1D radiation diffusion in a moving medium, through the nurates source terms
+reference = same physics as inputs/tests/rad_diffusiontest.athinput, different solver path
+
+# Exercises RadFluidCouplingNurates / MultiFreqRadFluidCouplingNurates with a prescribed
+# elastic scattering opacity instead of the bns_nurates library, so the nurates source
+# terms can be measured against the analytic advection-diffusion solution.
+# Set <radiation>/multi_freq = true (plus nfreq/nu_min/nu_max) for the multi-frequency
+# path.  Requires a build with -DAthena_ENABLE_NURATES=ON.
+
+<job>
+basename  = diffusion_nu
+
+<time>
+evolution  = dynamic
+integrator = rk2
+cfl_number = 0.1
+nlim       = -1
+tlim       = 5.0
+ndiag      = 1000
+
+<coord>
+general_rel = true
+minkowski   = true
+
+<mesh>
+nghost = 2
+nx1    = 512
+x1min  = -1.0
+x1max  = 2.0
+ix1_bc = periodic
+ox1_bc = periodic
+
+nx2    = 1
+x2min  = -0.5
+x2max  = 0.5
+ix2_bc = periodic
+ox2_bc = periodic
+
+nx3    = 1
+x3min  = -0.5
+x3max  = 0.5
+ix3_bc = periodic
+ox3_bc = periodic
+
+<hydro>
+eos         = ideal
+reconstruct = plm
+rsolver     = hlle
+gamma       = 2.0
+
+<radiation>
+nlevel                 = 4
+radiation_type         = neutrino
+nspecies               = 1
+use_nurates            = true
+nurates_toy_scattering = 100.0   # overwritten by problem/kappa_s
+fixed_fluid            = true
+affect_fluid           = false
+evolve_ye              = false
+arad                   = 1.0
+# Set multi_freq = true (here or on the command line) to drive
+# MultiFreqRadFluidCouplingNurates instead of the grey RadFluidCouplingNurates.
+multi_freq  = false
+nfreq       = 12
+nu_min      = 1.0        # MeV
+nu_max      = 300.0      # MeV
+freq_scale  = log
+freq_fluxes = false      # no velocity gradient here, and the tail needs EOS units
+
+<problem>
+pgen_name      = rad_m1_diffusiontest
+initial_data   = diffusion
+fluid_velocity = 0.1
+kappa_s        = 100.0
+nu             = 4.0
+t0             = 0.0
+
+<output1>
+file_type = tab
+variable  = rad_coord_fluid
+dt        = 1.0

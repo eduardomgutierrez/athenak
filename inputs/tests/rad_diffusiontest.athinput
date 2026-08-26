@@ -1,0 +1,64 @@
+<comment>
+problem   = 1D radiation diffusion in a moving, purely scattering medium (discrete ord.)
+reference = counterpart of inputs/tests/rad_m1_diffusiontest.athinput (grey M1)
+
+<job>
+basename  = diffusion_sn
+
+<time>
+evolution  = dynamic   # dynamic/kinematic/static
+integrator = rk2       # time integration algorithm
+cfl_number = 0.4       # The Courant, Friedrichs, & Lewy (CFL) Number
+nlim       = -1        # cycle limit
+tlim       = 5.0       # time limit
+ndiag      = 1000      # cycles between diagnostic output
+
+<coord>
+general_rel = true     # w/ general relativity
+minkowski   = true     # Minkowski flag
+
+<mesh>
+nghost = 2
+nx1    = 256       # Number of zones in X1-direction
+x1min  = -1.0      # minimum value of X1
+x1max  = 2.0       # maximum value of X1
+ix1_bc = periodic  # inner-X1 boundary flag
+ox1_bc = periodic  # outer-X1 boundary flag
+
+nx2    = 1         # Number of zones in X2-direction
+x2min  = -0.5      # minimum value of X2
+x2max  = 0.5       # maximum value of X2
+ix2_bc = periodic  # inner-X2 boundary flag
+ox2_bc = periodic  # outer-X2 boundary flag
+
+nx3    = 1         # Number of zones in X3-direction
+x3min  = -0.5      # minimum value of X3
+x3max  = 0.5       # maximum value of X3
+ix3_bc = periodic  # inner-X3 boundary flag
+ox3_bc = periodic  # outer-X3 boundary flag
+
+<hydro>
+eos         = ideal  # EOS type
+reconstruct = plm    # spatial reconstruction method
+rsolver     = hlle   # Riemann-solver to be used
+gamma       = 2.0    # ratio of specific heats Gamma
+
+<radiation>
+nlevel       = 4     # number of levels for geodesic mesh (nangles = 10*nlevel^2+2)
+fixed_fluid  = true  # disable hydro evolution
+affect_fluid = false # coupling to fluid
+arad         = 1.0   # unused: kappa_a = 0
+# kappa_a/kappa_p/kappa_s are set by the pgen from problem/kappa_s
+
+<problem>
+pgen_name      = rad_m1_diffusiontest
+initial_data   = diffusion # gaussian | step | diffusion (exact advection-diffusion)
+fluid_velocity = 0.1       # v^x of the background fluid, in units of c
+kappa_s        = 100.0     # elastic scattering opacity, D = 1/(3 kappa_s)
+nu             = 4.0       # initial comoving profile exp(-nu^2 x'^2) at t' = -t0
+t0             = 0.0       # comoving time offset of the initial profile
+
+<output1>
+file_type = tab
+variable  = rad_coord_fluid  # r00..r33 (lab) then r00_ff..r33_ff (comoving)
+dt        = 1.0

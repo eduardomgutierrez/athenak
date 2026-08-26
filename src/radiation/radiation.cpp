@@ -71,6 +71,10 @@ Radiation::Radiation(MeshBlockPack *ppack, ParameterInput *pin) :
 
 #if ENABLE_NURATES
   use_nurates = pin->GetOrAddBoolean("radiation", "use_nurates", false);
+  // Read here rather than with the other nurates keys: SetFrequencyGrid() runs
+  // before those and needs to know whether to look for EOS units.
+  nurates_toy_scattering =
+      pin->GetOrAddReal("radiation", "nurates_toy_scattering", -1.0);
 #endif
 
   // Check flags and parameters for ad hoc fixes

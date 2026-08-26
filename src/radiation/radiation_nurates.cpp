@@ -41,6 +41,11 @@ TaskStatus Radiation::CalcOpacityNurates(Driver *pdrive, int stage) {
     return TaskStatus::complete;
   }
 
+  // Toy opacities need no EOS, so they short-circuit the dispatch below.
+  if (nurates_toy_scattering >= 0.0) {
+    return CalcOpacityNuratesToy(pdrive, stage);
+  }
+
   auto *pmy_pack = this->pmy_pack;
 
   // Dispatch based on EOS type (mirrors the pattern in dyn_grmhd.cpp constructor)
@@ -67,6 +72,63 @@ TaskStatus Radiation::CalcOpacityNurates(Driver *pdrive, int stage) {
             << "Check that DynGRMHD is using EOSCompOSE<NQTLogs> or "
             << "EOSCompOSE<NormalLogs>." << std::endl;
   std::exit(EXIT_FAILURE);
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn TaskStatus Radiation::CalcOpacityNuratesToy
+//! \brief Constant elastic scattering, no absorption or emission.  Lets the nurates
+//! source terms be driven by a prescribed opacity instead of the library, which is what
+//! the diffusion test needs; mirrors <radiation_m1>/opacity_type = toy.
+
+TaskStatus Radiation::CalcOpacityNuratesToy(Driver *pdrive, int stage) {
+  auto &indcs = pmy_pack->pmesh->mb_indcs;
+  int &is = indcs.is, &ie = indcs.ie;
+  int &js = indcs.js, &je = indcs.je;
+  int &ks = indcs.ks, &ke = indcs.ke;
+  int nmb1 = pmy_pack->nmb_thispack - 1;
+  int nsp_ = nspecies;
+  int nfreq_ = nfreq;
+  bool multi_freq_ = multi_freq;
+  Real scat_ = nurates_toy_scattering;
+
+  auto &eta_0_ = nurates_eta_0;
+  auto &eta_1_ = nurates_eta_1;
+  auto &abs_0_ = nurates_abs_0;
+  auto &abs_1_ = nurates_abs_1;
+  auto &scat_1_ = nurates_scat_1;
+
+  par_for("rad_nurates_toy_opacity", DevExeSpace(), 0, nmb1, ks, ke, js, je, is, ie,
+  KOKKOS_LAMBDA(int m, int k, int j, int i) {
+    for (int isp = 0; isp < nsp_; ++isp) {
+      eta_0_(m,isp,k,j,i) = 0.0;
+      eta_1_(m,isp,k,j,i) = 0.0;
+      abs_0_(m,isp,k,j,i) = 0.0;
+      abs_1_(m,isp,k,j,i) = 0.0;
+      scat_1_(m,isp,k,j,i) = scat_;
+    }
+  });
+
+  if (multi_freq_) {
+    auto &eta_0_f_ = nurates_eta_0_freq;
+    auto &eta_1_f_ = nurates_eta_1_freq;
+    auto &abs_0_f_ = nurates_abs_0_freq;
+    auto &abs_1_f_ = nurates_abs_1_freq;
+    auto &scat_1_f_ = nurates_scat_1_freq;
+    par_for("rad_nurates_toy_opacity_freq", DevExeSpace(), 0, nmb1, ks, ke, js, je,
+            is, ie, KOKKOS_LAMBDA(int m, int k, int j, int i) {
+      for (int isp = 0; isp < nsp_; ++isp) {
+        for (int ifr = 0; ifr < nfreq_; ++ifr) {
+          eta_0_f_(m,isp,ifr,k,j,i) = 0.0;
+          eta_1_f_(m,isp,ifr,k,j,i) = 0.0;
+          abs_0_f_(m,isp,ifr,k,j,i) = 0.0;
+          abs_1_f_(m,isp,ifr,k,j,i) = 0.0;
+          scat_1_f_(m,isp,ifr,k,j,i) = scat_;
+        }
+      }
+    });
+  }
+
+  return TaskStatus::complete;
 }
 
 //----------------------------------------------------------------------------------------

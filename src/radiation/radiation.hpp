@@ -102,6 +102,9 @@ class Radiation {
 
   // bns_nurates opacity library
   bool use_nurates = false;
+  // >= 0 replaces the library opacities with constant elastic scattering, so the
+  // nurates source terms can be run against an analytic solution.
+  Real nurates_toy_scattering = -1.0;
 #if ENABLE_NURATES
   NuratesParams nurates_params;
   bool nurates_debug_opacity = false;
@@ -244,6 +247,7 @@ class Radiation {
 #if ENABLE_NURATES
   TaskStatus RadFluidCouplingNurates(Driver *d, int stage);
   TaskStatus CalcOpacityNurates(Driver *d, int stage);
+  TaskStatus CalcOpacityNuratesToy(Driver *d, int stage);
   template <class EOSPolicy, class ErrorPolicy>
   TaskStatus CalcOpacityNurates_(Driver *d, int stage);
 #endif

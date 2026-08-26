@@ -34,7 +34,7 @@ namespace radiation {
 void Radiation::SetFrequencyGrid() {
   bool &are_units_enabled_ = are_units_enabled;
   Real nu_unit = 1.0;
-  if (use_nurates && is_neutrino) {
+  if (use_nurates && is_neutrino && nurates_toy_scattering < 0.0) {
     Primitive::UnitSystem code_units{};
     bool found_code_units = false;
     if (pmy_pack->pdyngr != nullptr) {

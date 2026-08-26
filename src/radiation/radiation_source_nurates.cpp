@@ -416,6 +416,20 @@ TaskStatus Radiation::MultiFreqRadFluidCouplingNurates(Driver *pdriver, int stag
   auto &scat_1_f_ = nurates_scat_1_freq;
   Real mb_code_ = nurates_baryon_mass;
   Real code_edens_to_eos_ = nurates_code_edens_to_eos;
+  // Bin spacing of the comoving grid, used to turn a ray's Doppler factor into a
+  // displacement in bin index.  Bin 0 spans [0, nu_min] and is not part of the
+  // family, so the spacing is measured over bins 1 .. nfreq-1.
+  Real grid_dln_ = 0.0, grid_dlin_ = 0.0;
+  bool shift_ok_ = (nfrq_ >= 3);
+  if (shift_ok_) {
+    if (freq_scale_ == 1) {
+      shift_ok_ = (nu_min > 0.0 && nu_max > nu_min);
+      if (shift_ok_) { grid_dln_ = log(nu_max/nu_min)/static_cast<Real>(nfrq_-2); }
+    } else {
+      shift_ok_ = (nu_max > nu_min);
+      if (shift_ok_) { grid_dlin_ = (nu_max-nu_min)/static_cast<Real>(nfrq_-2); }
+    }
+  }
 
   if (!(fixed_fluid_)) {
     if (is_dyngr) {
@@ -429,17 +443,29 @@ TaskStatus Radiation::MultiFreqRadFluidCouplingNurates(Driver *pdriver, int stag
     }
   }
 
-  size_t scr_size = ScrArray1D<Real>::shmem_size(nsp_*nfrq_) * 6;
+  size_t scr_size = ScrArray1D<Real>::shmem_size(nsp_*nfrq_) * 10
+                  + ScrArray1D<Real>::shmem_size(nang_) * 3
+                  + ScrArray1D<Real>::shmem_size(nfrq_) * 3;
   int scr_level = 0;
   par_for_outer("multi_freq_source_nurates", DevExeSpace(), scr_size, scr_level,
   0, nmb1, ks, ke, js, je, is, ie,
   KOKKOS_LAMBDA(TeamMember_t member, int m, int k, int j, int i) {
     ScrArray1D<Real> sigma_a(member.team_scratch(scr_level), nsp_*nfrq_);
     ScrArray1D<Real> sigma_s(member.team_scratch(scr_level), nsp_*nfrq_);
-    ScrArray1D<Real> sum1_a(member.team_scratch(scr_level), nsp_*nfrq_);
-    ScrArray1D<Real> sum2_a(member.team_scratch(scr_level), nsp_*nfrq_);
-    ScrArray1D<Real> sum3_a(member.team_scratch(scr_level), nsp_*nfrq_);
     ScrArray1D<Real> eq_j(member.team_scratch(scr_level), nsp_*nfrq_);
+    ScrArray1D<Real> lsa(member.team_scratch(scr_level), nsp_*nfrq_);
+    ScrArray1D<Real> lss(member.team_scratch(scr_level), nsp_*nfrq_);
+    ScrArray1D<Real> lej(member.team_scratch(scr_level), nsp_*nfrq_);
+    ScrArray1D<Real> lIb(member.team_scratch(scr_level), nsp_*nfrq_);
+    ScrArray1D<Real> rtmp(member.team_scratch(scr_level), nfrq_);
+    ScrArray1D<Real> lrtmp(member.team_scratch(scr_level), nfrq_);
+    ScrArray1D<Real> sum2_a(member.team_scratch(scr_level), nsp_*nfrq_);
+    ScrArray1D<Real> sumA_a(member.team_scratch(scr_level), nsp_*nfrq_);
+    ScrArray1D<Real> sum3_a(member.team_scratch(scr_level), nsp_*nfrq_);
+    ScrArray1D<Real> n_0_iang(member.team_scratch(scr_level), nang_);
+    ScrArray1D<Real> n0_cm_iang(member.team_scratch(scr_level), nang_);
+    ScrArray1D<Real> dlt_iang(member.team_scratch(scr_level), nang_);
+    ScrArray1D<Real> emid_f(member.team_scratch(scr_level), nfrq_);
 
     Real &x1min = size.d_view(m).x1min;
     Real &x1max = size.d_view(m).x1max;
@@ -478,63 +504,137 @@ TaskStatus Radiation::MultiFreqRadFluidCouplingNurates(Driver *pdriver, int stag
                 norm_to_tet_(m,3,2,k,j,i)*wvy   + norm_to_tet_(m,3,3,k,j,i)*wvz);
     Real n0 = tt(m,0,0,k,j,i);
 
+    // Per-ray geometry, and the ray's displacement in bin index.  The redshift
+    // factor n0_cm does not depend on frequency, so on a log grid one number per
+    // ray positions every bin (see ShiftedBinValue).
     Real wght_sum = 0.0;
     for (int iang=0; iang<=nang1; ++iang) {
+      n_0_iang(iang) = tc(m,0,0,k,j,i)*nh_c_.d_view(iang,0) +
+                       tc(m,1,0,k,j,i)*nh_c_.d_view(iang,1) +
+                       tc(m,2,0,k,j,i)*nh_c_.d_view(iang,2) +
+                       tc(m,3,0,k,j,i)*nh_c_.d_view(iang,3);
       Real n0_cm = (u_tet[0]*nh_c_.d_view(iang,0) - u_tet[1]*nh_c_.d_view(iang,1) -
                     u_tet[2]*nh_c_.d_view(iang,2) - u_tet[3]*nh_c_.d_view(iang,3));
+      n0_cm_iang(iang) = n0_cm;
+      dlt_iang(iang) = (shift_ok_ && freq_scale_ == 1 && n0_cm > 0.0) ?
+                       log(n0_cm)/grid_dln_ : 0.0;
       wght_sum += solid_angles_.d_view(iang)/SQR(n0_cm);
     }
-
-    for (int isp=0; isp<nsp_; ++isp) {
-      for (int ifr=0; ifr<nfrq_; ++ifr) {
-        int idx = isp*nfrq_ + ifr;
-        sigma_a(idx) = abs_1_f_(m, isp, ifr, k, j, i);
-        sigma_s(idx) = scat_1_f_(m, isp, ifr, k, j, i);
-        eq_j(idx) = (sigma_a(idx) > 0.0) ? eta_1_f_(m, isp, ifr, k, j, i)/sigma_a(idx) : 0.0;
-        Real dtcsiga = dt_*sigma_a(idx);
-        Real dtcsigs = dt_*sigma_s(idx);
-        Real sum1 = 0.0, sum2 = 0.0;
-        int sp_off = isp*nfrq_*nang_;
-        for (int iang=0; iang<=nang1; ++iang) {
-          int nn = sp_off + ifr*nang_ + iang;
-          Real n_0 = tc(m,0,0,k,j,i)*nh_c_.d_view(iang,0) +
-                     tc(m,1,0,k,j,i)*nh_c_.d_view(iang,1) +
-                     tc(m,2,0,k,j,i)*nh_c_.d_view(iang,2) +
-                     tc(m,3,0,k,j,i)*nh_c_.d_view(iang,3);
-          Real n0_cm = (u_tet[0]*nh_c_.d_view(iang,0) - u_tet[1]*nh_c_.d_view(iang,1) -
-                        u_tet[2]*nh_c_.d_view(iang,2) - u_tet[3]*nh_c_.d_view(iang,3));
-          Real omega_cm = solid_angles_.d_view(iang)/SQR(n0_cm);
-          Real intensity_cm = 4.0*M_PI*(i0_(m,nn,k,j,i)/(n0*n_0))*SQR(SQR(n0_cm));
-          Real vncsigma = 1.0/(n0 + (dtcsiga + dtcsigs)*n0_cm);
-          sum1 += omega_cm*n0_cm*vncsigma;
-          sum2 += intensity_cm*omega_cm*n0*vncsigma;
-        }
-        sum1_a(idx) = sum1/wght_sum;
-        sum2_a(idx) = sum2/wght_sum;
-        sum3_a(idx) = sum1_a(idx)*dtcsigs;
-      }
+    for (int ifr=0; ifr<nfrq_; ++ifr) {
+      Real e_lo = 0.0, e_hi = 0.0;
+      FreqBinEdgesMeV(nu_tet, ifr, nfrq_, freq_scale_, e_lo, e_hi);
+      emid_f(ifr) = FreqBinMidMeV(e_lo, e_hi, freq_scale_);
     }
 
     Real m_old[4] = {0.0}; Real m_new[4] = {0.0};
     Real dN_rad_moment[4] = {0.0};
     for (int isp=0; isp<nsp_; ++isp) {
-      int sp_off = isp*nfrq_*nang_;
+      int sp_off = isp*nfrq_;
       for (int ifr=0; ifr<nfrq_; ++ifr) {
-        int idx = isp*nfrq_ + ifr;
-        Real dtcsiga = dt_*sigma_a(idx);
-        Real dtcsigs = dt_*sigma_s(idx);
-        Real jr_cm = (sum1_a(idx)*dtcsiga*eq_j(idx) + sum2_a(idx))/(1.0 - sum3_a(idx));
-        // Same bin geometry as CalcOpacityNurates_ -- these used to be two
-        // different formulas, disagreeing by 26% on the top bin's midpoint.
-        Real e_lo = 0.0, e_hi = 0.0;
-        FreqBinEdgesMeV(nu_tet, ifr, nfrq_, freq_scale_, e_lo, e_hi);
-        Real e_mid = FreqBinMidMeV(e_lo, e_hi, freq_scale_);
+        int idx = sp_off + ifr;
+        Real sa = abs_1_f_(m, isp, ifr, k, j, i);
+        Real ss = scat_1_f_(m, isp, ifr, k, j, i);
+        Real ej = (sa > 0.0) ? eta_1_f_(m, isp, ifr, k, j, i)/sa : 0.0;
+        sigma_a(idx) = sa;
+        sigma_s(idx) = ss;
+        eq_j(idx) = ej;
+        lsa(idx) = (sa > 0.0) ? log(sa) : -1.0e30;
+        lss(idx) = (ss > 0.0) ? log(ss) : -1.0e30;
+        lej(idx) = (ej > 0.0) ? log(ej) : -1.0e30;
+      }
+
+      // Lagged comoving mean spectrum on the fixed grid: un-shift each ray before
+      // integrating, so a comoving-isotropic field comes back exactly.
+      for (int ifr=0; ifr<nfrq_; ++ifr) { sumA_a(sp_off+ifr) = 0.0; }
+      for (int iang=0; iang<=nang1; ++iang) {
+        Real n0_cm = n0_cm_iang(iang);
+        Real n_0 = n_0_iang(iang);
+        Real omega_cm = solid_angles_.d_view(iang)/SQR(n0_cm);
+        for (int ifr=0; ifr<nfrq_; ++ifr) {
+          int nn = isp*nfrq_*nang_ + ifr*nang_ + iang;
+          Real val = 4.0*M_PI*(i0_(m,nn,k,j,i)/(n0*n_0))*SQR(SQR(n0_cm));
+          rtmp(ifr) = val;
+          lrtmp(ifr) = (val > 0.0) ? log(val) : -1.0e30;
+        }
+        for (int ifr=0; ifr<nfrq_; ++ifr) {
+          Real g = rtmp(ifr);
+          if (shift_ok_ && ifr > 0) {
+            Real xpos, jac = 1.0;
+            if (freq_scale_ == 1) {
+              xpos = static_cast<Real>(ifr) - dlt_iang(iang);
+            } else {
+              xpos = static_cast<Real>(ifr) - (n0_cm - 1.0)*emid_f(ifr)/grid_dlin_;
+              jac = 1.0/n0_cm;
+            }
+            if (fabs(xpos - static_cast<Real>(ifr)) > 1.0e-12) {
+              g = jac*ShiftedBinValue(rtmp, lrtmp, 0, 1, nfrq_-1, xpos);
+            }
+          }
+          sumA_a(sp_off+ifr) += omega_cm*g;
+        }
+      }
+      for (int ifr=0; ifr<nfrq_; ++ifr) {
+        Real acc = sumA_a(sp_off+ifr)/wght_sum;
+        sumA_a(sp_off+ifr) = acc;
+        lIb(sp_off+ifr) = (acc > 0.0) ? log(acc) : -1.0e30;
+      }
+
+      // Pass 1: angle sums for the implicit bin-mean intensity.  With per-ray
+      // opacities, sigma_a*eq_j and sigma_s sit inside the angle sum.
+      for (int ifr=0; ifr<nfrq_; ++ifr) {
+        int idx = sp_off + ifr;
+        Real pnum = 0.0, qden = 0.0;
         for (int iang=0; iang<=nang1; ++iang) {
-          int nn = sp_off + ifr*nang_ + iang;
-          Real n_0 = tc(m,0,0,k,j,i)*nh_c_.d_view(iang,0) +
-                     tc(m,1,0,k,j,i)*nh_c_.d_view(iang,1) +
-                     tc(m,2,0,k,j,i)*nh_c_.d_view(iang,2) +
-                     tc(m,3,0,k,j,i)*nh_c_.d_view(iang,3);
+          int nn = isp*nfrq_*nang_ + ifr*nang_ + iang;
+          Real n_0 = n_0_iang(iang);
+          Real n0_cm = n0_cm_iang(iang);
+          Real sa = sigma_a(idx), ss = sigma_s(idx), ej = eq_j(idx);
+          if (shift_ok_ && ifr > 0) {
+            // This ray's bin covers comoving n0_cm*[e_lo, e_hi]; on a log grid that
+            // is a rigid shift by dlt_iang bins (see ShiftedBinValue).
+            Real xpos, jac = 1.0;
+            if (freq_scale_ == 1) {
+              xpos = static_cast<Real>(ifr) + dlt_iang(iang);
+            } else {
+              xpos = static_cast<Real>(ifr) + (n0_cm - 1.0)*emid_f(ifr)/grid_dlin_;
+              jac = n0_cm;  // linear bins do not carry the width stretch themselves
+            }
+            // A ray at rest reads the tabulated value back exactly.
+            if (fabs(xpos - static_cast<Real>(ifr)) > 1.0e-12) {
+              sa = ShiftedBinValue(sigma_a, lsa, sp_off, 1, nfrq_-1, xpos);
+              ss = ShiftedBinValue(sigma_s, lss, sp_off, 1, nfrq_-1, xpos);
+              ej = jac*ShiftedBinValue(eq_j, lej, sp_off, 1, nfrq_-1, xpos);
+            }
+          }
+          Real dtcsiga = dt_*sa;
+          Real dtcsigs = dt_*ss;
+          Real omega_cm = solid_angles_.d_view(iang)/SQR(n0_cm);
+          Real intensity_cm = 4.0*M_PI*(i0_(m,nn,k,j,i)/(n0*n_0))*SQR(SQR(n0_cm));
+          Real vncsigma = 1.0/(n0 + (dtcsiga + dtcsigs)*n0_cm);
+          // jr is the comoving mean spectrum at the new time; sshape normalises each
+          // ray to the fixed grid, so a comoving-isotropic field is a fixed point.
+          Real sshape = ShapeFactor(sumA_a, lIb, sp_off, ifr, iang, nfrq_,
+                                    shift_ok_, freq_scale_,
+                                    dlt_iang, n0_cm, emid_f, grid_dlin_);
+          pnum += omega_cm*ss*vncsigma*(n0*intensity_cm + n0_cm*dtcsiga*ej);
+          qden += omega_cm*ss*vncsigma*sshape*(n0 + n0_cm*dtcsiga);
+        }
+        sum2_a(idx) = pnum;
+        sum3_a(idx) = qden;
+      }
+
+      // Pass 2: implicit update, back-reaction moments and the lepton-number source.
+      for (int ifr=0; ifr<nfrq_; ++ifr) {
+        int idx = sp_off + ifr;
+        // Weighting by omega_cm*ss drops out of the ratio for a grey opacity, so
+        // this reduces to the grey path exactly when sshape == 1, and keeps
+        // jr_bin at 0 where there is no scattering to multiply it.
+        Real jr_bin = (sum3_a(idx) > 0.0) ? sum2_a(idx)/sum3_a(idx) : 0.0;
+        Real e_mid = emid_f(ifr);
+        for (int iang=0; iang<=nang1; ++iang) {
+          int nn = isp*nfrq_*nang_ + ifr*nang_ + iang;
+          Real n_0 = n_0_iang(iang);
+          Real n0_cm = n0_cm_iang(iang);
           Real n_1 = tc(m,0,1,k,j,i)*nh_c_.d_view(iang,0) +
                      tc(m,1,1,k,j,i)*nh_c_.d_view(iang,1) +
                      tc(m,2,1,k,j,i)*nh_c_.d_view(iang,2) +
@@ -554,14 +654,35 @@ TaskStatus Radiation::MultiFreqRadFluidCouplingNurates(Driver *pdriver, int stag
           m_old[2] += n_2*i0_(m,nn,k,j,i)/n_0*domega;
           m_old[3] += n_3*i0_(m,nn,k,j,i)/n_0*domega;
 
-          Real n0_cm = (u_tet[0]*nh_c_.d_view(iang,0) - u_tet[1]*nh_c_.d_view(iang,1) -
-                        u_tet[2]*nh_c_.d_view(iang,2) - u_tet[3]*nh_c_.d_view(iang,3));
+          Real sa = sigma_a(idx), ss = sigma_s(idx), ej = eq_j(idx);
+          if (shift_ok_ && ifr > 0) {
+            // This ray's bin covers comoving n0_cm*[e_lo, e_hi]; on a log grid that
+            // is a rigid shift by dlt_iang bins (see ShiftedBinValue).
+            Real xpos, jac = 1.0;
+            if (freq_scale_ == 1) {
+              xpos = static_cast<Real>(ifr) + dlt_iang(iang);
+            } else {
+              xpos = static_cast<Real>(ifr) + (n0_cm - 1.0)*e_mid/grid_dlin_;
+              jac = n0_cm;  // linear bins do not carry the width stretch themselves
+            }
+            // A ray at rest reads the tabulated value back exactly.
+            if (fabs(xpos - static_cast<Real>(ifr)) > 1.0e-12) {
+              sa = ShiftedBinValue(sigma_a, lsa, sp_off, 1, nfrq_-1, xpos);
+              ss = ShiftedBinValue(sigma_s, lss, sp_off, 1, nfrq_-1, xpos);
+              ej = jac*ShiftedBinValue(eq_j, lej, sp_off, 1, nfrq_-1, xpos);
+            }
+          }
+          Real dtcsiga = dt_*sa;
+          Real dtcsigs = dt_*ss;
           Real intensity_cm_old = 4.0*M_PI*(i0_(m,nn,k,j,i)/(n0*n_0))*SQR(SQR(n0_cm));
           Real omega_cm = domega/SQR(n0_cm);
           Real e_cm = n0_cm*e_mid;
 
           Real vncsigma = 1.0/(n0 + (dtcsiga + dtcsigs)*n0_cm);
-          Real di_cm = ((dtcsigs*jr_cm + dtcsiga*eq_j(idx) -
+          Real sshape = ShapeFactor(sumA_a, lIb, sp_off, ifr, iang, nfrq_,
+                                    shift_ok_, freq_scale_,
+                                    dlt_iang, n0_cm, emid_f, grid_dlin_);
+          Real di_cm = ((dtcsigs*jr_bin*sshape + dtcsiga*ej -
                          (dtcsigs + dtcsiga)*intensity_cm_old)*n0_cm*vncsigma);
           i0_(m,nn,k,j,i) = n0*n_0*fmax(i0_(m,nn,k,j,i)/(n0*n_0) +
                              di_cm/(4.0*M_PI*SQR(SQR(n0_cm))), 0.0);
@@ -609,7 +730,9 @@ TaskStatus Radiation::MultiFreqRadFluidCouplingNurates(Driver *pdriver, int stag
       if (evolve_ye_ && nsp_ > 1 && is_mhd_enabled_) {
         Real dN_nue = dN_rad_moment[0];
         Real dN_anue = dN_rad_moment[1];
-        Real dDYe = mb_code_*(-dN_nue + dN_anue);
+        // dN_rad_moment is comoving; IYF holds D*Ye = rho*W*Ye, so the increment
+        // carries a factor W.  Matches the grey path above.
+        Real dDYe = gamma*mb_code_*(-dN_nue + dN_anue);
         Real cons_dens = u0_(m,IDN,k,j,i);
         if (cons_dens > 0.0) {
           Real ye_old = w0_(m,IYF,k,j,i);
