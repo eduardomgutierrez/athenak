@@ -109,8 +109,16 @@ Real FreqBinMidMeV(Real e_lo, Real e_hi, int freq_scale) {
 //! is exact for a power law.  Cubic, window slid to stay in range; lq holds log(q)
 //! or -1e30 where q is not positive, in which case q itself is interpolated.
 //! Linear grids need xpos per bin and the n0_cm width factor from the caller.
+//! Templated on the array type so the same code serves the kernel (team scratch)
+//! and the unit test (host mirrors); see pgen/unit_tests/rad_freq_shift.cpp.
+//!
+//! Extrapolation past either end is bounded by a log-space chord continued from the
+//! edge: a rigorous upper bound for a spectrum concave in ln q (every physical one here)
+//! and exact for a power law.  Unbounded, the cubic reaches |w| ~ 26 for the shifts the
+//! shock grid needs and overshoots a Fermi-Dirac tail by many decades.
+template <class QT>
 KOKKOS_INLINE_FUNCTION
-Real ShiftedBinValue(const ScrArray1D<Real> &q, const ScrArray1D<Real> &lq,
+Real ShiftedBinValue(const QT &q, const QT &lq,
                      const int off, const int flo, const int fhi, const Real xpos) {
   if (fhi - flo < 3) {
     int jb = static_cast<int>(floor(xpos));
@@ -135,28 +143,90 @@ Real ShiftedBinValue(const ScrArray1D<Real> &q, const ScrArray1D<Real> &lq,
   Real w3 = t*(t - 1.0)*(t - 2.0)/6.0;
   int a = off + st, b = off + st + 1, c = off + st + 2, d = off + st + 3;
   if (lq(a) > -1.0e29 && lq(b) > -1.0e29 && lq(c) > -1.0e29 && lq(d) > -1.0e29) {
-    return exp(w0*lq(a) + w1*lq(b) + w2*lq(c) + w3*lq(d));
+    Real lval = w0*lq(a) + w1*lq(b) + w2*lq(c) + w3*lq(d);
+    // Outside the stencil the cubic is unbounded, and a steep spectrum turns that into
+    // nonsense: un-shifting the top bin of a Fermi-Dirac tail 2.3 bins past the end
+    // overshoots by 1e7 (nfreq = 24, nu in [10, 2000] MeV, T = 12 MeV, v = 0.5), that
+    // value enters the angular average, and the forward lookup of the corrupted
+    // spectrum then reaches 1e92.
+    //
+    // A log-space chord continued from the edge is a rigorous upper bound whenever
+    // ln q is concave in the bin index, which every physical spectrum is here: a
+    // Fermi-Dirac tail has ln q ~ -C exp(b dlnnu), and the E^3 rise below the peak is
+    // linear in b.  It is exact for a power law, so nothing the shift legitimately asks
+    // for is clipped.  In a convex region it clamps low rather than high, which is the
+    // safe direction for a relaxation target.
+    if (t > 3.0) {
+      lval = fmin(lval, lq(d) + (t - 3.0)*(lq(d) - lq(c)));
+    } else if (t < 0.0) {
+      lval = fmin(lval, lq(a) - t*(lq(a) - lq(b)));
+    }
+    Real lo = fmin(fmin(lq(a), lq(b)), fmin(lq(c), lq(d)));
+    Real hi = fmax(fmax(lq(a), lq(b)), fmax(lq(c), lq(d)));
+    Real pad = (hi - lo) + 1.0;
+    return exp(fmin(fmax(lval, lo - pad), hi + pad));
   }
-  return fmax(w0*q(a) + w1*q(b) + w2*q(c) + w3*q(d), 0.0);
+  // Sentinel path: a non-positive node means the log-space form is unavailable, so the
+  // cubic runs in linear space where its |w| ~ 26 has nothing to temper it.  Nothing
+  // here is a power law any more, so clamp to the tabulated range outright.
+  Real qlo = fmin(fmin(q(a), q(b)), fmin(q(c), q(d)));
+  Real qhi = fmax(fmax(q(a), q(b)), fmax(q(c), q(d)));
+  return fmin(fmax(w0*q(a) + w1*q(b) + w2*q(c) + w3*q(d), fmax(qlo, 0.0)), qhi);
 }
 
 //----------------------------------------------------------------------------------------
-//! \fn Real ShapeFactor
-//! \brief qbar(ifr + delta)/qbar(ifr): how a bin-integrated, comoving-isotropic
-//!        quantity varies across rays in lab bins.
+//! \fn Real ShiftedSpectrum
+//! \brief qbar(ifr + delta): the isotropic, bin-integrated comoving spectrum at *this
+//!        ray's* comoving energies rather than at the grid's own bin.
 //!
-//! Multiplying the bin-mean intensity by this before comparing with each ray makes
-//! elastic scattering a no-op on an isotropic field.  qbar must come from the
-//! radiation field, not from any equilibrium spectrum.  Returns 1 at rest, for
-//! bin 0 (spans [0, nu_min], outside the log family), and for an empty spectrum.
+//! This is the target the isoenergetic scattering operator relaxes each ray toward.
+//! Elastic scattering acts at fixed comoving energy, so for ray iang the target is
+//!
+//!     integral over gamma*[e_lo, e_hi] of J_cm(eps)/(4 pi) d eps  =  qbar(ifr + delta),
+//!
+//! and nothing else.  qbar must come from the radiation field -- it is the un-shifted
+//! angular mean built by the first pass of MultiFreqRadFluidCouplingNurates -- never
+//! from an equilibrium spectrum.  Returns qbar(ifr) itself at rest, for bin 0 (which
+//! spans [0, nu_min] and sits outside the log family), and when the shift is disabled.
+//!
+//! This replaced a shape factor S = qbar(ifr + delta)/qbar(ifr), whose product with an
+//! implicitly solved bin-mean jr_bin ~ qbar(ifr) reinstated the qbar(ifr) that S had
+//! just divided out.  Two things came of that cancellation being exact in algebra and
+//! not in floating point: 0*inf NaNs wherever qbar(ifr) underflowed while the shifted
+//! value did not, and -- because jr_bin was an angular average weighted by sigma_s and
+//! vncsigma, which vary over the rays in a bin once sigma_s depends on energy -- an
+//! O(v) violation of isoenergeticity that took the whole run non-finite for
+//! sigma_s ~ E^2 at v = 0.3.  Neither is reachable here: there is no division and no
+//! angular average.  See notes/multifreq-frame-consistent-review.md sections 2 and 12
+//! in the ChiralDynamo superproject.
+//!
+//! [flo, fhi] must be the range over which qbar was reconstructed by the un-shift pass.
+//! The caller enables the shift only for bins whose whole ray set lands inside it, and
+//! falls back to the lab-bin treatment elsewhere -- which is what bin 0 always does and
+//! what the baseline did everywhere.  Three other treatments of the ends were measured
+//! and are all worse: extrapolating the cubic is wrong by 1e7 on a Fermi-Dirac tail and
+//! the corrupted spectrum then reaches 1e92; clamping the position corrupts qbar at the
+//! edge and the corruption propagates max|delta| bins inward; dropping the ray makes the
+//! bin a half-sky average, which carries the flux into what is meant to be the isotropic
+//! part and drives those bins to 1e6 within a few hundred cycles.
+//!
+//! The shift therefore costs about 2*max|delta| + 4 bins of margin, i.e.
+//! 2*ln(gamma_max)/dlnnu + 4.  Widen [nu_min, nu_max] if the bins it gives up carry
+//! anything (see the note on FreqBinEdgesMeV).
+//!
+//! No nfreq floor beyond what shift_ok_ already enforces (nfreq >= 3): ShiftedBinValue
+//! falls back to two points when the window is short, and returning the unshifted value
+//! instead would leave the opacities shifted while the target was not -- the half-scheme
+//! that measured 21x worse than the unshifted baseline.
+template <class QT, class WT>
 KOKKOS_INLINE_FUNCTION
-Real ShapeFactor(const ScrArray1D<Real> &qbar, const ScrArray1D<Real> &lqbar,
-                 const int off, const int ifr, const int iang, const int nfreq,
-                 const bool enabled, const int freq_scale,
-                 const ScrArray1D<Real> &dlt_iang, const Real n0_cm,
-                 const ScrArray1D<Real> &emid_f, const Real grid_dlin) {
-  if (!enabled || ifr <= 0 || nfreq < 5) { return 1.0; }
-  if (!(qbar(off+ifr) > 0.0)) { return 1.0; }
+Real ShiftedSpectrum(const QT &qbar, const QT &lqbar,
+                     const int off, const int ifr, const int iang, const int nfreq,
+                     const bool enabled, const int freq_scale,
+                     const WT &dlt_iang, const Real n0_cm,
+                     const WT &emid_f, const Real grid_dlin,
+                     const int flo, const int fhi) {
+  if (!enabled || ifr <= 0 || nfreq < 3) { return qbar(off+ifr); }
   Real xpos, jac = 1.0;
   if (freq_scale == 1) {
     xpos = static_cast<Real>(ifr) + dlt_iang(iang);
@@ -164,9 +234,59 @@ Real ShapeFactor(const ScrArray1D<Real> &qbar, const ScrArray1D<Real> &lqbar,
     xpos = static_cast<Real>(ifr) + (n0_cm - 1.0)*emid_f(ifr)/grid_dlin;
     jac = n0_cm;
   }
-  if (fabs(xpos - static_cast<Real>(ifr)) <= 1.0e-12) { return 1.0; }
-  Real qs = jac*ShiftedBinValue(qbar, lqbar, off, 1, nfreq-1, xpos);
-  return (qs > 0.0) ? qs/qbar(off+ifr) : 1.0;
+  // A ray at rest reads the tabulated value back bit for bit.
+  if (fabs(xpos - static_cast<Real>(ifr)) <= 1.0e-12) { return qbar(off+ifr); }
+  // [flo, fhi] is the range over which qbar was actually reconstructed by the un-shift;
+  // outside it qbar is the plain lab-bin mean, a different quantity, and reading it here
+  // is what leaks an O(1) error inward from the ends.  The caller only enables the shift
+  // where xpos stays inside, so the clamp is a guard, not a mechanism.
+  Real lo = static_cast<Real>(flo), hi = static_cast<Real>(fhi);
+  if (xpos < lo) { xpos = lo; }
+  if (xpos > hi) { xpos = hi; }
+  // Deliberately no qbar(ifr) > 0 guard: a bin that is empty on the fixed grid can
+  // still be populated at a ray's own comoving energy, and that ray now gets the right
+  // target instead of the bin's own value.  The old guard existed only to keep a
+  // division safe.
+  return jac*ShiftedBinValue(qbar, lqbar, off, flo, fhi, xpos);
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void AmplitudeAccumulate
+//! \brief One ray's contribution to the bin's amplitude factor g = gnum/gden.
+//!
+//! The scattering target for ray iang is g(ifr)*qbar(ifr + delta_iang): the field's own
+//! isotropic spectrum at that ray's comoving energy, times one O(1) number per bin.  g is
+//! the implicit unknown -- the new-time amplitude of the spectrum -- and it is what the
+//! isoenergeticity requirement is a statement about: elastic scattering cannot move
+//! energy between comoving groups, so a comoving-isotropic field must give g == 1.
+//!
+//! Every term of gnum is (n0*I + ...)/q_sh, and I ~ q_sh for a field consistent with its
+//! own spectrum, so the terms are all the same order and neither sum can collapse.  In
+//! particular there is no qbar(ifr) in either sum, which is what the previous form had:
+//! it multiplied an implicit bin mean jr_bin ~ qbar(ifr) by a shape factor
+//! S = qbar(ifr + delta)/qbar(ifr), reinstating the qbar(ifr) that S divided out.  That
+//! cancellation is exact in algebra and not in floating point -- hence 0*inf NaNs
+//! wherever qbar(ifr) underflowed -- and it put S inside the angular average, which
+//! biased it by 47x to 137x the grey L1 error on
+//! inputs/tests/rad_diffusion_spectral_nurates.athinput.  See sections 2 and 12 of
+//! notes/multifreq-frame-consistent-review.md in the ChiralDynamo superproject.
+//!
+//! Dropping g altogether -- freezing the target at the previous step, which looks
+//! attractive because isoenergetic scattering leaves J_nu alone and so needs no implicit
+//! solve -- costs three orders of magnitude on that same test (4.5e+00 against 4.3e-03 at
+//! v = 0.1).  g is not the implicitness, it is the ray-dependence of gamma_a*vncsigma:
+//! without it the discrete operator stops conserving the comoving angular mean as soon as
+//! the field is anisotropic and the medium moves, and the error accumulates.  Solving for
+//! it is free, since it is linear.
+KOKKOS_INLINE_FUNCTION
+void AmplitudeAccumulate(const Real omega_cm, const Real ss, const Real vncsigma,
+                         const Real n0, const Real n0_cm, const Real dtcsiga,
+                         const Real eq_j, const Real intensity_cm, const Real q_sh,
+                         Real &gnum, Real &gden) {
+  if (!(q_sh > 0.0)) { return; }
+  Real w = omega_cm*ss*vncsigma;
+  gnum += w*(n0*intensity_cm + n0_cm*dtcsiga*eq_j)/q_sh;
+  gden += w*(n0 + n0_cm*dtcsiga);
 }
 
 KOKKOS_INLINE_FUNCTION

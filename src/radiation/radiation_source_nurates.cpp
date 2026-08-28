@@ -422,12 +422,15 @@ TaskStatus Radiation::MultiFreqRadFluidCouplingNurates(Driver *pdriver, int stag
   Real grid_dln_ = 0.0, grid_dlin_ = 0.0;
   bool shift_ok_ = (nfrq_ >= 3);
   if (shift_ok_) {
+    // grid_nu_min/max, not nu_min/max: emid_f below comes from freq_grid, which
+    // SetFrequencyGrid may have rescaled, and a linear spacing has to match it.
+    Real gmin = grid_nu_min, gmax = grid_nu_max;
     if (freq_scale_ == 1) {
-      shift_ok_ = (nu_min > 0.0 && nu_max > nu_min);
-      if (shift_ok_) { grid_dln_ = log(nu_max/nu_min)/static_cast<Real>(nfrq_-2); }
+      shift_ok_ = (gmin > 0.0 && gmax > gmin);
+      if (shift_ok_) { grid_dln_ = log(gmax/gmin)/static_cast<Real>(nfrq_-2); }
     } else {
-      shift_ok_ = (nu_max > nu_min);
-      if (shift_ok_) { grid_dlin_ = (nu_max-nu_min)/static_cast<Real>(nfrq_-2); }
+      shift_ok_ = (gmax > gmin);
+      if (shift_ok_) { grid_dlin_ = (gmax-gmin)/static_cast<Real>(nfrq_-2); }
     }
   }
 
@@ -443,9 +446,9 @@ TaskStatus Radiation::MultiFreqRadFluidCouplingNurates(Driver *pdriver, int stag
     }
   }
 
-  size_t scr_size = ScrArray1D<Real>::shmem_size(nsp_*nfrq_) * 10
+  size_t scr_size = ScrArray1D<Real>::shmem_size(nsp_*nfrq_) * 9
                   + ScrArray1D<Real>::shmem_size(nang_) * 3
-                  + ScrArray1D<Real>::shmem_size(nfrq_) * 3;
+                  + ScrArray1D<Real>::shmem_size(nfrq_) * 4;
   int scr_level = 0;
   par_for_outer("multi_freq_source_nurates", DevExeSpace(), scr_size, scr_level,
   0, nmb1, ks, ke, js, je, is, ie,
@@ -459,13 +462,13 @@ TaskStatus Radiation::MultiFreqRadFluidCouplingNurates(Driver *pdriver, int stag
     ScrArray1D<Real> lIb(member.team_scratch(scr_level), nsp_*nfrq_);
     ScrArray1D<Real> rtmp(member.team_scratch(scr_level), nfrq_);
     ScrArray1D<Real> lrtmp(member.team_scratch(scr_level), nfrq_);
-    ScrArray1D<Real> sum2_a(member.team_scratch(scr_level), nsp_*nfrq_);
     ScrArray1D<Real> sumA_a(member.team_scratch(scr_level), nsp_*nfrq_);
-    ScrArray1D<Real> sum3_a(member.team_scratch(scr_level), nsp_*nfrq_);
     ScrArray1D<Real> n_0_iang(member.team_scratch(scr_level), nang_);
     ScrArray1D<Real> n0_cm_iang(member.team_scratch(scr_level), nang_);
     ScrArray1D<Real> dlt_iang(member.team_scratch(scr_level), nang_);
     ScrArray1D<Real> emid_f(member.team_scratch(scr_level), nfrq_);
+    ScrArray1D<Real> shift_bin(member.team_scratch(scr_level), nfrq_);
+    ScrArray1D<Real> gfac(member.team_scratch(scr_level), nsp_*nfrq_);
 
     Real &x1min = size.d_view(m).x1min;
     Real &x1max = size.d_view(m).x1max;
@@ -526,6 +529,56 @@ TaskStatus Radiation::MultiFreqRadFluidCouplingNurates(Driver *pdriver, int stag
       emid_f(ifr) = FreqBinMidMeV(e_lo, e_hi, freq_scale_);
     }
 
+    // The shift is applied only in bins where the *whole ray set* stays on the grid.
+    // Nearer an end than max|delta|, the shift asks for comoving energies the grid does
+    // not tabulate, and every way of papering over that is worse than not shifting:
+    // extrapolating the cubic is wrong by 1e7 on a Fermi-Dirac tail and the corrupted
+    // spectrum then reaches 1e92; clamping the lookup position corrupts qbar at the edge
+    // and the corruption propagates max|delta| bins inward; dropping the ray makes the
+    // bin a half-sky average, which carries the flux into what is meant to be the
+    // isotropic part and drives those bins to 1e6 within a few hundred cycles.  All
+    // three measured.  So those bins fall back to the lab-bin treatment -- exactly what
+    // bin 0 already does, and what the baseline did everywhere.  Widen [nu_min, nu_max]
+    // if they carry anything: the shift needs ceil(max|delta|) bins of margin, which on
+    // a log grid is ln(gamma_max)/dlnnu.
+    Real dlo = 0.0, dhi = 0.0, nlo = 1.0, nhi = 1.0;
+    for (int iang=0; iang<=nang1; ++iang) {
+      dlo = fmin(dlo, dlt_iang(iang));
+      dhi = fmax(dhi, dlt_iang(iang));
+      nlo = fmin(nlo, n0_cm_iang(iang));
+      nhi = fmax(nhi, n0_cm_iang(iang));
+    }
+    // Worst-case displacement over the ray set, in bins.  On a log grid it is one number
+    // per cell; on a linear grid the shift (n0_cm-1)*mid/dlin and its inverse are both
+    // monotone in n0_cm, so the extremes of n0_cm bound it bin by bin -- take the widest.
+    Real slo = dlo, shi = dhi;
+    if (freq_scale_ != 1) {
+      for (int ifr=1; ifr<nfrq_; ++ifr) {
+        Real r = emid_f(ifr)/grid_dlin_;
+        Real a = (nlo - 1.0)*r, b = (nhi - 1.0)*r;
+        Real c = (1.0/nhi - 1.0)*r, d = (1.0/nlo - 1.0)*r;
+        slo = fmin(slo, fmin(fmin(a, b), fmin(c, d)));
+        shi = fmax(shi, fmax(fmax(a, b), fmax(c, d)));
+      }
+    }
+    // [u_lo, u_hi] is where every ray's un-shifted position stays on the grid, hence
+    // where qbar means the comoving spectrum rather than the plain lab-bin mean.  The
+    // shift is applied exactly there, and every lookup of qbar is restricted to that
+    // range, so the two quantities never mix.  Inside the band the target lookup may
+    // still land outside [u_lo, u_hi] for the outermost bins, where ShiftedSpectrum
+    // clamps it; that is worth 1.2x the grey L1 error against 1.5x for giving those bins
+    // up entirely, and the flat-spectrum case stays bit-identical to grey either way.
+    int u_lo = static_cast<int>(ceil(1.0 + shi));
+    int u_hi = static_cast<int>(floor(static_cast<Real>(nfrq_-1) + slo));
+    if (u_lo < 1) { u_lo = 1; }
+    if (u_hi > nfrq_-1) { u_hi = nfrq_-1; }
+    bool have_range = shift_ok_ && (u_hi - u_lo >= 1);
+    for (int ifr=0; ifr<nfrq_; ++ifr) {
+      shift_bin(ifr) = (have_range && ifr >= u_lo && ifr <= u_hi) ? 1.0 : 0.0;
+    }
+    int qlo_ = have_range ? u_lo : 1;
+    int qhi_ = have_range ? u_hi : nfrq_-1;
+
     Real m_old[4] = {0.0}; Real m_new[4] = {0.0};
     Real dN_rad_moment[4] = {0.0};
     for (int isp=0; isp<nsp_; ++isp) {
@@ -545,6 +598,17 @@ TaskStatus Radiation::MultiFreqRadFluidCouplingNurates(Driver *pdriver, int stag
 
       // Lagged comoving mean spectrum on the fixed grid: un-shift each ray before
       // integrating, so a comoving-isotropic field comes back exactly.
+      //
+      // Positions that run off either end are clamped to the nearest tabulated bin, not
+      // extrapolated and not dropped.  Extrapolating is wrong by 1e7 here (a Fermi-Dirac
+      // tail at T = 12 MeV on nu in [10, 2000] MeV, v = 0.5, |delta| up to 2.28 bins),
+      // and the forward lookup of the corrupted spectrum then reaches 1e92.  Dropping
+      // the ray is worse: at an edge bin the rays that run off the far end are exactly
+      // one hemisphere, so qbar there becomes a half-sky average, which for an
+      // anisotropic field carries the flux into what is supposed to be the isotropic
+      // part -- measured to drive the outermost bins to 1e6 within a few hundred cycles.
+      // Clamping keeps the average over the whole sky; the price is an energy bias in
+      // the outermost ceil(|delta|) bins, bounded by the field there.
       for (int ifr=0; ifr<nfrq_; ++ifr) { sumA_a(sp_off+ifr) = 0.0; }
       for (int iang=0; iang<=nang1; ++iang) {
         Real n0_cm = n0_cm_iang(iang);
@@ -558,12 +622,18 @@ TaskStatus Radiation::MultiFreqRadFluidCouplingNurates(Driver *pdriver, int stag
         }
         for (int ifr=0; ifr<nfrq_; ++ifr) {
           Real g = rtmp(ifr);
-          if (shift_ok_ && ifr > 0) {
+          if (shift_bin(ifr) >= 1.0) {
             Real xpos, jac = 1.0;
             if (freq_scale_ == 1) {
               xpos = static_cast<Real>(ifr) - dlt_iang(iang);
             } else {
-              xpos = static_cast<Real>(ifr) - (n0_cm - 1.0)*emid_f(ifr)/grid_dlin_;
+              // Inverse of the forward shift below, not its negation: on a linear
+              // grid mid(f) = nu_min + (f-0.5)*dlin, so the index whose midpoint is
+              // mid(ifr)/n0_cm is ifr + (1/n0_cm - 1)*mid(ifr)/dlin.  The two agree
+              // only to O(n0_cm-1), and with the negation the round trip does not
+              // close, so comoving isotropy stops being a fixed point at O(v^2).
+              xpos = static_cast<Real>(ifr) +
+                     (1.0/n0_cm - 1.0)*emid_f(ifr)/grid_dlin_;
               jac = 1.0/n0_cm;
             }
             if (fabs(xpos - static_cast<Real>(ifr)) > 1.0e-12) {
@@ -579,19 +649,20 @@ TaskStatus Radiation::MultiFreqRadFluidCouplingNurates(Driver *pdriver, int stag
         lIb(sp_off+ifr) = (acc > 0.0) ? log(acc) : -1.0e30;
       }
 
-      // Pass 1: angle sums for the implicit bin-mean intensity.  With per-ray
-      // opacities, sigma_a*eq_j and sigma_s sit inside the angle sum.
+      // Amplitude pass: one number per bin, g = gnum/gden, the new-time amplitude of
+      // the isotropic spectrum.  The target for ray iang is then g*qbar(ifr + delta),
+      // the field's own spectrum at that ray's comoving energy.  See
+      // AmplitudeAccumulate for why g cannot be dropped and why it is not written as a
+      // shape factor times a bin mean.
       for (int ifr=0; ifr<nfrq_; ++ifr) {
         int idx = sp_off + ifr;
-        Real pnum = 0.0, qden = 0.0;
+        Real gnum = 0.0, gden = 0.0;
         for (int iang=0; iang<=nang1; ++iang) {
           int nn = isp*nfrq_*nang_ + ifr*nang_ + iang;
           Real n_0 = n_0_iang(iang);
           Real n0_cm = n0_cm_iang(iang);
           Real sa = sigma_a(idx), ss = sigma_s(idx), ej = eq_j(idx);
-          if (shift_ok_ && ifr > 0) {
-            // This ray's bin covers comoving n0_cm*[e_lo, e_hi]; on a log grid that
-            // is a rigid shift by dlt_iang bins (see ShiftedBinValue).
+          if (shift_bin(ifr) >= 1.0) {
             Real xpos, jac = 1.0;
             if (freq_scale_ == 1) {
               xpos = static_cast<Real>(ifr) + dlt_iang(iang);
@@ -611,25 +682,23 @@ TaskStatus Radiation::MultiFreqRadFluidCouplingNurates(Driver *pdriver, int stag
           Real omega_cm = solid_angles_.d_view(iang)/SQR(n0_cm);
           Real intensity_cm = 4.0*M_PI*(i0_(m,nn,k,j,i)/(n0*n_0))*SQR(SQR(n0_cm));
           Real vncsigma = 1.0/(n0 + (dtcsiga + dtcsigs)*n0_cm);
-          // jr is the comoving mean spectrum at the new time; sshape normalises each
-          // ray to the fixed grid, so a comoving-isotropic field is a fixed point.
-          Real sshape = ShapeFactor(sumA_a, lIb, sp_off, ifr, iang, nfrq_,
-                                    shift_ok_, freq_scale_,
-                                    dlt_iang, n0_cm, emid_f, grid_dlin_);
-          pnum += omega_cm*ss*vncsigma*(n0*intensity_cm + n0_cm*dtcsiga*ej);
-          qden += omega_cm*ss*vncsigma*sshape*(n0 + n0_cm*dtcsiga);
+          Real q_sh = ShiftedSpectrum(sumA_a, lIb, sp_off, ifr, iang, nfrq_,
+                                      shift_bin(ifr) >= 1.0, freq_scale_,
+                                      dlt_iang, n0_cm, emid_f, grid_dlin_,
+                                      qlo_, qhi_);
+          AmplitudeAccumulate(omega_cm, ss, vncsigma, n0, n0_cm, dtcsiga, ej,
+                              intensity_cm, q_sh, gnum, gden);
         }
-        sum2_a(idx) = pnum;
-        sum3_a(idx) = qden;
+        // No scattering in this bin leaves g undetermined and unused: the target is
+        // multiplied by dt*sigma_s.
+        gfac(idx) = (gden > 0.0) ? gnum/gden : 0.0;
       }
 
-      // Pass 2: implicit update, back-reaction moments and the lepton-number source.
+      // Implicit-per-ray update, back-reaction moments and the lepton-number source.
+      // The scattering target is gfac(ifr)*qbar(ifr + delta_iang) -- the field's own
+      // isotropic spectrum at this ray's comoving energy, times the bin's amplitude.
       for (int ifr=0; ifr<nfrq_; ++ifr) {
         int idx = sp_off + ifr;
-        // Weighting by omega_cm*ss drops out of the ratio for a grey opacity, so
-        // this reduces to the grey path exactly when sshape == 1, and keeps
-        // jr_bin at 0 where there is no scattering to multiply it.
-        Real jr_bin = (sum3_a(idx) > 0.0) ? sum2_a(idx)/sum3_a(idx) : 0.0;
         Real e_mid = emid_f(ifr);
         for (int iang=0; iang<=nang1; ++iang) {
           int nn = isp*nfrq_*nang_ + ifr*nang_ + iang;
@@ -655,7 +724,7 @@ TaskStatus Radiation::MultiFreqRadFluidCouplingNurates(Driver *pdriver, int stag
           m_old[3] += n_3*i0_(m,nn,k,j,i)/n_0*domega;
 
           Real sa = sigma_a(idx), ss = sigma_s(idx), ej = eq_j(idx);
-          if (shift_ok_ && ifr > 0) {
+          if (shift_bin(ifr) >= 1.0) {
             // This ray's bin covers comoving n0_cm*[e_lo, e_hi]; on a log grid that
             // is a rigid shift by dlt_iang bins (see ShiftedBinValue).
             Real xpos, jac = 1.0;
@@ -672,6 +741,12 @@ TaskStatus Radiation::MultiFreqRadFluidCouplingNurates(Driver *pdriver, int stag
               ej = jac*ShiftedBinValue(eq_j, lej, sp_off, 1, nfrq_-1, xpos);
             }
           }
+          // A comoving-isotropic field gives gfac == 1 and q_sh == this ray's own bin
+          // content, so it is an exact fixed point ray by ray, not just in the sum.
+          Real qsh = gfac(idx)*ShiftedSpectrum(sumA_a, lIb, sp_off, ifr, iang, nfrq_,
+                                               shift_bin(ifr) >= 1.0, freq_scale_,
+                                               dlt_iang, n0_cm, emid_f, grid_dlin_,
+                                               qlo_, qhi_);
           Real dtcsiga = dt_*sa;
           Real dtcsigs = dt_*ss;
           Real intensity_cm_old = 4.0*M_PI*(i0_(m,nn,k,j,i)/(n0*n_0))*SQR(SQR(n0_cm));
@@ -679,10 +754,7 @@ TaskStatus Radiation::MultiFreqRadFluidCouplingNurates(Driver *pdriver, int stag
           Real e_cm = n0_cm*e_mid;
 
           Real vncsigma = 1.0/(n0 + (dtcsiga + dtcsigs)*n0_cm);
-          Real sshape = ShapeFactor(sumA_a, lIb, sp_off, ifr, iang, nfrq_,
-                                    shift_ok_, freq_scale_,
-                                    dlt_iang, n0_cm, emid_f, grid_dlin_);
-          Real di_cm = ((dtcsigs*jr_bin*sshape + dtcsiga*ej -
+          Real di_cm = ((dtcsigs*qsh + dtcsiga*ej -
                          (dtcsigs + dtcsiga)*intensity_cm_old)*n0_cm*vncsigma);
           i0_(m,nn,k,j,i) = n0*n_0*fmax(i0_(m,nn,k,j,i)/(n0*n_0) +
                              di_cm/(4.0*M_PI*SQR(SQR(n0_cm))), 0.0);

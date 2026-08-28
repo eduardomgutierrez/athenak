@@ -102,9 +102,16 @@ class Radiation {
 
   // bns_nurates opacity library
   bool use_nurates = false;
-  // >= 0 replaces the library opacities with constant elastic scattering, so the
-  // nurates source terms can be run against an analytic solution.
+  // >= 0 replaces the library opacities with elastic scattering, so the nurates
+  // source terms can be run against an analytic solution.
   Real nurates_toy_scattering = -1.0;
+  // sigma_s = nurates_toy_scattering*(e_mid/nurates_toy_scat_eref)^nurates_toy_scat_p,
+  // with e_mid the comoving bin midpoint.  p = 0 is the constant opacity the grey
+  // diffusion test uses; p != 0 makes the shape factor S the only thing that can get
+  // the per-group diffusion coefficient right, which is what the closure needs to be
+  // measured against.  The grey slot keeps the p = 0 value.
+  Real nurates_toy_scat_p = 0.0;
+  Real nurates_toy_scat_eref = 1.0;
 #if ENABLE_NURATES
   NuratesParams nurates_params;
   bool nurates_debug_opacity = false;
@@ -181,6 +188,11 @@ class Radiation {
   // Multiplies a freq_grid entry to give a code energy/frequency.  1 except on the
   // nurates neutrino path; only the blackbody tail in the frequency fluxes needs it.
   Real nu_grid_to_code = 1.0;
+  // nu_min/nu_max expressed in the units freq_grid actually holds, i.e. divided by
+  // the same nu_unit SetFrequencyGrid applied.  Any bin spacing must be derived from
+  // these: a log grid is a ratio and does not care, but a linear grid built from the
+  // raw nu_min/nu_max is off by nu_unit wherever that is not 1.
+  Real grid_nu_min = 0.0, grid_nu_max = 0.0;
   DvceArray5D<Real> nnu_coeff; // n^a n^b omega^0_{ab} for computing frequency fluxes
   Real tol_rel_tgas_compton;
   int num_iter_compton;

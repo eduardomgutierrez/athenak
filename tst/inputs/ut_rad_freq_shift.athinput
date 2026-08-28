@@ -1,0 +1,78 @@
+# Unit test for the frame-shift helpers of the nurates multi-frequency source term.
+#
+# ShiftedBinValue / ShapeFactor / ClosureAccumulate are exercised directly on host
+# mirrors, so no radiation module or EOS table is needed -- the mesh below exists
+# only because AthenaK requires one.  The pgen exits before any evolution.
+#
+# The check that matters is the round trip in section 4 of the pgen: seed a genuinely
+# comoving-isotropic field, rebuild qbar with the kernel's un-shift and angular average,
+# then ask whether each ray's target equals what that ray is carrying.  Isoenergetic
+# scattering must be a no-op there, ray by ray.  No invariance test in the suite can see
+# this, because they either run at rest or run a grey opacity, where the shift is the
+# identity.
+
+<comment>
+problem = frame-shift helpers for the nurates multi-frequency source term
+
+<job>
+basename = ut_rad_freq_shift
+
+<mesh>
+nghost = 2
+
+nx1    = 4
+x1min  = -0.5
+x1max  = 0.5
+ix1_bc = periodic
+ox1_bc = periodic
+
+nx2    = 1
+x2min  = -0.5
+x2max  = 0.5
+ix2_bc = periodic
+ox2_bc = periodic
+
+nx3    = 1
+x3min  = -0.5
+x3max  = 0.5
+ix3_bc = periodic
+ox3_bc = periodic
+
+<time>
+evolution  = dynamic
+integrator = rk2
+cfl_number = 0.3
+tlim       = 0.0
+nlim       = 0
+
+# AthenaK insists on at least one physics module; an ideal-gas hydro block is the
+# cheapest one that needs no EOS table.  Nothing is evolved -- the pgen exits first.
+<hydro>
+eos         = ideal
+reconstruct = plm
+rsolver     = hlle
+gamma       = 1.666666666666667
+
+<problem>
+pgen_name  = rad_freq_shift
+
+# The production shock grid: this is where the shape factor spans the most decades.
+nfreq      = 24
+nu_min     = 10.0     # MeV
+nu_max     = 2000.0   # MeV
+nang       = 92       # 10*nlevel^2+2 at nlevel = 3
+vx         = 0.5
+
+# A Fermi-Dirac at 12 MeV on a grid reaching 2 GeV puts the top groups ~250 e-folds
+# down, so max(S)/min(S) reaches ~1e80 across the ray set.
+spec_temp  = 12.0
+spec_eta   = 3.0
+anisotropy = 0.1      # dipole amplitude; the isotropic case is degenerate
+
+# The power-law round trip closes as exact algebra; only roundoff separates it from 1.
+tol_fixed     = 1.0e-11
+# The Fermi-Dirac round trip does not close: the un-shift/re-shift pair is exact only
+# for a power law, and this bounds the residual (section 2.4 of the algorithm note).
+# Measured 1.01e-2 at the steepest interior bin, 1.8e-2 at the edge.  A characterisation,
+# not a convergence claim -- nothing is written back into i0_, so it does not accumulate.
+tol_fixed_fd  = 3.0e-2

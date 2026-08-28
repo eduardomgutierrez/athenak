@@ -76,9 +76,15 @@ TaskStatus Radiation::CalcOpacityNurates(Driver *pdrive, int stage) {
 
 //----------------------------------------------------------------------------------------
 //! \fn TaskStatus Radiation::CalcOpacityNuratesToy
-//! \brief Constant elastic scattering, no absorption or emission.  Lets the nurates
-//! source terms be driven by a prescribed opacity instead of the library, which is what
-//! the diffusion test needs; mirrors <radiation_m1>/opacity_type = toy.
+//! \brief Elastic scattering with a power-law energy dependence, no absorption or
+//! emission.  Lets the nurates source terms be driven by a prescribed opacity instead of
+//! the library, which is what the diffusion test needs; mirrors
+//! <radiation_m1>/opacity_type = toy.
+//!
+//! sigma_s(e) = scat*(e_mid/e_ref)^p on the comoving grid.  p = 0 reproduces the
+//! constant opacity exactly and leaves the grey diffusion test untouched.  The grey
+//! slot always carries the p = 0 value: with p != 0 there is no single grey opacity
+//! that reproduces the per-group answer, which is the point of the test.
 
 TaskStatus Radiation::CalcOpacityNuratesToy(Driver *pdrive, int stage) {
   auto &indcs = pmy_pack->pmesh->mb_indcs;
@@ -89,7 +95,11 @@ TaskStatus Radiation::CalcOpacityNuratesToy(Driver *pdrive, int stage) {
   int nsp_ = nspecies;
   int nfreq_ = nfreq;
   bool multi_freq_ = multi_freq;
+  int fscale_ = flag_fscale;
   Real scat_ = nurates_toy_scattering;
+  Real scat_p_ = nurates_toy_scat_p;
+  Real scat_eref_ = nurates_toy_scat_eref;
+  auto &nu_tet_ = freq_grid;
 
   auto &eta_0_ = nurates_eta_0;
   auto &eta_1_ = nurates_eta_1;
@@ -118,11 +128,22 @@ TaskStatus Radiation::CalcOpacityNuratesToy(Driver *pdrive, int stage) {
             is, ie, KOKKOS_LAMBDA(int m, int k, int j, int i) {
       for (int isp = 0; isp < nsp_; ++isp) {
         for (int ifr = 0; ifr < nfreq_; ++ifr) {
+          Real ss = scat_;
+          if (scat_p_ != 0.0) {
+            Real e_lo = 0.0, e_hi = 0.0;
+            FreqBinEdgesMeV(nu_tet_, ifr, nfreq_, fscale_, e_lo, e_hi);
+            Real e_mid = FreqBinMidMeV(e_lo, e_hi, fscale_);
+            // Bin 0 spans [0, nu_min] and sits outside the log family, so its midpoint
+            // is not a member of the geometric progression the shift assumes.  Give it
+            // the p = 0 value rather than a value the shifted lookups cannot reproduce.
+            ss = (ifr > 0 && e_mid > 0.0)
+                 ? scat_*Kokkos::pow(e_mid/scat_eref_, scat_p_) : scat_;
+          }
           eta_0_f_(m,isp,ifr,k,j,i) = 0.0;
           eta_1_f_(m,isp,ifr,k,j,i) = 0.0;
           abs_0_f_(m,isp,ifr,k,j,i) = 0.0;
           abs_1_f_(m,isp,ifr,k,j,i) = 0.0;
-          scat_1_f_(m,isp,ifr,k,j,i) = scat_;
+          scat_1_f_(m,isp,ifr,k,j,i) = ss;
         }
       }
     });

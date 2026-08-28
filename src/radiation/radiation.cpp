@@ -75,6 +75,9 @@ Radiation::Radiation(MeshBlockPack *ppack, ParameterInput *pin) :
   // before those and needs to know whether to look for EOS units.
   nurates_toy_scattering =
       pin->GetOrAddReal("radiation", "nurates_toy_scattering", -1.0);
+  nurates_toy_scat_p = pin->GetOrAddReal("radiation", "nurates_toy_scat_p", 0.0);
+  nurates_toy_scat_eref =
+      pin->GetOrAddReal("radiation", "nurates_toy_scat_eref", 1.0);
 #endif
 
   // Check flags and parameters for ad hoc fixes
@@ -153,6 +156,24 @@ Radiation::Radiation(MeshBlockPack *ppack, ParameterInput *pin) :
         << std::endl << "Frequency maximum must be larger than frequency minumum for multi-frequency radiation" << std::endl;
       std::exit(EXIT_FAILURE);
     }
+
+#if ENABLE_NURATES
+    // The frame-consistent nurates source term needs the ray's Doppler shift to be
+    // a rigid translation in bin index, which only a log grid gives.  On a linear
+    // grid the displacement (n0_cm-1)*e_mid/dlin grows with the bin energy -- 9.5
+    // bins for the top group of a [10, 2000] MeV, nfreq = 24 grid at v = 0.5 -- so
+    // the lookup extrapolates far outside the grid and the un-shift/re-shift pair
+    // that makes comoving isotropy a fixed point stops closing: measured round-trip
+    // error 6e-2 at v = 0.01 and 1e94 at v = 0.1 on the top groups.  Refuse it
+    // rather than return silent garbage.
+    if (use_nurates && flag_fscale != 1) {
+      std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+                << std::endl
+                << "use_nurates with multi_freq requires <radiation>/freq_scale = log"
+                << std::endl;
+      std::exit(EXIT_FAILURE);
+    }
+#endif
 
     // auxiliary quantities
     Kokkos::realloc(freq_grid,nfreq);

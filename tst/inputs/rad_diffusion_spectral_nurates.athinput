@@ -1,0 +1,91 @@
+# Regression test for the closure of the nurates multi-frequency source term.
+#
+# A comoving spectrum diffuses through a purely scattering medium at v = 0.3.  Elastic
+# scattering cannot move energy between comoving groups, so with a frequency-independent
+# sigma_s the exact answer is w_bin(ifr, n0_cm) times the grey answer, and the L1 error
+# has to match the grey run's.  The seed is a Gaussian in ln(E) sampled at bin midpoints,
+# so ln(qbar) is exactly quadratic in the bin index and the log-space cubic in
+# ShiftedBinValue reproduces it -- and its shift by ln(n0_cm)/dlnnu -- to roundoff.  The
+# frequency machinery is exact by construction and the test measures the closure alone.
+#
+# Cheap on purpose (nx1 = 64, nlevel = 2, tlim = 1.0, ~15 s): the closure error is an
+# order of magnitude above the discretisation error here, so resolution buys nothing.  See
+# inputs/tests/rad_diffusion_spectral_nurates.athinput for the production version and
+# the energy-dependent (nurates_toy_scat_p != 0) variant.
+#
+# Passes trivially without bns_nurates: the tolerance check is skipped when use_nurates
+# did not take effect.
+
+<comment>
+problem = spectral radiation diffusion through the nurates multi-frequency source term
+
+<job>
+basename = rad_diffusion_spectral
+
+<time>
+evolution  = dynamic
+integrator = rk2
+cfl_number = 0.1
+nlim       = -1
+tlim       = 1.0
+ndiag      = 100000
+
+<coord>
+general_rel = true
+minkowski   = true
+
+<mesh>
+nghost = 2
+nx1    = 64
+x1min  = -1.0
+x1max  = 2.0
+ix1_bc = periodic
+ox1_bc = periodic
+
+nx2    = 1
+x2min  = -0.5
+x2max  = 0.5
+
+nx3    = 1
+x3min  = -0.5
+x3max  = 0.5
+
+<hydro>
+eos         = ideal
+reconstruct = plm
+rsolver     = hlle
+gamma       = 2.0
+
+<radiation>
+nlevel                 = 2
+radiation_type         = neutrino
+nspecies               = 1
+use_nurates            = true
+nurates_toy_scattering = 100.0   # overwritten by problem/kappa_s
+fixed_fluid            = true
+affect_fluid           = false
+evolve_ye              = false
+arad                   = 1.0
+multi_freq  = true
+nfreq       = 12
+nu_min      = 1.0        # MeV
+nu_max      = 3000.0     # MeV
+freq_scale  = log
+freq_fluxes = false
+
+<problem>
+pgen_name      = rad_m1_diffusiontest
+initial_data   = diffusion
+fluid_velocity = 0.3
+kappa_s        = 100.0
+nu             = 4.0
+t0             = 0.0
+spec_width     = 1.3        # standard deviation in units of dlnnu
+spec_peak      = 81.7366    # MeV
+# The grey run gives 2.480037e-02 at these settings; the scheme gives 2.613229e-02, 5%
+# above it, the excess sitting in the outermost shifted bins where the target lookup is
+# clamped.  Putting the shape factor inside the angular average instead gives 3.30e-01.
+# tol_l1_group is loose because those clamped bins legitimately carry O(1) relative
+# error while holding almost no energy; the total is the discriminating number.
+tol_l1         = 6.0e-2
+tol_l1_group   = 6.0e-1

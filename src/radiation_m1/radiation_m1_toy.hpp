@@ -89,7 +89,7 @@ struct DiffusionOpacities {
 
 struct ToyOpacity {
   ToyOpacityModel model;
-  Real scat_1_val{0.0};  // diffusion models only; <=0 keeps the historical value
+  Real scat_1_val{0.0};  // diffusion models only; the pgen always sets it
 
   KOKKOS_INLINE_FUNCTION
   void operator()(Real x1, Real x2, Real x3, Real dx, Real dy, Real dz, Real nuidx,
@@ -101,11 +101,11 @@ struct ToyOpacity {
     } else if (model == ToyOpacityModel::Sphere) {
       SphereOpacities{}(x1, x2, x3, dx, dy, dz, nuidx, eta_0, abs_0, eta_1, abs_1,
                         scat_1);
-    } else if (model == ToyOpacityModel::DiffusionExplicit) {
-      DiffusionOpacities{scat_1_val > 0.0 ? scat_1_val : 100.0}(
-          x1, x2, x3, dx, dy, dz, nuidx, eta_0, abs_0, eta_1, abs_1, scat_1);
-    } else if (model == ToyOpacityModel::DiffusionImplicit) {
-      DiffusionOpacities{scat_1_val > 0.0 ? scat_1_val : 1000.0}(
+    } else if (model == ToyOpacityModel::DiffusionExplicit ||
+               model == ToyOpacityModel::DiffusionImplicit) {
+      // The two differ only in which src_update the pgen pairs them with; the
+      // opacity itself is whatever problem/kappa_s asked for.
+      DiffusionOpacities{scat_1_val}(
           x1, x2, x3, dx, dy, dz, nuidx, eta_0, abs_0, eta_1, abs_1, scat_1);
     } else {
       // default behavior

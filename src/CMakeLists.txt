@@ -140,8 +140,6 @@ add_executable(
         pgen/tests/rad_m1_diffusiontest.cpp
         pgen/tests/rad_m1_velocityjump.cpp
         pgen/tests/z4c_boosted_puncture.cpp
-        pgen/tests/rad_m1_diffusiontest.cpp
-        pgen/tests/rad_m1_velocityjump.cpp
         pgen/tests/z4c_linear_wave.cpp
         pgen/tests/jeans_wave.cpp
         pgen/tests/binary_gravity.cpp
@@ -150,6 +148,7 @@ add_executable(
 
         pgen/unit_tests/eos_compose.cpp
         pgen/unit_tests/gauss_legendre.cpp
+        pgen/unit_tests/rad_freq_shift.cpp
 
         radiation/radiation.cpp
         radiation/radiation_chiral.cpp
@@ -237,12 +236,7 @@ add_executable(
         radiation_m1/radiation_m1_tmunu.cpp
         bvals/physics/radiation_m1_bcs.cpp
         radiation_m1/radiation_m1_beams.cpp
-        pgen/tests/rad_m1_beams.cpp
-        pgen/tests/rad_m1_brent.cpp
         radiation_m1/radiation_m1_calc_opacities_toy.cpp
-        pgen/tests/rad_m1_latticetest.cpp
-        pgen/tests/rad_m1_spheretest.cpp
-        pgen/tests/rad_m1_hybridsj.cpp
         radiation_m1/radiation_m1_toy.hpp
         radiation_m1/radiation_m1_calc_opacities_photons.cpp
 )

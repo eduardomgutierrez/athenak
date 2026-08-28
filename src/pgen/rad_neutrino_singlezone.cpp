@@ -19,7 +19,7 @@
 #include "parameter_input.hpp"
 #include "pgen/pgen.hpp"
 #include "radiation/radiation.hpp"
-#ifdef ENABLE_NURATES
+#if ENABLE_NURATES
 #include "radiation/radiation_nurates.hpp"
 #endif
 
@@ -27,6 +27,7 @@ namespace {
 template <class EOSPolicy, class ErrorPolicy>
 void SingleZoneImpl(Mesh *pmesh, ParameterInput *pin, const bool restart);
 
+#if ENABLE_NURATES
 //----------------------------------------------------------------------------------------
 //! \fn Real PlanckLikeIntegral
 //! \brief Indefinite integral of E^3 exp(-E/T), used to seed an exactly
@@ -38,6 +39,7 @@ KOKKOS_INLINE_FUNCTION
 Real PlanckLikeIntegral(Real e, Real t) {
   return -t*exp(-e/t)*(e*e*e + 3.0*t*e*e + 6.0*t*t*e + 6.0*t*t*t);
 }
+#endif  // ENABLE_NURATES
 }
 
 void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
@@ -177,10 +179,21 @@ void SingleZoneImpl(Mesh *pmesh, ParameterInput *pin, const bool restart) {
   auto &nh_c = pmbp->prad->nh_c;
   auto &tet_c = pmbp->prad->tet_c;
   auto &tetcov_c = pmbp->prad->tetcov_c;
+#if ENABLE_NURATES
   auto &freq_grid = pmbp->prad->freq_grid;
   const int freq_scale = pmbp->prad->flag_fscale;
   const Real spec_norm = (spec_temp > 0.0) ?
                          erad/(6.0*SQR(SQR(spec_temp))) : 0.0;
+#else
+  // problem/spec_temp needs FreqBinEdgesMeV, which only exists with nurates.
+  if (spec_temp > 0.0) {
+    std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+              << std::endl
+              << "problem/spec_temp requires a build with "
+              << "-D Athena_ENABLE_NURATES=ON" << std::endl;
+    std::exit(EXIT_FAILURE);
+  }
+#endif  // ENABLE_NURATES
   par_for("pgen_neutrino_singlezone_rad", DevExeSpace(), 0, nmb1, 0, n3 - 1, 0,
           n2 - 1, 0, n1 - 1,
           KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
@@ -217,7 +230,7 @@ void SingleZoneImpl(Mesh *pmesh, ParameterInput *pin, const bool restart) {
                   }
                   int nn = (isp*nfreq + ifr)*nang + n;
                   Real intensity_cm = erad_freq;
-#ifdef ENABLE_NURATES
+#if ENABLE_NURATES
                   if (spec_temp > 0.0) {
                     Real e_lo = 0.0, e_hi = 0.0;
                     radiation::FreqBinEdgesMeV(freq_grid, ifr, nfreq, freq_scale,

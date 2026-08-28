@@ -87,6 +87,8 @@ void Radiation::SetFrequencyGrid() {
   // as given, which is what the nurates neutrino path wants: MeV)
   Real freq_min = nu_min_/nu_unit;
   Real freq_max = nu_max_/nu_unit;
+  grid_nu_min = freq_min;
+  grid_nu_max = freq_max;
 
   // assign freq_min and freq_max
   int nfreq_grid = nfreq_; // frequency grid is defined starting from 0 but with inf excluded

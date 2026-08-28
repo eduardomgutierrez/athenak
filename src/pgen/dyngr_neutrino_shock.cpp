@@ -34,7 +34,7 @@
 #include "radiation/radiation.hpp"
 #include "radiation_m1/radiation_m1.hpp"
 #include "radiation_m1/radiation_m1_helpers.hpp"
-#ifdef ENABLE_NURATES
+#if ENABLE_NURATES
 #include "radiation/radiation_nurates.hpp"
 #include "radiation_m1/radiation_m1_nurates.hpp"
 #endif
@@ -326,7 +326,7 @@ void NeutrinoDominatedShock(Mesh *pmesh, ParameterInput* pin) {
 
   // setup M1 radiation fields (only if M1 is enabled)
   if (has_m1) {
-#ifdef ENABLE_NURATES
+#if ENABLE_NURATES
     // Optically-thick (Eddington) closure: in the fluid frame H^a = 0 and
     // K^{ab} = (1/3) J h^{ab}, so T^{ab} = (4J/3) u^a u^b + (J/3) g^{ab}.
     // Projecting onto the Eulerian observer gives, for a uniform 3-velocity,
@@ -411,7 +411,7 @@ void NeutrinoDominatedShock(Mesh *pmesh, ParameterInput* pin) {
   }
 
   if (has_multifreq) {
-#ifdef ENABLE_NURATES
+#if ENABLE_NURATES
     // Same LTE state as the M1 branch above, deliberately: the two solvers must
     // start from identical initial data for the cross-solver comparison to mean
     // anything.  radiationm1::NeutrinoDens is reused rather than reimplemented
