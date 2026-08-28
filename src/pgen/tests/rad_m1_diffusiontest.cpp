@@ -229,6 +229,25 @@ void ProblemGenerator::RadiationM1DiffusionTest(ParameterInput *pin, const bool 
 
   // Scattering opacity is owned by the pgen so that both solvers see the same sigma_s.
   Real kappa_s = pin->GetOrAddReal("problem", "kappa_s", 100.0);
+#if ENABLE_NURATES
+  // One knob, not two.  <radiation>/nurates_toy_scattering is read during Radiation
+  // construction, because SetFrequencyGrid() needs to know whether to look for EOS
+  // code units, and that happens before this pgen runs -- so on the nurates path it,
+  // not <problem>/kappa_s, has to be the source.  Feeding kappa_s the other way round
+  // meant setting the two differently gave the grid decision one value and the physics
+  // the other, and setting only <problem>/kappa_s exited demanding EOS code units.
+  if (use_sn && pmbp->prad->use_nurates) {
+    if (!(pmbp->prad->nurates_toy_scattering >= 0.0)) {
+      std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+                << std::endl
+                << "With use_nurates the 1d diffusion test takes sigma_s from "
+                << "<radiation>/nurates_toy_scattering, which is unset. Set it there "
+                << "rather than as <problem>/kappa_s." << std::endl;
+      exit(EXIT_FAILURE);
+    }
+    kappa_s = pmbp->prad->nurates_toy_scattering;
+  }
+#endif
   Real vx = pin->GetOrAddReal("problem", "fluid_velocity", 0.0);
   Real nusq = SQR(pin->GetOrAddReal("problem", "nu", 4.0));
   Real t0 = pin->GetOrAddReal("problem", "t0", 0.0);
@@ -343,9 +362,8 @@ void ProblemGenerator::RadiationM1DiffusionTest(ParameterInput *pin, const bool 
   pmbp->prad->kappa_a = 0.0;
   pmbp->prad->kappa_p = 0.0;
   pmbp->prad->power_opacity = false;
-  // With use_nurates the source terms read the per-species arrays instead, so feed
-  // the same sigma_s through the toy hook and skip the library entirely.
-  if (pmbp->prad->use_nurates) { pmbp->prad->nurates_toy_scattering = kappa_s; }
+  // With use_nurates the source terms read the per-species arrays instead, filled from
+  // nurates_toy_scattering, which kappa_s was taken from above; the library is skipped.
 
   // ------------------------------------------------------- comoving spectrum, if asked
   // spec_width is the standard deviation of the comoving spectrum in units of the bin

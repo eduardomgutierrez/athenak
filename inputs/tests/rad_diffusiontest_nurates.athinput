@@ -54,7 +54,7 @@ nlevel                 = 4
 radiation_type         = neutrino
 nspecies               = 1
 use_nurates            = true
-nurates_toy_scattering = 100.0   # overwritten by problem/kappa_s
+nurates_toy_scattering = 100.0   # sigma_s; problem/kappa_s is taken from this
 fixed_fluid            = true
 affect_fluid           = false
 evolve_ye              = false
@@ -72,7 +72,7 @@ freq_fluxes = false      # no velocity gradient here, and the tail needs EOS uni
 pgen_name      = rad_m1_diffusiontest
 initial_data   = diffusion
 fluid_velocity = 0.1
-kappa_s        = 100.0
+kappa_s        = 100.0  # ignored on the nurates path; see nurates_toy_scattering
 nu             = 4.0
 t0             = 0.0
 

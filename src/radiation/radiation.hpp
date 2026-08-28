@@ -139,10 +139,21 @@ class Radiation {
   bool fixed_fluid;         // flag to enable/disable fluid integration
   bool affect_fluid;        // flag to enable/disable feedback of rad field on fluid
   bool evolve_ye;           // update fluid electron fraction from neutrino sources
-  int ye_source_model;      // gray nurates only; multifrequency uses number moment change
+  // 0 = 'opacity' (integrate the number source), 1 = 'moment' (energy density
+  // change over a mean energy).  Grey nurates only: the multifrequency path takes
+  // the per-bin number moment and rejects anything but 'moment'.
+  int ye_source_model;
   Real source_Ye_min;       // minimum allowed Ye for matter source update
   Real source_Ye_max;       // maximum allowed Ye for matter source update
-  Real source_limiter;      // fraction of remaining Ye range allowed per source update
+  // Fraction of the remaining Ye range allowed per source update; < 0 disables.
+  // NOTE when interpreting results: where this binds, the applied increment is
+  // source_limiter*(source_Ye_max - Ye)*D, which is independent of the computed
+  // dDYe -- so of the fluid velocity, of the W factor, and of the neutrino rates.
+  // Any Ye plateau reached under a binding limiter is set by these two knobs and
+  // is not a physical equilibrium.  The single-zone chiral input needs it (the Ye
+  // update is unstable there above dt ~ 5e-5), so switching it off is not a fix;
+  // it does mean absolute Ye numbers from a limited run measure the limiter.
+  Real source_limiter;
   bool backreact_chiral;    // source the chiral imbalance Y5 from the weak reactions
   bool chiral_gamma_m;      // apply the chirality-flip sink and the E.B anomaly source
   Real arad;                // radiation constant

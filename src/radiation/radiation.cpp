@@ -217,8 +217,15 @@ Radiation::Radiation(MeshBlockPack *ppack, ParameterInput *pin) :
     }
     affect_fluid = pin->GetOrAddBoolean("radiation","affect_fluid",true);
     evolve_ye = pin->GetOrAddBoolean("radiation","evolve_ye",true);
+    // The multifrequency path forms the number density change bin by bin from the
+    // radiation field itself, so the mean-energy approximation that separates the two
+    // grey routes does not arise there and there is nothing for 'opacity' to select.
+    // Default to 'moment' and refuse 'opacity' there, rather than accepting a key the
+    // path silently ignores.
+    bool multifreq_number_moment = multi_freq && use_nurates;
     std::string ye_source_model_str =
-        pin->GetOrAddString("radiation", "ye_source_model", "opacity");
+        pin->GetOrAddString("radiation", "ye_source_model",
+                            multifreq_number_moment ? "moment" : "opacity");
     if (ye_source_model_str == "opacity" ||
         ye_source_model_str == "number_opacity") {
       ye_source_model = 0;
@@ -230,6 +237,15 @@ Radiation::Radiation(MeshBlockPack *ppack, ParameterInput *pin) :
                 << std::endl
                 << "Unknown radiation/ye_source_model='" << ye_source_model_str
                 << "'. Use 'opacity' or 'moment'." << std::endl;
+      std::exit(EXIT_FAILURE);
+    }
+    if (multifreq_number_moment && ye_source_model != 1) {
+      std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+                << std::endl
+                << "radiation/ye_source_model='" << ye_source_model_str
+                << "' is not implemented on the multifrequency nurates path, which "
+                << "always takes the per-bin number moment. Use 'moment'."
+                << std::endl;
       std::exit(EXIT_FAILURE);
     }
     source_Ye_min = pin->GetOrAddReal("radiation", "source_Ye_min", 0.0);

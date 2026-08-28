@@ -63,7 +63,7 @@ nlevel                 = 3
 radiation_type         = neutrino
 nspecies               = 1
 use_nurates            = true
-nurates_toy_scattering = 100.0   # overwritten by problem/kappa_s
+nurates_toy_scattering = 100.0   # sigma_s; problem/kappa_s is taken from this
 nurates_toy_scat_p     = 0.0     # sigma_s ~ (e_cm/eref)^p; 0 keeps the answer separable
 nurates_toy_scat_eref  = 50.0    # MeV
 fixed_fluid            = true
@@ -81,7 +81,7 @@ freq_fluxes = false
 pgen_name      = rad_m1_diffusiontest
 initial_data   = diffusion
 fluid_velocity = 0.3
-kappa_s        = 100.0
+kappa_s        = 100.0  # ignored on the nurates path; see nurates_toy_scattering
 nu             = 4.0
 t0             = 0.0
 # Standard deviation of the comoving spectrum in units of dlnnu.  Wide enough that S

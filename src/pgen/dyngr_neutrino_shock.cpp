@@ -140,7 +140,7 @@ void NeutrinoDominatedShock(Mesh *pmesh, ParameterInput* pin) {
   }
 
   if (has_m1 || has_multifreq) {
-#ifndef ENABLE_NURATES
+#if !ENABLE_NURATES
     std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
               << std::endl
               << "dyngr_neutrino_shock pgen requires ENABLE_NURATES=ON to "

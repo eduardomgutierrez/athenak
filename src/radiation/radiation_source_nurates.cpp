@@ -290,27 +290,29 @@ TaskStatus Radiation::RadFluidCouplingNurates(Driver *pdriver, int stage) {
       u0_(m,IM2,k,j,i) += dm2;
       u0_(m,IM3,k,j,i) += dm3;
       if (evolve_ye_ && nsp_ > 1 && is_mhd_enabled_) {
+        // Both routes produce dN_*, the *comoving* neutrino number density change in
+        // fm^-3 -- the EOS number-density unit that GetBaryonMass() is defined against.
+        // 'opacity' integrates the number source directly; 'moment' divides the energy
+        // density change by a mean energy.
         Real dN_nue = dN_rad_source[0];
         Real dN_anue = dN_rad_source[1];
         if (ye_source_model_ == 1) {
-          dN_nue = 0.0;
-          dN_anue = 0.0;
+          Real eta0_nue = nurates_eta_0_(m, 0, k, j, i);
+          Real eta0_anue = nurates_eta_0_(m, 1, k, j, i);
+          Real eps_nue = (eta0_nue > 0.0) ?
+                         nurates_eta_1_(m, 0, k, j, i)/eta0_nue : 0.0;
+          Real eps_anue = (eta0_anue > 0.0) ?
+                          nurates_eta_1_(m, 1, k, j, i)/eta0_anue : 0.0;
+          dN_nue = (eps_nue > 0.0) ? dJ_fluid[0]/eps_nue : 0.0;
+          dN_anue = (eps_anue > 0.0) ? dJ_fluid[1]/eps_anue : 0.0;
         }
-        Real eps_nue = (nurates_eta_0_(m, 0, k, j, i) > 0.0) ?
-                       nurates_eta_1_(m, 0, k, j, i)/nurates_eta_0_(m, 0, k, j, i) : 0.0;
-        Real eps_anue = (nurates_eta_0_(m, 1, k, j, i) > 0.0) ?
-                        nurates_eta_1_(m, 1, k, j, i)/nurates_eta_0_(m, 1, k, j, i) : 0.0;
-        if (ye_source_model_ == 1) {
-          if (eps_nue > 0.0) {
-            dN_nue = gamma*dJ_fluid[0]/eps_nue;
-          }
-          if (eps_anue > 0.0) {
-            dN_anue = gamma*dJ_fluid[1]/eps_anue;
-          }
-        }
-        // dN_* are in fm^-3, matching the EOS number-density unit that
-        // GetBaryonMass() is defined against.
-        Real dDYe = mb_code_*(-dN_nue + dN_anue);
+        // u0_(IYF) holds the conserved D*Ye = rho*W*Ye, so a comoving number density
+        // change enters it with one factor of W = gamma.  Applied here, once, for both
+        // routes.  It used to be applied inside the 'moment' branch, which left
+        // 'opacity' -- the default -- short by exactly W, so the two routes disagreed
+        // on a moving fluid and only one of them was right.  Same form as the
+        // multifrequency path below; keep them textually identical.
+        Real dDYe = gamma*mb_code_*(-dN_nue + dN_anue);
 
         Real cons_dens = u0_(m,IDN,k,j,i);
         if (cons_dens > 0.0) {
