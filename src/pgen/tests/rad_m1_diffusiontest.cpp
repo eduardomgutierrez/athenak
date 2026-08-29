@@ -67,7 +67,7 @@ struct DiffusionVars {
   Real vx, wl, nusq, t0;
   Real kappa_s, dd;          // dd = 1/(3*kappa_s), the grey diffusion coefficient
   Real scat_p, scat_eref;    // sigma_s(e) = kappa_s*(e/scat_eref)^scat_p
-  Real ln_numin, dln;        // log grid: ln(e_mid(ifr)) = ln_numin + (ifr-0.5)*dln
+  Real ln_numin, dln;        // log grid: ln(e_mid(ifr)) = ln_numin + (ifr+0.5)*dln
   Real spec_y0, spec_wid;    // comoving spectrum exp(-(y-y0)^2/(2 wid^2)), y = ln(E)
   Real spec_norm;            // sum of the rest-frame weights over bins 1..nfreq-1
 };
@@ -103,14 +103,13 @@ void ComovingState(const int ic, const Real x1, const Real t, const Real vx,
 //  ray with Doppler factor n0_cm, whose comoving bin is n0_cm*[e_lo, e_hi].
 //
 //  Midpoint rule in y = ln(E), so ln(weight) is exactly quadratic in the bin index and
-//  the shift by ln(n0_cm)/dlnnu lands on the same parabola.  Bin 0 spans [0, nu_min],
-//  sits outside the log family and is left empty.  spec_wid <= 0 gives the flat seed.
+//  the shift by ln(n0_cm)/dlnnu lands on the same parabola.  Every bin is in the log
+//  family on the neutrino grid.  spec_wid <= 0 gives the flat seed.
 
 KOKKOS_INLINE_FUNCTION
 Real SpecBinWeight(const DiffusionVars &d, const int ifr, const Real ln_n0cm) {
   if (d.spec_wid <= 0.0) { return 1.0; }
-  if (ifr < 1) { return 0.0; }
-  Real y = d.ln_numin + (static_cast<Real>(ifr) - 0.5)*d.dln;
+  Real y = d.ln_numin + (static_cast<Real>(ifr) + 0.5)*d.dln;
   Real z = (y + ln_n0cm - d.spec_y0)/d.spec_wid;
   return Kokkos::exp(-0.5*z*z)/d.spec_norm;
 }
@@ -143,8 +142,8 @@ KOKKOS_INLINE_FUNCTION
 void BinComovingState(const DiffusionVars &d, const int ifr, const Real x1,
                       const Real t, const Real n0_cm, Real &jj, Real &hh) {
   Real ddf = d.dd;
-  if (d.scat_p != 0.0 && ifr > 0) {
-    Real e_cm = n0_cm*Kokkos::exp(d.ln_numin + (static_cast<Real>(ifr) - 0.5)*d.dln);
+  if (d.scat_p != 0.0) {
+    Real e_cm = n0_cm*Kokkos::exp(d.ln_numin + (static_cast<Real>(ifr) + 0.5)*d.dln);
     ddf = 1.0/(3.0*d.kappa_s*Kokkos::pow(e_cm/d.scat_eref, d.scat_p));
   }
   ComovingState(d.ic, x1, t, d.vx, d.wl, ddf, d.nusq, d.t0, jj, hh);
@@ -385,14 +384,14 @@ void ProblemGenerator::RadiationM1DiffusionTest(ParameterInput *pin, const bool 
                 << "<radiation>/multi_freq = true" << std::endl;
       exit(EXIT_FAILURE);
     }
-    if (pmbp->prad->flag_fscale != 1 || nfreq_in < 5) {
+    if (pmbp->prad->flag_fscale != 1 || nfreq_in < 4) {
       std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
                 << std::endl << "the spectral diffusion test needs "
                 << "<radiation>/freq_scale = log and nfreq >= 5" << std::endl;
       exit(EXIT_FAILURE);
     }
     ln_numin = std::log(pmbp->prad->nu_min);
-    dln = std::log(pmbp->prad->nu_max/pmbp->prad->nu_min)/(nfreq_in - 2);
+    dln = std::log(pmbp->prad->nu_max/pmbp->prad->nu_min)/(nfreq_in - 1);
   }
 
   dvars.ic = ic;
@@ -413,12 +412,16 @@ void ProblemGenerator::RadiationM1DiffusionTest(ParameterInput *pin, const bool 
   dvars.dln = dln;
   dvars.spec_wid = spec_width*dln;
   dvars.spec_y0 = (spec_peak > 0.0) ? std::log(spec_peak)
-                : ln_numin + (0.5*nfreq_in - 0.5)*dln;
+                // Centre of the populated log range.  Bins 0..nfreq-1 cover
+                // [nu_min, nu_min*r^nfreq], so that centre is 0.5*nfreq*dln above
+                // ln(nu_min).  Getting this wrong offsets the seed and shows up as a
+                // ray-to-ray coverage error, which the diagnostic below reports.
+                : ln_numin + 0.5*nfreq_in*dln;
   dvars.spec_norm = 1.0;
   if (spec_width > 0.0) {
     Real acc = 0.0;
-    for (int f = 1; f < nfreq_in; ++f) {
-      Real z = (ln_numin + (f - 0.5)*dln - dvars.spec_y0)/dvars.spec_wid;
+    for (int f = 0; f < nfreq_in; ++f) {
+      Real z = (ln_numin + (f + 0.5)*dln - dvars.spec_y0)/dvars.spec_wid;
       acc += std::exp(-0.5*z*z);
     }
     dvars.spec_norm = acc;
@@ -428,8 +431,8 @@ void ProblemGenerator::RadiationM1DiffusionTest(ParameterInput *pin, const bool 
     Real worst = 0.0;
     for (Real ncm : {wl*(1.0 - vx), wl*(1.0 + vx)}) {
       Real acc2 = 0.0;
-      for (int f = 1; f < nfreq_in; ++f) {
-        Real z = (ln_numin + (f - 0.5)*dln + std::log(ncm) - dvars.spec_y0)
+      for (int f = 0; f < nfreq_in; ++f) {
+        Real z = (ln_numin + (f + 0.5)*dln + std::log(ncm) - dvars.spec_y0)
                  /dvars.spec_wid;
         acc2 += std::exp(-0.5*z*z);
       }

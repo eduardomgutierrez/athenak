@@ -92,6 +92,32 @@ void Radiation::SetFrequencyGrid() {
 
   // assign freq_min and freq_max
   int nfreq_grid = nfreq_; // frequency grid is defined starting from 0 but with inf excluded
+
+  // The neutrino grid has no [0, nu_min] bin.  Photons want one -- the blackbody
+  // normalisation in ComputeEmissivity telescopes to a*T^4 only because the grid closes
+  // [0, inf), and the frequency-advection flux and the Compton solve both put a wall at
+  // nu = 0 -- but a neutrino spectrum has no content below nu_min that the grid is
+  // pretending to hold, and a bin whose lower edge is zero has no position in the
+  // geometric family.  That excluded it from the rigid Doppler displacement the source
+  // term is built on, leaving one bin per ray solved in the wrong frame.  So here every
+  // bin is geometric over [nu_min, nu_max] and the family is the whole grid.
+  //
+  // The spacing is deliberately written as the photon expression with the index shifted
+  // by one, so that this grid at nfreq = N and the photon grid at nfreq = N+1 produce
+  // bit-identical edges.  That equivalence is what lets a run before and after this
+  // change be compared exactly rather than merely plausibly.
+  if (use_nurates) {
+    Real log_freq_min = log(freq_min);
+    Real del_log_freq = (log(freq_max)-log_freq_min) / (nfreq_grid-1);
+    freq_grid_h(0) = freq_min;
+    freq_grid_h(nfreq_grid-1) = freq_max;
+    for (int f=1; f<nfreq_grid-1; ++f) {
+      freq_grid_h(f) = exp(f*del_log_freq + log_freq_min);
+    }
+    Kokkos::deep_copy(freq_grid_, freq_grid_h);
+    return;
+  }
+
   freq_grid_h(0) = 0.0;
   freq_grid_h(1) = freq_min;
   freq_grid_h(nfreq_grid-1) = freq_max;

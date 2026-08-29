@@ -107,9 +107,11 @@ class Radiation {
   Real nurates_toy_scattering = -1.0;
   // sigma_s = nurates_toy_scattering*(e_mid/nurates_toy_scat_eref)^nurates_toy_scat_p,
   // with e_mid the comoving bin midpoint.  p = 0 is the constant opacity the grey
-  // diffusion test uses; p != 0 makes the shape factor S the only thing that can get
-  // the per-group diffusion coefficient right, which is what the closure needs to be
-  // measured against.  The grey slot keeps the p = 0 value.
+  // diffusion test uses, and keeps the answer separable: elastic scattering cannot move
+  // energy between comoving groups, so every group shows the grey relative error.  p != 0
+  // gives each comoving group its own diffusion coefficient, so nothing but a correct
+  // per-ray comoving energy can reproduce it -- which is the whole frame question, and
+  // the only configuration that measures it.  The grey slot keeps the p = 0 value.
   Real nurates_toy_scat_p = 0.0;
   Real nurates_toy_scat_eref = 1.0;
 #if ENABLE_NURATES
@@ -132,6 +134,12 @@ class Radiation {
   DvceArray6D<Real> nurates_abs_0_freq;
   DvceArray6D<Real> nurates_abs_1_freq;
   DvceArray6D<Real> nurates_scat_1_freq;
+  // Per-cell workspace for the multi-frequency source term, [nmb, nwork, nk, nj, ni].
+  // It lives here rather than in team scratch because the kernel is dispatched with a
+  // flat par_for: the body is serial over the whole cell, so it must own its cell
+  // outright, and a team-scratch allocation shared by several team members would be
+  // written by all of them.  See MultiFreqRadFluidCouplingNurates.
+  DvceArray5D<Real> nurates_mf_work;
 #endif
 
   // Radiation source term parameters

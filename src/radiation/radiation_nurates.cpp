@@ -133,10 +133,7 @@ TaskStatus Radiation::CalcOpacityNuratesToy(Driver *pdrive, int stage) {
             Real e_lo = 0.0, e_hi = 0.0;
             FreqBinEdgesMeV(nu_tet_, ifr, nfreq_, fscale_, e_lo, e_hi);
             Real e_mid = FreqBinMidMeV(e_lo, e_hi, fscale_);
-            // Bin 0 spans [0, nu_min] and sits outside the log family, so its midpoint
-            // is not a member of the geometric progression the shift assumes.  Give it
-            // the p = 0 value rather than a value the shifted lookups cannot reproduce.
-            ss = (ifr > 0 && e_mid > 0.0)
+            ss = (e_mid > 0.0)
                  ? scat_*Kokkos::pow(e_mid/scat_eref_, scat_p_) : scat_;
           }
           eta_0_f_(m,isp,ifr,k,j,i) = 0.0;

@@ -1,15 +1,16 @@
-# Regression test for the closure of the nurates multi-frequency source term.
+# Regression test for the frame treatment of the nurates multi-frequency source term.
 #
 # A comoving spectrum diffuses through a purely scattering medium at v = 0.3.  Elastic
 # scattering cannot move energy between comoving groups, so with a frequency-independent
 # sigma_s the exact answer is w_bin(ifr, n0_cm) times the grey answer, and the L1 error
 # has to match the grey run's.  The seed is a Gaussian in ln(E) sampled at bin midpoints,
 # so ln(qbar) is exactly quadratic in the bin index and the log-space cubic in
-# ShiftedBinValue reproduces it -- and its shift by ln(n0_cm)/dlnnu -- to roundoff.  The
-# frequency machinery is exact by construction and the test measures the closure alone.
+# RemapBinValue reproduces it -- and its shift by ln(n0_cm)/dlnnu -- to roundoff.  The
+# frequency machinery is exact by construction and the test measures the source term
+# alone.
 #
-# Cheap on purpose (nx1 = 64, nlevel = 2, tlim = 1.0, ~15 s): the closure error is an
-# order of magnitude above the discretisation error here, so resolution buys nothing.  See
+# Cheap on purpose (nx1 = 64, nlevel = 2, tlim = 1.0, ~15 s): a frame error here is an
+# order of magnitude above the discretisation error, so resolution buys nothing.  See
 # inputs/tests/rad_diffusion_spectral_nurates.athinput for the production version and
 # the energy-dependent (nurates_toy_scat_p != 0) variant.
 #
@@ -82,10 +83,11 @@ nu             = 4.0
 t0             = 0.0
 spec_width     = 1.3        # standard deviation in units of dlnnu
 spec_peak      = 81.7366    # MeV
-# The grey run gives 2.480037e-02 at these settings; the scheme gives 2.613229e-02, 5%
-# above it, the excess sitting in the outermost shifted bins where the target lookup is
-# clamped.  Putting the shape factor inside the angular average instead gives 3.30e-01.
-# tol_l1_group is loose because those clamped bins legitimately carry O(1) relative
-# error while holding almost no energy; the total is the discriminating number.
-tol_l1         = 6.0e-2
-tol_l1_group   = 6.0e-1
+# The grey run gives 2.480037e-02 at these settings and the source term reproduces it to
+# every digit printed, worst group 2.488e-02 -- so the spectrum is preserved and the
+# tolerances can sit just above the grey answer rather than an order of magnitude out.
+# For the record of what these used to have to allow: the superseded shape-factor closure
+# ran 5% above grey with its excess in the outermost shifted bins, and the variant that
+# put the shape factor inside the angular average gave 3.30e-01.
+tol_l1         = 2.6e-2
+tol_l1_group   = 2.7e-2

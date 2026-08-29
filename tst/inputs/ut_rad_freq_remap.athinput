@@ -1,0 +1,101 @@
+# Unit test for the conservative log-space rebin of the nurates multi-frequency
+# source term.
+#
+# RemapSpectrumLog and RemapMatchMoments are exercised directly on host mirrors, so no
+# radiation module or EOS table is needed -- the mesh below exists only because AthenaK
+# requires one.  The pgen exits before any evolution.
+#
+# The check that matters is section 5: N round trips of the rebin, with the drift
+# reported per bin relative to that bin.  The previous attempt at this scheme
+# (wip/cme-multifreq-remap, d6a23510) leaked ~1e-3 of each bin into the one below every
+# RK stage, which is what destroyed the low-energy groups and, through the 1/E weighting
+# of the lepton source, Ye.  No simulation test can see that directly; this one can, and
+# it costs milliseconds.
+
+<comment>
+problem = conservative log-space rebin for the nurates multi-frequency source term
+
+<job>
+basename = ut_rad_freq_remap
+
+<mesh>
+nghost = 2
+
+nx1    = 4
+x1min  = -0.5
+x1max  = 0.5
+ix1_bc = periodic
+ox1_bc = periodic
+
+nx2    = 1
+x2min  = -0.5
+x2max  = 0.5
+ix2_bc = periodic
+ox2_bc = periodic
+
+nx3    = 1
+x3min  = -0.5
+x3max  = 0.5
+ix3_bc = periodic
+ox3_bc = periodic
+
+<time>
+evolution  = dynamic
+integrator = rk2
+cfl_number = 0.3
+tlim       = 0.0
+nlim       = 0
+
+# AthenaK insists on at least one physics module; an ideal-gas hydro block is the
+# cheapest one that needs no EOS table.  Nothing is evolved -- the pgen exits first.
+<hydro>
+eos         = ideal
+reconstruct = plm
+rsolver     = hlle
+gamma       = 1.666666666666667
+
+<problem>
+pgen_name  = rad_freq_remap
+
+# The production shock grid: this is where the spectrum spans the most decades and the
+# rebin has the most to lose.
+nfreq      = 24
+nu_min     = 10.0     # MeV
+nu_max     = 2000.0   # MeV
+nang       = 92       # 10*nlevel^2+2 at nlevel = 3, the production fan
+vx         = 0.5
+
+# A Fermi-Dirac at 12 MeV on a grid reaching 2 GeV puts the top groups ~250 e-folds down.
+# That 100+ decade dynamic range is the whole difficulty: a rebin whose error scales with
+# the neighbouring bin rather than with the bin itself cannot survive it.
+spec_temp  = 12.0
+spec_eta   = 3.0
+
+order_multifreq   = 2
+limiter_multifreq = 2
+
+# Number of forward+inverse rebins in the accumulation test.  A production step is two
+# RK stages, so 1000 trips is ~500 steps' worth of rebin with the source switched off.
+
+# A power law is exact algebra for the log-space cubic: ln(q) is linear in the bin index
+# on a log grid, so the lookup and its shift are exact to roundoff, for point-sampled and
+# bin-integrated quantities alike.
+tol_exact     = 1.0e-11
+# The Gaussian isotropy check closes to the accuracy of its own trapezoid seed (measured
+# 4.8e-8), not to roundoff: ln of a Gaussian's bin integral is quadratic in the bin index
+# and the log-space cubic reproduces that exactly, so the seed is the limiting term.
+tol_seed      = 1.0e-6
+# The Fermi-Dirac fixed point does not close exactly -- the un-shift/re-read pair is exact
+# only where ln(q) is linear in the index -- and this bounds the residual on the bins
+# inside the coverage band.  A characterisation, not a convergence claim.  Nothing is
+# written back into i0_, so it does not accumulate.
+tol_fixed_fd  = 3.0e-2
+# Terms entering an angular sum must be of comparable size.  This is the check that
+# catches what no simulation test could: the previous closure's target was an amplitude
+# times a shifted spectrum, both of whose sums divide by that ray's own spectrum, and on
+# this grid the spread reached ~1e80 -- so every ray but the most redshifted fell below
+# the summation rounding and the "angular mean" became one ray's value.
+tol_spread    = 1.0e6
+# Dipole amplitude for the positivity/sentinel section; the isotropic case is degenerate.
+anisotropy    = 0.1
+

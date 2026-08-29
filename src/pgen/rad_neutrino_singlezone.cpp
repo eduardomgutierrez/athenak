@@ -182,6 +182,16 @@ void SingleZoneImpl(Mesh *pmesh, ParameterInput *pin, const bool restart) {
 #if ENABLE_NURATES
   auto &freq_grid = pmbp->prad->freq_grid;
   const int freq_scale = pmbp->prad->flag_fscale;
+  // Absolute normalisation, deliberately not the per-ray sum of the weights.  The seed
+  // has to be comoving-isotropic -- that is the whole point of the scattering test --
+  // and each ray's bins cover a *different* comoving window n0_f*[e_lo, e_hi], so
+  // rescaling each ray to a common total would make the comoving spectrum ray-dependent,
+  // which is the very error being measured.  The price is that the seeded energy is
+  // erad only up to what falls outside [nu_min, nu_max]: 6*T^4 is the integral over
+  // [0, inf), while the grid holds [nu_min, nu_max].  With the geometric neutrino grid
+  // there is no [0, nu_min] bin to collect the low tail, so choose nu_min well below
+  // the spectrum -- the deficit, and its variation across the ray fan, is a floor under
+  // any residual this seed can be used to measure.
   const Real spec_norm = (spec_temp > 0.0) ?
                          erad/(6.0*SQR(SQR(spec_temp))) : 0.0;
 #else

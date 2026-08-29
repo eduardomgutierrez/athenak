@@ -2,22 +2,24 @@
 problem   = 1D radiation diffusion with a comoving spectrum, through the nurates source
 reference = inputs/tests/rad_diffusiontest_nurates.athinput, plus frequency dependence
 
-# The only test in the suite that has an absolute answer AND a shape factor S != 1, so
-# the only one that can choose between the competing closure definitions documented in
-# src/radiation/radiation_nurates.hpp.
+# The only test in the suite with an absolute answer that also has a non-trivial Doppler
+# shift, so the only one that can see whether the source term really is solved at each
+# ray's own comoving energy.
 #
 # The comoving spectrum is a Gaussian in ln(E) sampled at bin midpoints, so ln(qbar) is
-# exactly quadratic in the bin index; the log-space cubic in ShiftedBinValue reproduces
-# it, and its shift by ln(n0_cm)/dlnnu, to roundoff.  The frequency machinery is exact by
-# construction and the run measures the closure alone.
+# exactly quadratic in the bin index; the log-space cubic in RemapBinValue reproduces it,
+# and its shift by ln(n0_cm)/dlnnu, to roundoff.  The frequency machinery is therefore
+# exact by construction and the run measures the source term alone.
 #
 # With nurates_toy_scat_p = 0 the exact solution is separable: elastic scattering leaves
 # the comoving spectrum alone, so the answer is w_bin(ifr, n0_cm) times the grey answer,
-# and every group must show the same relative error as the grey run.  A closure that
+# and every group must show the same relative error as the grey run.  A source term that
 # returns the wrong bin-mean intensity breaks that group by group.
 #
 # With nurates_toy_scat_p != 0 each comoving group diffuses with its own
-# D(E) = 1/(3 sigma_s(E)), which is the physical version of the same question.
+# D(E) = 1/(3 sigma_s(E)), evaluated at that ray's comoving energy n0_cm*e_mid.  This is
+# the production configuration -- bns-nurates scattering goes as E^2 -- and it is the
+# hardest case in the suite.
 #
 # Requires a build with -DAthena_ENABLE_NURATES=ON.
 

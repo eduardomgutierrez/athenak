@@ -24,6 +24,7 @@
 #include "dyn_grmhd/dyn_grmhd.hpp"
 #include "radiation.hpp"
 #include "radiation/radiation_nurates.hpp"
+#include "radiation/radiation_nurates_remap.hpp"
 
 #include "radiation/radiation_tetrad.hpp"
 
@@ -354,9 +355,75 @@ TaskStatus Radiation::RadFluidCouplingNurates(Driver *pdriver, int stage) {
 
 //----------------------------------------------------------------------------------------
 //! \fn TaskStatus Radiation::MultiFreqRadFluidCouplingNurates(Driver *pdriver, int stage)
-//! \brief Implicit multifrequency neutrino-fluid coupling using spectral bns_nurates
-//!        coefficients.  The Ye update is computed from the change in neutrino number
-//!        density, derived directly from the frequency-resolved intensities.
+//! \brief Implicit multifrequency neutrino-fluid coupling.  The scattering target is
+//!        built on the fixed comoving grid; the update is applied to the stored lab bins
+//!        at each ray's own comoving energy.
+//!
+//! ## The frame problem
+//!
+//! i0_ is stored in *lab* frequency bins; bns_nurates tabulates sigma_a, sigma_s and eta
+//! on freq_grid in *comoving* MeV.  Lab bin ifr covers the comoving interval
+//! n0_cm(iang)*[e_lo, e_hi], a different interval on every ray, so the two cannot be
+//! combined as they stand.  Applying the opacities to i0_ directly -- what the baseline
+//! did -- drives every operator toward something independent of ray index, whereas the
+//! physically correct state, comoving isotropy, is not: on a pure elastic scattering test
+//! whose exact answer is that nothing happens, the baseline produces a spurious comoving
+//! flux of 0.164 v, first order in v and independent of angular resolution.
+//!
+//! ## The passes
+//!
+//!  1. **Un-shift, and accumulate.** Each ray's spectrum is evaluated at the fixed grid's
+//!     comoving energies, E*_a(g - delta_a), by RemapBinValue.  On a log grid that is a
+//!     rigid translation, one number per ray, and it is exact for a power law.  The
+//!     result is not stored: its only consumer is the angular sum of step 2, to which
+//!     each ray contributes once, so the two are fused and the workspace is two numbers
+//!     per bin rather than one per (ray, bin).
+//!  2. **Solve, at a common comoving energy.** The implicit angular system for the
+//!     scattering mean intensity is solved *on the fixed grid*, where sigma_a, sigma_s
+//!     and eta are tabulated and every ray shares the bin:
+//!
+//!         vnc_a    = 1/(n0 + n0_cm_a dt (sigma_a + sigma_s))
+//!         jr_cm(g) = [sum_a w_a vnc_a (n0 I_a + n0_cm_a dt eta)]
+//!                  / [1 - sum_a w_a vnc_a n0_cm_a dt sigma_s]
+//!
+//!     That is the baseline's algebra, but now applied to intensities that are at the
+//!     same energy, so it is the plain unweighted angular mean and there is nothing to
+//!     choose.  Comoving isotropy, the grey limit, finiteness at sigma_s = 0 and
+//!     isoenergeticity all follow from that and need no construction.
+//!  3. **Update the stored bins.** For ray a's bin ifr, sitting at fixed-grid position
+//!     x = ifr + delta_a, the opacities, the equilibrium spectrum and jr_cm are read at
+//!     x and the implicit update is applied to i0_ in place.
+//!
+//! ## Why the field itself is never rebinned
+//!
+//! The photon path rebins i0_ onto the comoving grid, solves, and rebins back.  The round
+//! trip is not the identity and applying it twice per step accumulates -- measured for
+//! three different operators, see radiation_nurates_remap.hpp.  Transforming the update
+//! instead makes the scheme exactly inert when the source vanishes, so nothing can build
+//! up, and it keeps every remap out of the conservation path: the energy, the momentum
+//! and the lepton number handed to the fluid are all differences of the stored field.
+//!
+//! ## What replaced the shape factor
+//!
+//! The previous scheme reconstructed the target as gfac(ifr)*qbar(ifr + delta), an
+//! amplitude solved per bin times a shifted spectrum.  Both of gfac's angular sums divide
+//! by that ray's own qbar, and once the spectrum spans enough decades they collapse onto
+//! the single most redshifted ray -- so the "angular mean" became one ray's value, worth
+//! 47x to 137x the grey L1 error, and with sigma_s ~ E^2 in a moving fluid it went
+//! non-finite.  Here the mean intensity is solved for directly and read at x; nothing is
+//! divided by a per-ray spectrum, so there is no such conditioning.
+//!
+//! Full derivation, including the fluid coupling and why the field itself is never
+//! rebinned, in notes/multifreq-comoving-solve.md in the ChiralDynamo superproject.
+//!
+//! ## The whole grid is in the family
+//!
+//! On the neutrino grid freq_grid(0) = nu_min, so every bin is geometric and every bin is
+//! displaced by the same delta_a.  There is no exception to carve out.  The photon grid
+//! keeps its [0, nu_min] bin, which needs one and which SetFrequencyGrid still builds;
+//! this path does not, and used to pay for it by solving bin 0 unshifted in its own lab
+//! bin -- the frame-inconsistent baseline treatment, on a bin that was not empty in
+//! practice, and the source of an nfreq-independent floor under the isotropy test.
 
 TaskStatus Radiation::MultiFreqRadFluidCouplingNurates(Driver *pdriver, int stage) {
   if (!(rad_source)) {
@@ -418,23 +485,15 @@ TaskStatus Radiation::MultiFreqRadFluidCouplingNurates(Driver *pdriver, int stag
   auto &scat_1_f_ = nurates_scat_1_freq;
   Real mb_code_ = nurates_baryon_mass;
   Real code_edens_to_eos_ = nurates_code_edens_to_eos;
-  // Bin spacing of the comoving grid, used to turn a ray's Doppler factor into a
-  // displacement in bin index.  Bin 0 spans [0, nu_min] and is not part of the
-  // family, so the spacing is measured over bins 1 .. nfreq-1.
-  Real grid_dln_ = 0.0, grid_dlin_ = 0.0;
-  bool shift_ok_ = (nfrq_ >= 3);
-  if (shift_ok_) {
-    // grid_nu_min/max, not nu_min/max: emid_f below comes from freq_grid, which
-    // SetFrequencyGrid may have rescaled, and a linear spacing has to match it.
-    Real gmin = grid_nu_min, gmax = grid_nu_max;
-    if (freq_scale_ == 1) {
-      shift_ok_ = (gmin > 0.0 && gmax > gmin);
-      if (shift_ok_) { grid_dln_ = log(gmax/gmin)/static_cast<Real>(nfrq_-2); }
-    } else {
-      shift_ok_ = (gmax > gmin);
-      if (shift_ok_) { grid_dlin_ = (gmax-gmin)/static_cast<Real>(nfrq_-2); }
-    }
-  }
+
+  // Width of a bin in ln(nu).  Every bin is geometric on the neutrino grid, so this is
+  // one number for the whole grid and a ray's Doppler factor becomes a rigid displacement
+  // ln(n0_cm)/grid_dln_ in bin index -- for every bin, with no exceptions to carve out.
+  // Taken from grid_nu_min/grid_nu_max rather than the raw nu_min/nu_max: freq_grid may
+  // have been rescaled by SetFrequencyGrid and any spacing has to match what it actually
+  // holds.  The constructor has already refused a non-log grid, nfreq < 4 and nu_min <=
+  // 0.
+  Real grid_dln_ = log(grid_nu_max/grid_nu_min)/static_cast<Real>(nfrq_-1);
 
   if (!(fixed_fluid_)) {
     if (is_dyngr) {
@@ -448,29 +507,39 @@ TaskStatus Radiation::MultiFreqRadFluidCouplingNurates(Driver *pdriver, int stag
     }
   }
 
-  size_t scr_size = ScrArray1D<Real>::shmem_size(nsp_*nfrq_) * 9
-                  + ScrArray1D<Real>::shmem_size(nang_) * 3
-                  + ScrArray1D<Real>::shmem_size(nfrq_) * 4;
-  int scr_level = 0;
-  par_for_outer("multi_freq_source_nurates", DevExeSpace(), scr_size, scr_level,
+  // Flat par_for, one thread per cell: the body is serial over the whole cell and owns
+  // it outright.  par_for_outer would be wrong here -- it requests Kokkos::AUTO team
+  // size, and with no inner parallel region every team member would run this same body,
+  // so i0_ would be read-modify-written and the fluid source applied once per member.
+  // Team scratch goes with it, so the workspace is a preallocated global array sliced
+  // per cell; nurates_mf_work is laid out to match i0_, component-major with i fastest.
+  auto &work_ = nurates_mf_work;
+  const int wstride = static_cast<int>(work_.stride(1));
+  par_for("multi_freq_source_nurates", DevExeSpace(),
   0, nmb1, ks, ke, js, je, is, ie,
-  KOKKOS_LAMBDA(TeamMember_t member, int m, int k, int j, int i) {
-    ScrArray1D<Real> sigma_a(member.team_scratch(scr_level), nsp_*nfrq_);
-    ScrArray1D<Real> sigma_s(member.team_scratch(scr_level), nsp_*nfrq_);
-    ScrArray1D<Real> eq_j(member.team_scratch(scr_level), nsp_*nfrq_);
-    ScrArray1D<Real> lsa(member.team_scratch(scr_level), nsp_*nfrq_);
-    ScrArray1D<Real> lss(member.team_scratch(scr_level), nsp_*nfrq_);
-    ScrArray1D<Real> lej(member.team_scratch(scr_level), nsp_*nfrq_);
-    ScrArray1D<Real> lIb(member.team_scratch(scr_level), nsp_*nfrq_);
-    ScrArray1D<Real> rtmp(member.team_scratch(scr_level), nfrq_);
-    ScrArray1D<Real> lrtmp(member.team_scratch(scr_level), nfrq_);
-    ScrArray1D<Real> sumA_a(member.team_scratch(scr_level), nsp_*nfrq_);
-    ScrArray1D<Real> n_0_iang(member.team_scratch(scr_level), nang_);
-    ScrArray1D<Real> n0_cm_iang(member.team_scratch(scr_level), nang_);
-    ScrArray1D<Real> dlt_iang(member.team_scratch(scr_level), nang_);
-    ScrArray1D<Real> emid_f(member.team_scratch(scr_level), nfrq_);
-    ScrArray1D<Real> shift_bin(member.team_scratch(scr_level), nfrq_);
-    ScrArray1D<Real> gfac(member.team_scratch(scr_level), nsp_*nfrq_);
+  KOKKOS_LAMBDA(int m, int k, int j, int i) {
+    // This cell's slice of the workspace.  WorkSlice presents a strided column as a 1-D
+    // array so RemapFillLogs/RemapBinValue template over it unchanged.
+    Real *wbase = &work_(m, 0, k, j, i);
+    int woff = 0;
+    // The angular sums of the implicit solve, accumulated ray by ray.  Two numbers per
+    // bin, not the whole un-shifted field: see the fused pass below.
+    WorkSlice acc1 = MakeWorkSlice(wbase, wstride, woff, nfrq_);
+    WorkSlice acc2 = MakeWorkSlice(wbase, wstride, woff, nfrq_);
+    WorkSlice sigma_a = MakeWorkSlice(wbase, wstride, woff, nfrq_);
+    WorkSlice sigma_s = MakeWorkSlice(wbase, wstride, woff, nfrq_);
+    WorkSlice eq_j = MakeWorkSlice(wbase, wstride, woff, nfrq_);
+    WorkSlice lsa = MakeWorkSlice(wbase, wstride, woff, nfrq_);
+    WorkSlice lss = MakeWorkSlice(wbase, wstride, woff, nfrq_);
+    WorkSlice lej = MakeWorkSlice(wbase, wstride, woff, nfrq_);
+    WorkSlice emid_f = MakeWorkSlice(wbase, wstride, woff, nfrq_);
+    WorkSlice jr_cm = MakeWorkSlice(wbase, wstride, woff, nfrq_);
+    WorkSlice ljr = MakeWorkSlice(wbase, wstride, woff, nfrq_);
+    WorkSlice espec = MakeWorkSlice(wbase, wstride, woff, nfrq_);
+    WorkSlice lspec = MakeWorkSlice(wbase, wstride, woff, nfrq_);
+    WorkSlice n_0_iang = MakeWorkSlice(wbase, wstride, woff, nang_);
+    WorkSlice n0_cm_iang = MakeWorkSlice(wbase, wstride, woff, nang_);
+    WorkSlice dlt_iang = MakeWorkSlice(wbase, wstride, woff, nang_);
 
     Real &x1min = size.d_view(m).x1min;
     Real &x1max = size.d_view(m).x1max;
@@ -509,9 +578,8 @@ TaskStatus Radiation::MultiFreqRadFluidCouplingNurates(Driver *pdriver, int stag
                 norm_to_tet_(m,3,2,k,j,i)*wvy   + norm_to_tet_(m,3,3,k,j,i)*wvz);
     Real n0 = tt(m,0,0,k,j,i);
 
-    // Per-ray geometry, and the ray's displacement in bin index.  The redshift
-    // factor n0_cm does not depend on frequency, so on a log grid one number per
-    // ray positions every bin (see ShiftedBinValue).
+    // Per-ray geometry.  n0_cm does not depend on frequency, so one number per ray
+    // displaces every bin of that ray.
     Real wght_sum = 0.0;
     for (int iang=0; iang<=nang1; ++iang) {
       n_0_iang(iang) = tc(m,0,0,k,j,i)*nh_c_.d_view(iang,0) +
@@ -521,8 +589,7 @@ TaskStatus Radiation::MultiFreqRadFluidCouplingNurates(Driver *pdriver, int stag
       Real n0_cm = (u_tet[0]*nh_c_.d_view(iang,0) - u_tet[1]*nh_c_.d_view(iang,1) -
                     u_tet[2]*nh_c_.d_view(iang,2) - u_tet[3]*nh_c_.d_view(iang,3));
       n0_cm_iang(iang) = n0_cm;
-      dlt_iang(iang) = (shift_ok_ && freq_scale_ == 1 && n0_cm > 0.0) ?
-                       log(n0_cm)/grid_dln_ : 0.0;
+      dlt_iang(iang) = (n0_cm > 0.0) ? log(n0_cm)/grid_dln_ : 0.0;
       wght_sum += solid_angles_.d_view(iang)/SQR(n0_cm);
     }
     for (int ifr=0; ifr<nfrq_; ++ifr) {
@@ -531,240 +598,135 @@ TaskStatus Radiation::MultiFreqRadFluidCouplingNurates(Driver *pdriver, int stag
       emid_f(ifr) = FreqBinMidMeV(e_lo, e_hi, freq_scale_);
     }
 
-    // The shift is applied only in bins where the *whole ray set* stays on the grid.
-    // Nearer an end than max|delta|, the shift asks for comoving energies the grid does
-    // not tabulate, and every way of papering over that is worse than not shifting:
-    // extrapolating the cubic is wrong by 1e7 on a Fermi-Dirac tail and the corrupted
-    // spectrum then reaches 1e92; clamping the lookup position corrupts qbar at the edge
-    // and the corruption propagates max|delta| bins inward; dropping the ray makes the
-    // bin a half-sky average, which carries the flux into what is meant to be the
-    // isotropic part and drives those bins to 1e6 within a few hundred cycles.  All
-    // three measured.  So those bins fall back to the lab-bin treatment -- exactly what
-    // bin 0 already does, and what the baseline did everywhere.  Widen [nu_min, nu_max]
-    // if they carry anything: the shift needs ceil(max|delta|) bins of margin, which on
-    // a log grid is ln(gamma_max)/dlnnu.
-    Real dlo = 0.0, dhi = 0.0, nlo = 1.0, nhi = 1.0;
-    for (int iang=0; iang<=nang1; ++iang) {
-      dlo = fmin(dlo, dlt_iang(iang));
-      dhi = fmax(dhi, dlt_iang(iang));
-      nlo = fmin(nlo, n0_cm_iang(iang));
-      nhi = fmax(nhi, n0_cm_iang(iang));
-    }
-    // Worst-case displacement over the ray set, in bins.  On a log grid it is one number
-    // per cell; on a linear grid the shift (n0_cm-1)*mid/dlin and its inverse are both
-    // monotone in n0_cm, so the extremes of n0_cm bound it bin by bin -- take the widest.
-    Real slo = dlo, shi = dhi;
-    if (freq_scale_ != 1) {
-      for (int ifr=1; ifr<nfrq_; ++ifr) {
-        Real r = emid_f(ifr)/grid_dlin_;
-        Real a = (nlo - 1.0)*r, b = (nhi - 1.0)*r;
-        Real c = (1.0/nhi - 1.0)*r, d = (1.0/nlo - 1.0)*r;
-        slo = fmin(slo, fmin(fmin(a, b), fmin(c, d)));
-        shi = fmax(shi, fmax(fmax(a, b), fmax(c, d)));
-      }
-    }
-    // [u_lo, u_hi] is where every ray's un-shifted position stays on the grid, hence
-    // where qbar means the comoving spectrum rather than the plain lab-bin mean.  The
-    // shift is applied exactly there, and every lookup of qbar is restricted to that
-    // range, so the two quantities never mix.  Inside the band the target lookup may
-    // still land outside [u_lo, u_hi] for the outermost bins, where ShiftedSpectrum
-    // clamps it; that is worth 1.2x the grey L1 error against 1.5x for giving those bins
-    // up entirely, and the flat-spectrum case stays bit-identical to grey either way.
-    int u_lo = static_cast<int>(ceil(1.0 + shi));
-    int u_hi = static_cast<int>(floor(static_cast<Real>(nfrq_-1) + slo));
-    if (u_lo < 1) { u_lo = 1; }
-    if (u_hi > nfrq_-1) { u_hi = nfrq_-1; }
-    bool have_range = shift_ok_ && (u_hi - u_lo >= 1);
-    for (int ifr=0; ifr<nfrq_; ++ifr) {
-      shift_bin(ifr) = (have_range && ifr >= u_lo && ifr <= u_hi) ? 1.0 : 0.0;
-    }
-    int qlo_ = have_range ? u_lo : 1;
-    int qhi_ = have_range ? u_hi : nfrq_-1;
-
     Real m_old[4] = {0.0}; Real m_new[4] = {0.0};
     Real dN_rad_moment[4] = {0.0};
     for (int isp=0; isp<nsp_; ++isp) {
-      int sp_off = isp*nfrq_;
+      // One species at a time: passes 1-3 all run inside this loop, so the opacity
+      // workspace holds the current species only and carries no species index.
       for (int ifr=0; ifr<nfrq_; ++ifr) {
-        int idx = sp_off + ifr;
         Real sa = abs_1_f_(m, isp, ifr, k, j, i);
-        Real ss = scat_1_f_(m, isp, ifr, k, j, i);
-        Real ej = (sa > 0.0) ? eta_1_f_(m, isp, ifr, k, j, i)/sa : 0.0;
-        sigma_a(idx) = sa;
-        sigma_s(idx) = ss;
-        eq_j(idx) = ej;
-        lsa(idx) = (sa > 0.0) ? log(sa) : -1.0e30;
-        lss(idx) = (ss > 0.0) ? log(ss) : -1.0e30;
-        lej(idx) = (ej > 0.0) ? log(ej) : -1.0e30;
+        sigma_a(ifr) = sa;
+        sigma_s(ifr) = scat_1_f_(m, isp, ifr, k, j, i);
+        eq_j(ifr) = (sa > 0.0) ? eta_1_f_(m, isp, ifr, k, j, i)/sa : 0.0;
       }
+      RemapFillLogs(sigma_a, lsa, 0, 0, nfrq_-1);
+      RemapFillLogs(sigma_s, lss, 0, 0, nfrq_-1);
+      RemapFillLogs(eq_j, lej, 0, 0, nfrq_-1);
 
-      // Lagged comoving mean spectrum on the fixed grid: un-shift each ray before
-      // integrating, so a comoving-isotropic field comes back exactly.
-      //
-      // Positions that run off either end are clamped to the nearest tabulated bin, not
-      // extrapolated and not dropped.  Extrapolating is wrong by 1e7 here (a Fermi-Dirac
-      // tail at T = 12 MeV on nu in [10, 2000] MeV, v = 0.5, |delta| up to 2.28 bins),
-      // and the forward lookup of the corrupted spectrum then reaches 1e92.  Dropping
-      // the ray is worse: at an edge bin the rays that run off the far end are exactly
-      // one hemisphere, so qbar there becomes a half-sky average, which for an
-      // anisotropic field carries the flux into what is supposed to be the isotropic
-      // part -- measured to drive the outermost bins to 1e6 within a few hundred cycles.
-      // Clamping keeps the average over the whole sky; the price is an energy bias in
-      // the outermost ceil(|delta|) bins, bounded by the field there.
-      for (int ifr=0; ifr<nfrq_; ++ifr) { sumA_a(sp_off+ifr) = 0.0; }
+      // ---- Pass 1+2: un-shift each ray onto the fixed grid and accumulate the angular
+      // sums of the implicit solve as we go.  The un-shifted field is never stored: its
+      // only consumer is the sum below, and each ray contributes to it exactly once, so
+      // holding all of it would cost nang*nfreq of workspace and buy nothing.  Ray-major
+      // so one ray's whole spectrum is built once and read straight through.
+      for (int ifr=0; ifr<nfrq_; ++ifr) { acc1(ifr) = 0.0; acc2(ifr) = 0.0; }
       for (int iang=0; iang<=nang1; ++iang) {
-        Real n0_cm = n0_cm_iang(iang);
         Real n_0 = n_0_iang(iang);
+        Real n0_cm = n0_cm_iang(iang);
+        Real dlt = dlt_iang(iang);
+        Real sfac = 4.0*M_PI*SQR(SQR(n0_cm))/(n0*n_0);
+        for (int ifr=0; ifr<nfrq_; ++ifr) {
+          espec(ifr) = sfac*i0_(m, isp*nfrq_*nang_ + ifr*nang_ + iang, k, j, i);
+        }
+        // Exactly at rest the ray already sits on the grid, and reading the stored
+        // values straight back is what makes v = 0 bit-identical to no frame treatment.
+        bool shift = (fabs(dlt) > 1.0e-12);
+        if (shift) { RemapFillLogs(espec, lspec, 0, 0, nfrq_-1); }
         Real omega_cm = solid_angles_.d_view(iang)/SQR(n0_cm);
         for (int ifr=0; ifr<nfrq_; ++ifr) {
-          int nn = isp*nfrq_*nang_ + ifr*nang_ + iang;
-          Real val = 4.0*M_PI*(i0_(m,nn,k,j,i)/(n0*n_0))*SQR(SQR(n0_cm));
-          rtmp(ifr) = val;
-          lrtmp(ifr) = (val > 0.0) ? log(val) : -1.0e30;
+          Real icm = shift ? RemapBinValue(espec, lspec, 0, 0, nfrq_-1,
+                                           static_cast<Real>(ifr) - dlt,
+                                           RemapAsymptote::kSpectrum, grid_dln_)
+                           : espec(ifr);
+          int idx = ifr;
+          Real dtcsiga = dt_*sigma_a(idx);
+          Real dtcsigs = dt_*sigma_s(idx);
+          Real vncsigma = 1.0/(n0 + (dtcsiga + dtcsigs)*n0_cm);
+          acc1(ifr) += omega_cm*n0_cm*vncsigma;
+          acc2(ifr) += icm*omega_cm*n0*vncsigma;
         }
+      }
+      for (int ifr=0; ifr<nfrq_; ++ifr) {
+        int idx = ifr;
+        Real dtcsiga = dt_*sigma_a(idx);
+        Real dtcsigs = dt_*sigma_s(idx);
+        Real sum1 = acc1(ifr)/wght_sum;
+        Real sum2 = acc2(ifr)/wght_sum;
+        // The angular mean of the *new* intensity, which is what makes the update
+        // implicit in the scattering term.  sigma_s is the same on every ray at this
+        // energy, so this is the unweighted mean and nothing has to be chosen -- which
+        // is exactly what the shape-factor closure could not arrange.
+        Real den = 1.0 - sum1*dtcsigs;
+        Real jr = (den > 0.0) ? (sum2 + sum1*dtcsiga*eq_j(idx))/den : 0.0;
+        jr_cm(ifr) = (jr > 0.0) ? jr : 0.0;
+      }
+      RemapFillLogs(jr_cm, ljr, 0, 0, nfrq_-1);
+
+      // ---- Pass 3: update the stored lab bins at each ray's own comoving energy ------
+      for (int iang=0; iang<=nang1; ++iang) {
+        Real n_0 = n_0_iang(iang);
+        Real n0_cm = n0_cm_iang(iang);
+        Real dlt = dlt_iang(iang);
+        bool shift = (fabs(dlt) > 1.0e-12);
+        Real n_1 = tc(m,0,1,k,j,i)*nh_c_.d_view(iang,0) +
+                   tc(m,1,1,k,j,i)*nh_c_.d_view(iang,1) +
+                   tc(m,2,1,k,j,i)*nh_c_.d_view(iang,2) +
+                   tc(m,3,1,k,j,i)*nh_c_.d_view(iang,3);
+        Real n_2 = tc(m,0,2,k,j,i)*nh_c_.d_view(iang,0) +
+                   tc(m,1,2,k,j,i)*nh_c_.d_view(iang,1) +
+                   tc(m,2,2,k,j,i)*nh_c_.d_view(iang,2) +
+                   tc(m,3,2,k,j,i)*nh_c_.d_view(iang,3);
+        Real n_3 = tc(m,0,3,k,j,i)*nh_c_.d_view(iang,0) +
+                   tc(m,1,3,k,j,i)*nh_c_.d_view(iang,1) +
+                   tc(m,2,3,k,j,i)*nh_c_.d_view(iang,2) +
+                   tc(m,3,3,k,j,i)*nh_c_.d_view(iang,3);
+        Real domega = solid_angles_.d_view(iang);
+        Real omega_cm = domega/SQR(n0_cm);
+        Real sfac = 4.0*M_PI*SQR(SQR(n0_cm))/(n0*n_0);
+
         for (int ifr=0; ifr<nfrq_; ++ifr) {
-          Real g = rtmp(ifr);
-          if (shift_bin(ifr) >= 1.0) {
-            Real xpos, jac = 1.0;
-            if (freq_scale_ == 1) {
-              xpos = static_cast<Real>(ifr) - dlt_iang(iang);
-            } else {
-              // Inverse of the forward shift below, not its negation: on a linear
-              // grid mid(f) = nu_min + (f-0.5)*dlin, so the index whose midpoint is
-              // mid(ifr)/n0_cm is ifr + (1/n0_cm - 1)*mid(ifr)/dlin.  The two agree
-              // only to O(n0_cm-1), and with the negation the round trip does not
-              // close, so comoving isotropy stops being a fixed point at O(v^2).
-              xpos = static_cast<Real>(ifr) +
-                     (1.0/n0_cm - 1.0)*emid_f(ifr)/grid_dlin_;
-              jac = 1.0/n0_cm;
-            }
-            if (fabs(xpos - static_cast<Real>(ifr)) > 1.0e-12) {
-              g = jac*ShiftedBinValue(rtmp, lrtmp, 0, 1, nfrq_-1, xpos);
-            }
-          }
-          sumA_a(sp_off+ifr) += omega_cm*g;
-        }
-      }
-      for (int ifr=0; ifr<nfrq_; ++ifr) {
-        Real acc = sumA_a(sp_off+ifr)/wght_sum;
-        sumA_a(sp_off+ifr) = acc;
-        lIb(sp_off+ifr) = (acc > 0.0) ? log(acc) : -1.0e30;
-      }
-
-      // Amplitude pass: one number per bin, g = gnum/gden, the new-time amplitude of
-      // the isotropic spectrum.  The target for ray iang is then g*qbar(ifr + delta),
-      // the field's own spectrum at that ray's comoving energy.  See
-      // AmplitudeAccumulate for why g cannot be dropped and why it is not written as a
-      // shape factor times a bin mean.
-      for (int ifr=0; ifr<nfrq_; ++ifr) {
-        int idx = sp_off + ifr;
-        Real gnum = 0.0, gden = 0.0;
-        for (int iang=0; iang<=nang1; ++iang) {
           int nn = isp*nfrq_*nang_ + ifr*nang_ + iang;
-          Real n_0 = n_0_iang(iang);
-          Real n0_cm = n0_cm_iang(iang);
-          Real sa = sigma_a(idx), ss = sigma_s(idx), ej = eq_j(idx);
-          if (shift_bin(ifr) >= 1.0) {
-            Real xpos, jac = 1.0;
-            if (freq_scale_ == 1) {
-              xpos = static_cast<Real>(ifr) + dlt_iang(iang);
-            } else {
-              xpos = static_cast<Real>(ifr) + (n0_cm - 1.0)*emid_f(ifr)/grid_dlin_;
-              jac = n0_cm;  // linear bins do not carry the width stretch themselves
-            }
-            // A ray at rest reads the tabulated value back exactly.
-            if (fabs(xpos - static_cast<Real>(ifr)) > 1.0e-12) {
-              sa = ShiftedBinValue(sigma_a, lsa, sp_off, 1, nfrq_-1, xpos);
-              ss = ShiftedBinValue(sigma_s, lss, sp_off, 1, nfrq_-1, xpos);
-              ej = jac*ShiftedBinValue(eq_j, lej, sp_off, 1, nfrq_-1, xpos);
-            }
+          Real i0_old = i0_(m,nn,k,j,i);
+          m_old[0] += i0_old*domega;
+          m_old[1] += n_1*i0_old/n_0*domega;
+          m_old[2] += n_2*i0_old/n_0*domega;
+          m_old[3] += n_3*i0_old/n_0*domega;
+
+          // This ray's bin ifr covers comoving n0_cm*[e_lo, e_hi]; on a log grid that is
+          // the fixed grid's position ifr + dlt.
+          Real sa = sigma_a(ifr);
+          Real ss = sigma_s(ifr);
+          Real ej = eq_j(ifr);
+          Real jr = jr_cm(ifr);
+          if (shift) {
+            Real xpos = static_cast<Real>(ifr) + dlt;
+            sa = RemapBinValue(sigma_a, lsa, 0, 0, nfrq_-1, xpos,
+                               RemapAsymptote::kOpacity, grid_dln_);
+            ss = RemapBinValue(sigma_s, lss, 0, 0, nfrq_-1, xpos,
+                               RemapAsymptote::kOpacity, grid_dln_);
+            ej = RemapBinValue(eq_j, lej, 0, 0, nfrq_-1, xpos,
+                               RemapAsymptote::kSpectrum, grid_dln_);
+            jr = RemapBinValue(jr_cm, ljr, 0, 0, nfrq_-1, xpos,
+                               RemapAsymptote::kSpectrum, grid_dln_);
           }
+
           Real dtcsiga = dt_*sa;
           Real dtcsigs = dt_*ss;
-          Real omega_cm = solid_angles_.d_view(iang)/SQR(n0_cm);
-          Real intensity_cm = 4.0*M_PI*(i0_(m,nn,k,j,i)/(n0*n_0))*SQR(SQR(n0_cm));
+          Real e_cm = n0_cm*emid_f(ifr);
+          Real i_old = sfac*i0_old;
           Real vncsigma = 1.0/(n0 + (dtcsiga + dtcsigs)*n0_cm);
-          Real q_sh = ShiftedSpectrum(sumA_a, lIb, sp_off, ifr, iang, nfrq_,
-                                      shift_bin(ifr) >= 1.0, freq_scale_,
-                                      dlt_iang, n0_cm, emid_f, grid_dlin_,
-                                      qlo_, qhi_);
-          AmplitudeAccumulate(omega_cm, ss, vncsigma, n0, n0_cm, dtcsiga, ej,
-                              intensity_cm, q_sh, gnum, gden);
-        }
-        // No scattering in this bin leaves g undetermined and unused: the target is
-        // multiplied by dt*sigma_s.
-        gfac(idx) = (gden > 0.0) ? gnum/gden : 0.0;
-      }
-
-      // Implicit-per-ray update, back-reaction moments and the lepton-number source.
-      // The scattering target is gfac(ifr)*qbar(ifr + delta_iang) -- the field's own
-      // isotropic spectrum at this ray's comoving energy, times the bin's amplitude.
-      for (int ifr=0; ifr<nfrq_; ++ifr) {
-        int idx = sp_off + ifr;
-        Real e_mid = emid_f(ifr);
-        for (int iang=0; iang<=nang1; ++iang) {
-          int nn = isp*nfrq_*nang_ + ifr*nang_ + iang;
-          Real n_0 = n_0_iang(iang);
-          Real n0_cm = n0_cm_iang(iang);
-          Real n_1 = tc(m,0,1,k,j,i)*nh_c_.d_view(iang,0) +
-                     tc(m,1,1,k,j,i)*nh_c_.d_view(iang,1) +
-                     tc(m,2,1,k,j,i)*nh_c_.d_view(iang,2) +
-                     tc(m,3,1,k,j,i)*nh_c_.d_view(iang,3);
-          Real n_2 = tc(m,0,2,k,j,i)*nh_c_.d_view(iang,0) +
-                     tc(m,1,2,k,j,i)*nh_c_.d_view(iang,1) +
-                     tc(m,2,2,k,j,i)*nh_c_.d_view(iang,2) +
-                     tc(m,3,2,k,j,i)*nh_c_.d_view(iang,3);
-          Real n_3 = tc(m,0,3,k,j,i)*nh_c_.d_view(iang,0) +
-                     tc(m,1,3,k,j,i)*nh_c_.d_view(iang,1) +
-                     tc(m,2,3,k,j,i)*nh_c_.d_view(iang,2) +
-                     tc(m,3,3,k,j,i)*nh_c_.d_view(iang,3);
-          Real domega = solid_angles_.d_view(iang);
-
-          m_old[0] += i0_(m,nn,k,j,i)*domega;
-          m_old[1] += n_1*i0_(m,nn,k,j,i)/n_0*domega;
-          m_old[2] += n_2*i0_(m,nn,k,j,i)/n_0*domega;
-          m_old[3] += n_3*i0_(m,nn,k,j,i)/n_0*domega;
-
-          Real sa = sigma_a(idx), ss = sigma_s(idx), ej = eq_j(idx);
-          if (shift_bin(ifr) >= 1.0) {
-            // This ray's bin covers comoving n0_cm*[e_lo, e_hi]; on a log grid that
-            // is a rigid shift by dlt_iang bins (see ShiftedBinValue).
-            Real xpos, jac = 1.0;
-            if (freq_scale_ == 1) {
-              xpos = static_cast<Real>(ifr) + dlt_iang(iang);
-            } else {
-              xpos = static_cast<Real>(ifr) + (n0_cm - 1.0)*e_mid/grid_dlin_;
-              jac = n0_cm;  // linear bins do not carry the width stretch themselves
-            }
-            // A ray at rest reads the tabulated value back exactly.
-            if (fabs(xpos - static_cast<Real>(ifr)) > 1.0e-12) {
-              sa = ShiftedBinValue(sigma_a, lsa, sp_off, 1, nfrq_-1, xpos);
-              ss = ShiftedBinValue(sigma_s, lss, sp_off, 1, nfrq_-1, xpos);
-              ej = jac*ShiftedBinValue(eq_j, lej, sp_off, 1, nfrq_-1, xpos);
-            }
-          }
-          // A comoving-isotropic field gives gfac == 1 and q_sh == this ray's own bin
-          // content, so it is an exact fixed point ray by ray, not just in the sum.
-          Real qsh = gfac(idx)*ShiftedSpectrum(sumA_a, lIb, sp_off, ifr, iang, nfrq_,
-                                               shift_bin(ifr) >= 1.0, freq_scale_,
-                                               dlt_iang, n0_cm, emid_f, grid_dlin_,
-                                               qlo_, qhi_);
-          Real dtcsiga = dt_*sa;
-          Real dtcsigs = dt_*ss;
-          Real intensity_cm_old = 4.0*M_PI*(i0_(m,nn,k,j,i)/(n0*n_0))*SQR(SQR(n0_cm));
-          Real omega_cm = domega/SQR(n0_cm);
-          Real e_cm = n0_cm*e_mid;
-
-          Real vncsigma = 1.0/(n0 + (dtcsiga + dtcsigs)*n0_cm);
-          Real di_cm = ((dtcsigs*qsh + dtcsiga*ej -
-                         (dtcsigs + dtcsiga)*intensity_cm_old)*n0_cm*vncsigma);
-          i0_(m,nn,k,j,i) = n0*n_0*fmax(i0_(m,nn,k,j,i)/(n0*n_0) +
-                             di_cm/(4.0*M_PI*SQR(SQR(n0_cm))), 0.0);
+          // A comoving-isotropic field makes jr the common spectrum, so jr read at this
+          // ray's own comoving energy is this ray's own bin content and the source
+          // vanishes ray by ray, not merely in the angular sum.
+          Real di_cm = ((dtcsigs*jr + dtcsiga*ej -
+                         (dtcsigs + dtcsiga)*i_old)*n0_cm*vncsigma);
+          Real i_new = fmax(i_old + di_cm, 0.0);
+          i0_(m,nn,k,j,i) = i_new/sfac;
 
           if (isp < 4) {
-            Real intensity_cm_new = 4.0*M_PI*(i0_(m,nn,k,j,i)/(n0*n_0))*SQR(SQR(n0_cm));
-            dN_rad_moment[isp] += (intensity_cm_new - intensity_cm_old)*omega_cm/
-                                  fmax(e_cm, 1.0e-100);
+            // Differenced on the stored field, at the bin's own comoving energy.  No
+            // rebinned spectrum is involved, so this is exactly consistent with the
+            // energy the same difference hands the fluid below.
+            dN_rad_moment[isp] += (i_new - i_old)*omega_cm/fmax(e_cm, 1.0e-100);
           }
 
           m_new[0] += i0_(m,nn,k,j,i)*domega;
@@ -837,6 +799,7 @@ TaskStatus Radiation::MultiFreqRadFluidCouplingNurates(Driver *pdriver, int stag
 
   return TaskStatus::complete;
 }
+
 
 } // namespace radiation
 

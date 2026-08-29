@@ -26,6 +26,7 @@
 #include "config.hpp"
 #if ENABLE_NURATES
 #include "geodesic-grid/gauss_legendre.hpp"
+#include "radiation/radiation_nurates_remap.hpp"
 #endif
 
 namespace radiation {
@@ -158,18 +159,36 @@ Radiation::Radiation(MeshBlockPack *ppack, ParameterInput *pin) :
     }
 
 #if ENABLE_NURATES
-    // The frame-consistent nurates source term needs the ray's Doppler shift to be
-    // a rigid translation in bin index, which only a log grid gives.  On a linear
-    // grid the displacement (n0_cm-1)*e_mid/dlin grows with the bin energy -- 9.5
-    // bins for the top group of a [10, 2000] MeV, nfreq = 24 grid at v = 0.5 -- so
-    // the lookup extrapolates far outside the grid and the un-shift/re-shift pair
-    // that makes comoving isotropy a fixed point stops closing: measured round-trip
-    // error 6e-2 at v = 0.01 and 1e94 at v = 0.1 on the top groups.  Refuse it
-    // rather than return silent garbage.
+    // The nurates source term solves on the fixed comoving grid, and it gets there by
+    // rebinning each ray by the rigid displacement ln(n0_cm)/dlnnu.  That displacement is
+    // one number per ray only on a log grid; on a linear grid it grows with the bin
+    // energy -- 9.5 bins for the top group of a [10, 2000] MeV, nfreq = 24 grid at
+    // v = 0.5 -- so the rebin is no longer a translation and the round trip stops
+    // closing.  Refuse it rather than return silent garbage.
     if (use_nurates && flag_fscale != 1) {
       std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
                 << std::endl
                 << "use_nurates with multi_freq requires <radiation>/freq_scale = log"
+                << std::endl;
+      std::exit(EXIT_FAILURE);
+    }
+    // Every bin is in the geometric family on the neutrino grid, so the rebin acts on
+    // bins 0 .. nfreq-1.  The four-point stencil of RemapBinValue needs four of them.
+    if (use_nurates && nfreq < 4) {
+      std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+                << std::endl
+                << "use_nurates with multi_freq requires <radiation>/nfreq >= 4"
+                << std::endl;
+      std::exit(EXIT_FAILURE);
+    }
+    // A neutrino grid is geometric over the whole of [nu_min, nu_max], so nu_min is a
+    // real bin edge rather than the top of a [0, nu_min] catch-all.  It must be positive:
+    // ln(nu_min) sets the grid spacing and the rigid Doppler displacement derived from
+    // it, and at nu_min = 0 both are -inf.
+    if (use_nurates && nu_min <= 0.0) {
+      std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+                << std::endl
+                << "use_nurates with multi_freq requires <radiation>/nu_min > 0"
                 << std::endl;
       std::exit(EXIT_FAILURE);
     }
@@ -181,6 +200,21 @@ Radiation::Radiation(MeshBlockPack *ppack, ParameterInput *pin) :
 
     // flag for frequency fluxes
     freq_fluxes = pin->GetOrAddBoolean("radiation","freq_fluxes",true);
+#if ENABLE_NURATES
+    // Frequency advection closes the bottom of the grid by assuming no flux through
+    // freq_grid(0) -- exact for photons, where that edge is nu = 0, but on the neutrino
+    // grid it is nu_min, so the assumption turns the lowest bin into a reservoir.  The
+    // default here is true, so a run that simply omits the key would get that silently.
+    if (use_nurates && freq_fluxes) {
+      std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+                << std::endl
+                << "use_nurates with multi_freq requires <radiation>/freq_fluxes = false:"
+                << std::endl
+                << "the nu = 0 boundary it assumes does not exist on a neutrino grid"
+                << std::endl;
+      std::exit(EXIT_FAILURE);
+    }
+#endif
   } // endif (multi_freq)
 
   // Enable radiation source term (radiation+(M)HD) by default if hydro or mhd enabled
@@ -527,6 +561,8 @@ Radiation::Radiation(MeshBlockPack *ppack, ParameterInput *pin) :
       Kokkos::realloc(nurates_abs_0_freq,  nmb, nspecies, nfreq, ncells3, ncells2, ncells1);
       Kokkos::realloc(nurates_abs_1_freq,  nmb, nspecies, nfreq, ncells3, ncells2, ncells1);
       Kokkos::realloc(nurates_scat_1_freq, nmb, nspecies, nfreq, ncells3, ncells2, ncells1);
+      int nwork = NURATES_MF_WORK_SIZE(nfreq, prgeo->nangles);
+      Kokkos::realloc(nurates_mf_work, nmb, nwork, ncells3, ncells2, ncells1);
     }
   }
 #endif
