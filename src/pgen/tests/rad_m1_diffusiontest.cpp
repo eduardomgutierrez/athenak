@@ -16,7 +16,7 @@
 //  S != 1 -- the combination no other test in the suite has, and the only thing that
 //  can choose between the competing closure definitions in radiation_nurates.hpp.
 //  The spectrum is a Gaussian in ln(E) sampled at bin midpoints, so ln(qbar) is
-//  exactly quadratic in the bin index and the log-space cubic in ShiftedBinValue
+//  exactly quadratic in the bin index and the log-space cubic in RemapBinValue
 //  reproduces it, and its shift by ln(n0_cm)/dlnnu, to roundoff.  The frequency
 //  machinery is then exact by construction and the run measures the closure alone.
 //
@@ -387,11 +387,15 @@ void ProblemGenerator::RadiationM1DiffusionTest(ParameterInput *pin, const bool 
     if (pmbp->prad->flag_fscale != 1 || nfreq_in < 4) {
       std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
                 << std::endl << "the spectral diffusion test needs "
-                << "<radiation>/freq_scale = log and nfreq >= 5" << std::endl;
+                << "<radiation>/freq_scale = log and nfreq >= 4" << std::endl;
       exit(EXIT_FAILURE);
     }
-    ln_numin = std::log(pmbp->prad->nu_min);
-    dln = std::log(pmbp->prad->nu_max/pmbp->prad->nu_min)/(nfreq_in - 1);
+    // grid_nu_min, not nu_min: SetFrequencyGrid rescales the bounds by nu_unit when a
+    // <units> block is present, and this analytic reference has to sit on the grid the
+    // code actually built.  dln is scale-invariant and survives either way; ln_numin is
+    // not.  The kernel takes the same pair for the same reason.
+    ln_numin = std::log(pmbp->prad->grid_nu_min);
+    dln = std::log(pmbp->prad->grid_nu_max/pmbp->prad->grid_nu_min)/(nfreq_in - 1);
   }
 
   dvars.ic = ic;

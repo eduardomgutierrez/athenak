@@ -320,6 +320,15 @@ TaskStatus Radiation::RadFluidCoupling(Driver *pdriver, int stage) {
         Real dm1 = m_old[1] - m_new[1];
         Real dm2 = m_old[2] - m_new[2];
         Real dm3 = m_old[3] - m_new[3];
+        // Valencia (dyngr) stores sqrt(gamma)*(E-D) and sqrt(gamma)*S_k; HARM stores
+        // T^t_t + D and T^t_k.  dm* are undensitised coordinate-frame -Delta R^t_mu, so
+        // the sign flip below is the two conventions, not a typo.  The general Valencia
+        // increments are sqrt(gamma)*(-dm0 + beta^k dm_k) and sqrt(gamma)*alpha*dm_k --
+        // which is what is written here only because the radiation module runs on the
+        // analytic Cartesian Kerr-Schild metric, where det g = -1 so alpha*sqrt(gamma)
+        // = 1: the 1/alpha IS the sqrt(gamma), and the momentum needs no factor.  On any
+        // metric with sqrt(-g) != 1 this is wrong (as is taking alpha, beta and the
+        // tetrad from the analytic background at all).
         if (is_dyngr) {
           u0_(m,IEN,k,j,i) += (1.0/alpha)*(-dm0+beta_u[0]*dm1+beta_u[1]*dm2+beta_u[2]*dm3);
         } else {
@@ -420,6 +429,11 @@ TaskStatus Radiation::RadFluidCoupling(Driver *pdriver, int stage) {
           Real dm2 = m_old[2] - m_new[2];
           Real dm3 = m_old[3] - m_new[3];
           if (is_dyngr) {
+            // alpha*sqrt(gamma) = 1 on this module's analytic Kerr-Schild metric (det
+            // g = -1),
+            // so the 1/alpha here IS the sqrt(gamma) the Valencia variables need, and the
+            // momentum below needs no factor.  See radiation_source_nurates.cpp for the
+            // full derivation; this is wrong on any metric with sqrt(-g) != 1.
             u0_(m,IEN,k,j,i) += (1.0/alpha)*(-dm0+beta_u[0]*dm1+beta_u[1]*dm2+beta_u[2]*dm3);
           } else {
             u0_(m,IEN,k,j,i) += dm0;

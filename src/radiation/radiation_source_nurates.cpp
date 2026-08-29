@@ -282,6 +282,15 @@ TaskStatus Radiation::RadFluidCouplingNurates(Driver *pdriver, int stage) {
       Real dm1 = m_old[1] - m_new[1];
       Real dm2 = m_old[2] - m_new[2];
       Real dm3 = m_old[3] - m_new[3];
+      // Valencia (dyngr) stores sqrt(gamma)*(E-D) and sqrt(gamma)*S_k; HARM stores
+      // T^t_t + D and T^t_k.  dm* are undensitised coordinate-frame -Delta R^t_mu, so
+      // the sign flip below is the two conventions, not a typo.  The general Valencia
+      // increments are sqrt(gamma)*(-dm0 + beta^k dm_k) and sqrt(gamma)*alpha*dm_k --
+      // which is what is written here only because the radiation module runs on the
+      // analytic Cartesian Kerr-Schild metric, where det g = -1 so alpha*sqrt(gamma)
+      // = 1: the 1/alpha IS the sqrt(gamma), and the momentum needs no factor.  On any
+      // metric with sqrt(-g) != 1 this is wrong (as is taking alpha, beta and the
+      // tetrad from the analytic background at all).
       if (is_dyngr) {
         u0_(m,IEN,k,j,i) += (1.0/alpha)*(-dm0+beta_u[0]*dm1+beta_u[1]*dm2+beta_u[2]*dm3);
       } else {
@@ -719,14 +728,24 @@ TaskStatus Radiation::MultiFreqRadFluidCouplingNurates(Driver *pdriver, int stag
           // vanishes ray by ray, not merely in the angular sum.
           Real di_cm = ((dtcsigs*jr + dtcsiga*ej -
                          (dtcsigs + dtcsiga)*i_old)*n0_cm*vncsigma);
-          Real i_new = fmax(i_old + di_cm, 0.0);
-          i0_(m,nn,k,j,i) = i_new/sfac;
+          // Apply the increment to the *stored* value rather than dividing the updated
+          // comoving value back.  (sfac*x)/sfac differs from x for ~11% of arguments in
+          // IEEE double, so the round trip would perturb every bin by an ulp on every
+          // stage even where the source vanishes exactly -- and a vanishing source
+          // leaving the field alone is the invariant the whole scheme rests on.  sfac
+          // carries the sign of 1/(n0*n_0) and i0_ carries the sign of n0*n_0, so the
+          // floor belongs on the comoving intensity, which is what is tested here.
+          Real i_new = i_old + di_cm;
+          Real i0_new = (i_new > 0.0) ? (i0_old + di_cm/sfac) : 0.0;
+          i0_(m,nn,k,j,i) = i0_new;
 
           if (isp < 4) {
-            // Differenced on the stored field, at the bin's own comoving energy.  No
-            // rebinned spectrum is involved, so this is exactly consistent with the
-            // energy the same difference hands the fluid below.
-            dN_rad_moment[isp] += (i_new - i_old)*omega_cm/fmax(e_cm, 1.0e-100);
+            // Differenced on the stored field, at the bin's own comoving energy, so
+            // this is the *same* difference the energy moments below take -- including
+            // where the floor binds, which the raw increment di_cm would miss.  No
+            // rebinned spectrum is involved anywhere in either.
+            dN_rad_moment[isp] +=
+                sfac*(i0_new - i0_old)*omega_cm/fmax(e_cm, 1.0e-100);
           }
 
           m_new[0] += i0_(m,nn,k,j,i)*domega;
@@ -754,6 +773,15 @@ TaskStatus Radiation::MultiFreqRadFluidCouplingNurates(Driver *pdriver, int stag
       Real dm1 = m_old[1] - m_new[1];
       Real dm2 = m_old[2] - m_new[2];
       Real dm3 = m_old[3] - m_new[3];
+      // Valencia (dyngr) stores sqrt(gamma)*(E-D) and sqrt(gamma)*S_k; HARM stores
+      // T^t_t + D and T^t_k.  dm* are undensitised coordinate-frame -Delta R^t_mu, so
+      // the sign flip below is the two conventions, not a typo.  The general Valencia
+      // increments are sqrt(gamma)*(-dm0 + beta^k dm_k) and sqrt(gamma)*alpha*dm_k --
+      // which is what is written here only because the radiation module runs on the
+      // analytic Cartesian Kerr-Schild metric, where det g = -1 so alpha*sqrt(gamma)
+      // = 1: the 1/alpha IS the sqrt(gamma), and the momentum needs no factor.  On any
+      // metric with sqrt(-g) != 1 this is wrong (as is taking alpha, beta and the
+      // tetrad from the analytic background at all).
       if (is_dyngr) {
         u0_(m,IEN,k,j,i) += (1.0/alpha)*(-dm0+beta_u[0]*dm1+beta_u[1]*dm2+beta_u[2]*dm3);
       } else {

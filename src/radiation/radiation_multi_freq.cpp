@@ -668,6 +668,11 @@ TaskStatus Radiation::MultiFreqRadFluidCoupling(Driver *pdriver, int stage) {
             Real dm1 = m_old[1] - m_new[1];
             Real dm2 = m_old[2] - m_new[2];
             Real dm3 = m_old[3] - m_new[3];
+            // alpha*sqrt(gamma) = 1 on this module's analytic Kerr-Schild metric (det
+            // g = -1),
+            // so the 1/alpha here IS the sqrt(gamma) the Valencia variables need, and the
+            // momentum below needs no factor.  See radiation_source_nurates.cpp for the
+            // full derivation; this is wrong on any metric with sqrt(-g) != 1.
             u0_(m,IEN,k,j,i) += (1.0/alpha)*(-dm0+beta_u[0]*dm1+beta_u[1]*dm2+beta_u[2]*dm3);
           } else {
             u0_(m,IEN,k,j,i) += dm0;
@@ -863,7 +868,8 @@ TaskStatus Radiation::MultiFreqRadFluidCoupling(Driver *pdriver, int stage) {
                 c1_f = ((ifr == 1) && (n_fm1h > n_fp1h)) ? 0 : -coeff_bf + delta_f*coeff_cf;
 
                 if (ifr < nfreq1-1) {
-                  // c2_f = (coeff_af + coeff_bf + coeff_bfp1 + (1-delta_f)*coeff_cf - delta_fp1*coeff_cfp1);
+                  // c2_f = (coeff_af + coeff_bf + coeff_bfp1 + (1-delta_f)*coeff_cf -
+                  // delta_fp1*coeff_cfp1);
                   c2_f = ((ifr == 1) && (n_fm1h > n_fp1h)) ? (coeff_af + coeff_bfp1 - delta_fp1*coeff_cfp1)
                          : (coeff_af + coeff_bf + coeff_bfp1 + (1-delta_f)*coeff_cf - delta_fp1*coeff_cfp1);
                 } else { // (ifr==nfreq1-1)
@@ -922,9 +928,11 @@ TaskStatus Radiation::MultiFreqRadFluidCoupling(Driver *pdriver, int stage) {
 
 
               ir_cm_update(iang,ifr) += (jr_cm_new(ifr) - jr_cm_old(ifr)) / (nang*domega_cm/(4*M_PI)); // isotropically
-              // ir_cm_update(iang,ifr) *= jr_cm_new(ifr)/jr_cm_old(ifr); // maintain original angular distribution
+              // ir_cm_update(iang,ifr) *= jr_cm_new(ifr)/jr_cm_old(ifr); // maintain
+              // original angular distribution
 
-              // when radiation is advection-dominated, comoving intensity can be very small
+              // when radiation is advection-dominated, comoving intensity can be very
+              // small
               Real ir_cm_min = fmin(FLT_MIN, fabs(jr_cm_old(ifr)));
               ir_cm_update(iang,ifr) = fmax(ir_cm_min, ir_cm_update(iang,ifr));
             } // endfor n
@@ -1032,6 +1040,12 @@ TaskStatus Radiation::MultiFreqRadFluidCoupling(Driver *pdriver, int stage) {
               Real dm1 = m_old[1] - m_new[1];
               Real dm2 = m_old[2] - m_new[2];
               Real dm3 = m_old[3] - m_new[3];
+              // alpha*sqrt(gamma) = 1 on this module's analytic Kerr-Schild metric
+              // (det g = -1),
+              // so the 1/alpha here IS the sqrt(gamma) the Valencia variables need,
+              // and the
+              // momentum below needs no factor.  See radiation_source_nurates.cpp for the
+              // full derivation; this is wrong on any metric with sqrt(-g) != 1.
               u0_(m,IEN,k,j,i) += (1.0/alpha)*(-dm0+beta_u[0]*dm1+beta_u[1]*dm2+beta_u[2]*dm3);
             } else {
               u0_(m,IEN,k,j,i) += dm0;

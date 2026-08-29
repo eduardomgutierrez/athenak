@@ -191,6 +191,9 @@ KOKKOS_INLINE_FUNCTION
 Real RemapBinValue(const QT &q, const QT &lq,
                    const int off, const int flo, const int fhi, const Real xpos,
                    const RemapAsymptote asym, const Real dln) {
+  // Two-point fallback.  Unreachable from the source term, which requires nfreq >= 4, so
+  // it deliberately carries no asymptote handling; anything calling RemapBinValue with a
+  // narrowed [flo, fhi] would need to revisit that.
   if (fhi - flo < 3) {
     int jb = static_cast<int>(Kokkos::floor(xpos));
     if (jb < flo) { jb = flo; }
@@ -276,7 +279,17 @@ Real RemapBinValue(const QT &q, const QT &lq,
   Real qlo = Kokkos::fmin(Kokkos::fmin(q(a), q(b)), Kokkos::fmin(q(c), q(d)));
   Real qhi = Kokkos::fmax(Kokkos::fmax(q(a), q(b)), Kokkos::fmax(q(c), q(d)));
   Real lin = w0*q(a) + w1*q(b) + w2*q(c) + w3*q(d);
-  return Kokkos::fmin(Kokkos::fmax(lin, Kokkos::fmax(qlo, 0.0)), qhi);
+  Real val = Kokkos::fmin(Kokkos::fmax(lin, Kokkos::fmax(qlo, 0.0)), qhi);
+  // The nu^4 bound below the grid is a property of the spectrum, not of the
+  // interpolation, so it has to hold on this path too.  Without it a single hole
+  // anywhere in the stencil -- and the update floors i0_ at zero, and jr_cm likewise, so
+  // holes are the normal case on a cold upstream -- returns a value bounded only by the
+  // largest node, i.e. a flat continuation where the spectrum must be decaying.
+  if (t < 0.0 && asym == RemapAsymptote::kSpectrum) {
+    Real cap = (q(a) > 0.0) ? q(a)*Kokkos::exp(t*(4.0*dln)) : 0.0;
+    val = Kokkos::fmin(val, cap);
+  }
+  return val;
 }
 
 }  // namespace radiation

@@ -1,16 +1,18 @@
-# Unit test for the conservative log-space rebin of the nurates multi-frequency
-# source term.
+# Unit test for the frequency lookup of the nurates multi-frequency source term.
 #
-# RemapSpectrumLog and RemapMatchMoments are exercised directly on host mirrors, so no
-# radiation module or EOS table is needed -- the mesh below exists only because AthenaK
-# requires one.  The pgen exits before any evolution.
+# RemapBinValue and RemapFillLogs are exercised directly on host mirrors, so no radiation
+# module or EOS table is needed -- the mesh below exists only because AthenaK requires
+# one.  The pgen exits before any evolution.
 #
-# The check that matters is section 5: N round trips of the rebin, with the drift
-# reported per bin relative to that bin.  The previous attempt at this scheme
-# (wip/cme-multifreq-remap, d6a23510) leaked ~1e-3 of each bin into the one below every
-# RK stage, which is what destroyed the low-energy groups and, through the 1/E weighting
-# of the lepton source, Ye.  No simulation test can see that directly; this one can, and
-# it costs milliseconds.
+# The scheme does not rebin the stored field at all: it evaluates the update's
+# coefficients at each ray's own comoving position.  So the checks are about the lookup
+# and about the invariants that arrangement is supposed to buy -- exactness on a node and
+# on a power law (on and off the grid), comoving isotropy as a fixed point ray by ray,
+# conditioning of the angular sums, positivity through holes, and a vanishing source
+# leaving the stored field bit-identical.  The last one includes the conversion to
+# comoving units and back, which is the only step able to break it.
+#
+# All of it costs milliseconds, and none of it is visible to a simulation test.
 
 <comment>
 problem = conservative log-space rebin for the nurates multi-frequency source term
@@ -70,12 +72,6 @@ vx         = 0.5
 # the neighbouring bin rather than with the bin itself cannot survive it.
 spec_temp  = 12.0
 spec_eta   = 3.0
-
-order_multifreq   = 2
-limiter_multifreq = 2
-
-# Number of forward+inverse rebins in the accumulation test.  A production step is two
-# RK stages, so 1000 trips is ~500 steps' worth of rebin with the source switched off.
 
 # A power law is exact algebra for the log-space cubic: ln(q) is linear in the bin index
 # on a log grid, so the lookup and its shift are exact to roundoff, for point-sampled and

@@ -84,7 +84,7 @@ t0             = 0.0
 spec_width     = 1.3        # standard deviation in units of dlnnu
 spec_peak      = 81.7366    # MeV
 # The grey run gives 2.480037e-02 at these settings and the source term reproduces it to
-# every digit printed, worst group 2.488e-02 -- so the spectrum is preserved and the
+# every digit printed, worst group 2.491e-02 -- so the spectrum is preserved and the
 # tolerances can sit just above the grey answer rather than an order of magnitude out.
 # For the record of what these used to have to allow: the superseded shape-factor closure
 # ran 5% above grey with its excess in the outermost shifted bins, and the variant that

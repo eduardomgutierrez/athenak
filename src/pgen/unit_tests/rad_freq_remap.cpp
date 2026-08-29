@@ -416,19 +416,34 @@ void ProblemGenerator::RadFreqRemap(ParameterInput *pin, const bool restart) {
     q(1) = 0.0;
     radiation::RemapFillLogs(q, lq, 0, 0, nfreq-1);
     bool ok = true;
+    // The nu^4 bound below the grid must survive the holes.  A hole in the stencil takes
+    // the lookup off the log-space path, where the fallback is bounded only by the
+    // tabulated range -- which below the grid is the *largest* node, i.e. no decay at
+    // all.  q(1) = 0 above puts a hole inside the bottom stencil deliberately, so this
+    // exercises that path rather than assuming it is unreachable.
+    bool decays = true;
     Real dlt = log(wl*(1.0+vx))/g.dln;
     for (int f = 0; f < nfreq; ++f) {
       for (Real off : {-dlt, dlt}) {
-        Real got = radiation::RemapBinValue(q, lq, 0, 0, nfreq-1,
-                                            static_cast<Real>(f) + off,
+        Real x = static_cast<Real>(f) + off;
+        Real got = radiation::RemapBinValue(q, lq, 0, 0, nfreq-1, x,
                                             radiation::RemapAsymptote::kSpectrum, g.dln);
         if (!(got >= 0.0) || !std::isfinite(got)) { ok = false; }
+        if (x < 0.0) {
+          Real cap = q(0)*exp(x*(4.0*g.dln));
+          if (!(got <= cap*(1.0 + 1.0e-12))) { decays = false; }
+        }
       }
     }
     ++nrun;
     if (!ok) { ++nfail; }
     std::cout << (ok ? "  [ ok ] " : "  [FAIL] ")
               << "spectrum with holes stays finite and >= 0" << std::endl;
+    ++nrun;
+    if (!decays) { ++nfail; }
+    std::cout << (decays ? "  [ ok ] " : "  [FAIL] ")
+              << "below the grid, holes and all, the continuation decays as nu^4"
+              << std::endl;
 
     for (int f = 0; f < nfreq; ++f) { q(f) = 0.0; }
     radiation::RemapFillLogs(q, lq, 0, 0, nfreq-1);
@@ -456,16 +471,30 @@ void ProblemGenerator::RadFreqRemap(ParameterInput *pin, const bool restart) {
   // means a vanishing source cannot move the field at all, at any velocity.
   std::cout << "-- zero source leaves the stored field bit-identical" << std::endl;
   {
+    // The kernel does not store the comoving intensity: it converts to comoving units,
+    // updates, and converts back.  Both conversions have to be in this check, because
+    // they are the only steps that can break the invariant -- (sfac*x)/sfac is not x for
+    // ~11% of arguments in IEEE double, so a version of pass 3 that divided the updated
+    // comoving value back would fail here while passing any test that omits sfac.
     Real worst = 0.0;
+    Real n0 = 1.0, n_0 = -1.0;           // flat space with this tetrad, as elsewhere here
     for (int a = 0; a < nang; ++a) {
       Real ncm = n0_cm_a(a);
+      Real sfac = 4.0*M_PI*SQR(SQR(ncm))/(n0*n_0);
       for (int f = 0; f < nfreq; ++f) {
-        Real i_old = FermiBin(ncm*g.edges[f], ncm*g.edges[f+1], temp, eta);
+        // The *stored* value, which is what the invariant is about.  Give it the sign of
+        // n0*n_0, which is the convention i0_ is held in, but do NOT build it by dividing
+        // by sfac: sfac*(x/sfac) then /sfac round-trips exactly far more often than a
+        // single conversion pair does, which would make this check pass vacuously.
+        Real i0_old =
+            FermiBin(ncm*g.edges[f], ncm*g.edges[f+1], temp, eta)/(n0*n_0);
         // Exactly the kernel's pass 3 with sigma_a = sigma_s = eta = 0.
-        Real vnc = 1.0/(1.0 + 0.0*ncm);
+        Real i_old = sfac*i0_old;
+        Real vnc = 1.0/(n0 + 0.0*ncm);
         Real di = ((0.0*0.0 + 0.0*0.0 - (0.0 + 0.0)*i_old)*ncm*vnc);
-        Real i_new = fmax(i_old + di, 0.0);
-        worst = fmax(worst, fabs(i_new - i_old));
+        Real i_new = i_old + di;
+        Real i0_new = (i_new > 0.0) ? (i0_old + di/sfac) : 0.0;
+        worst = fmax(worst, fabs(i0_new - i0_old));
       }
     }
     CheckExact("no source: i0_ unchanged, all rays", worst, 0.0);
