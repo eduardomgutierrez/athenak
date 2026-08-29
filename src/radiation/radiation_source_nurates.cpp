@@ -53,9 +53,6 @@ TaskStatus Radiation::RadFluidCouplingNurates(Driver *pdriver, int stage) {
   bool &affect_fluid_ = affect_fluid;
   bool &evolve_ye_ = evolve_ye;
   int ye_source_model_ = ye_source_model;
-  Real &source_Ye_min_ = source_Ye_min;
-  Real &source_Ye_max_ = source_Ye_max;
-  Real &source_limiter_ = source_limiter;
   bool &backreact_chiral_ = backreact_chiral;
   bool is_dyngr = (pmy_pack->pdyngr != nullptr);
 
@@ -282,11 +279,12 @@ TaskStatus Radiation::RadFluidCouplingNurates(Driver *pdriver, int stage) {
       Real dm1 = m_old[1] - m_new[1];
       Real dm2 = m_old[2] - m_new[2];
       Real dm3 = m_old[3] - m_new[3];
-      // Valencia (dyngr) stores sqrt(gamma)*(E-D) and sqrt(gamma)*S_k; HARM stores
-      // T^t_t + D and T^t_k.  dm* are undensitised coordinate-frame -Delta R^t_mu, so
-      // the sign flip below is the two conventions, not a typo.  The general Valencia
-      // increments are sqrt(gamma)*(-dm0 + beta^k dm_k) and sqrt(gamma)*alpha*dm_k --
-      // which is what is written here only because the radiation module runs on the
+      // dm_mu is the undensitised coordinate-frame -Delta R^t_mu, so the fluid gains
+      // Delta T^t_mu = dm_mu.  Valencia carries sqrt(gamma)*(E-D) and sqrt(gamma)*S_k,
+      // and E = -T^t_t + beta^k T^t_k, which is where the minus sign comes from; HARM
+      // carries T^t_t + D and T^t_k instead, hence the branch.  The general Valencia
+      // increments are sqrt(gamma)*(-dm0 + beta^k dm_k) and sqrt(gamma)*alpha*dm_k;
+      // they take the form below only because the radiation module runs on the
       // analytic Cartesian Kerr-Schild metric, where det g = -1 so alpha*sqrt(gamma)
       // = 1: the 1/alpha IS the sqrt(gamma), and the momentum needs no factor.  On any
       // metric with sqrt(-g) != 1 this is wrong (as is taking alpha, beta and the
@@ -322,38 +320,18 @@ TaskStatus Radiation::RadFluidCouplingNurates(Driver *pdriver, int stage) {
         // 'opacity' -- the default -- short by exactly W, so the two routes disagreed
         // on a moving fluid and only one of them was right.  Same form as the
         // multifrequency path below; keep them textually identical.
+        // Applied in full.  Any cap on this increment that is not matched by the same
+        // cap on the neutrino field destroys lepton number: the neutrinos have already
+        // been updated by dN_nue and dN_anue by this point, so whatever the fluid does
+        // not accept is simply lost -- and the energy and momentum above are not capped
+        // either, which would leave the lepton exchange inconsistent with the energy
+        // exchange that produced it.
         Real dDYe = gamma*mb_code_*(-dN_nue + dN_anue);
-
-        Real cons_dens = u0_(m,IDN,k,j,i);
-        if (cons_dens > 0.0) {
-          Real ye_old = w0_(m,IYF,k,j,i);
-          // u0_(IYF) stores the conserved scalar D*Ye, so convert the
-          // number-density source through the conserved density.
-          Real raw_dDYe = dDYe;
-          if (source_limiter_ >= 0.0) {
-            Real raw_dYe = raw_dDYe/cons_dens;
-            Real theta = 1.0;
-            if (raw_dYe > 0.0) {
-              theta = fmin(theta, source_limiter_*
-                                  fmax(source_Ye_max_ - ye_old, 0.0)/raw_dYe);
-            } else if (raw_dYe < 0.0) {
-              theta = fmin(theta, source_limiter_*
-                                  fmin(source_Ye_min_ - ye_old, 0.0)/raw_dYe);
-            }
-            raw_dDYe *= fmax(theta, 0.0);
-          }
-          Real ye_new = ye_old + raw_dDYe/cons_dens;
-          ye_new = fmin(fmax(ye_new, source_Ye_min_), source_Ye_max_);
-          Real dDYe_applied = cons_dens*(ye_new - ye_old);
-          u0_(m,IYF,k,j,i) += dDYe_applied;
-          // The weak reactions that convert protons to neutrons also flip
-          // electron chirality, so the chiral imbalance Y5 is sourced with the
-          // opposite sign to Ye.  Using the increment that was actually applied
-          // means Y5 inherits the source_limiter / source_Ye_min / source_Ye_max
-          // protections for free.
-          if (backreact_chiral_) {
-            u0_(m,IYF+1,k,j,i) -= dDYe_applied;
-          }
+        u0_(m,IYF,k,j,i) += dDYe;
+        // The weak reactions that convert protons to neutrons also flip electron
+        // chirality, so the chiral imbalance Y5 is sourced with the opposite sign to Ye.
+        if (backreact_chiral_) {
+          u0_(m,IYF+1,k,j,i) -= dDYe;
         }
       }
     }
@@ -373,11 +351,7 @@ TaskStatus Radiation::RadFluidCouplingNurates(Driver *pdriver, int stage) {
 //! i0_ is stored in *lab* frequency bins; bns_nurates tabulates sigma_a, sigma_s and eta
 //! on freq_grid in *comoving* MeV.  Lab bin ifr covers the comoving interval
 //! n0_cm(iang)*[e_lo, e_hi], a different interval on every ray, so the two cannot be
-//! combined as they stand.  Applying the opacities to i0_ directly -- what the baseline
-//! did -- drives every operator toward something independent of ray index, whereas the
-//! physically correct state, comoving isotropy, is not: on a pure elastic scattering test
-//! whose exact answer is that nothing happens, the baseline produces a spurious comoving
-//! flux of 0.164 v, first order in v and independent of angular resolution.
+//! combined as they stand.
 //!
 //! ## The passes
 //!
@@ -395,10 +369,10 @@ TaskStatus Radiation::RadFluidCouplingNurates(Driver *pdriver, int stage) {
 //!         jr_cm(g) = [sum_a w_a vnc_a (n0 I_a + n0_cm_a dt eta)]
 //!                  / [1 - sum_a w_a vnc_a n0_cm_a dt sigma_s]
 //!
-//!     That is the baseline's algebra, but now applied to intensities that are at the
-//!     same energy, so it is the plain unweighted angular mean and there is nothing to
-//!     choose.  Comoving isotropy, the grey limit, finiteness at sigma_s = 0 and
-//!     isoenergeticity all follow from that and need no construction.
+//!     Because these intensities are all at the same energy this is the plain unweighted
+//!     angular mean, and there is nothing to choose.  Comoving isotropy, the grey limit,
+//!     finiteness at sigma_s = 0 and isoenergeticity all follow from that and need no
+//!     construction.
 //!  3. **Update the stored bins.** For ray a's bin ifr, sitting at fixed-grid position
 //!     x = ifr + delta_a, the opacities, the equilibrium spectrum and jr_cm are read at
 //!     x and the implicit update is applied to i0_ in place.
@@ -412,27 +386,14 @@ TaskStatus Radiation::RadFluidCouplingNurates(Driver *pdriver, int stage) {
 //! up, and it keeps every remap out of the conservation path: the energy, the momentum
 //! and the lepton number handed to the fluid are all differences of the stored field.
 //!
-//! ## What replaced the shape factor
-//!
-//! The previous scheme reconstructed the target as gfac(ifr)*qbar(ifr + delta), an
-//! amplitude solved per bin times a shifted spectrum.  Both of gfac's angular sums divide
-//! by that ray's own qbar, and once the spectrum spans enough decades they collapse onto
-//! the single most redshifted ray -- so the "angular mean" became one ray's value, worth
-//! 47x to 137x the grey L1 error, and with sigma_s ~ E^2 in a moving fluid it went
-//! non-finite.  Here the mean intensity is solved for directly and read at x; nothing is
-//! divided by a per-ray spectrum, so there is no such conditioning.
-//!
-//! Full derivation, including the fluid coupling and why the field itself is never
-//! rebinned, in notes/multifreq-comoving-solve.md in the ChiralDynamo superproject.
-//!
 //! ## The whole grid is in the family
 //!
 //! On the neutrino grid freq_grid(0) = nu_min, so every bin is geometric and every bin is
 //! displaced by the same delta_a.  There is no exception to carve out.  The photon grid
 //! keeps its [0, nu_min] bin, which needs one and which SetFrequencyGrid still builds;
-//! this path does not, and used to pay for it by solving bin 0 unshifted in its own lab
-//! bin -- the frame-inconsistent baseline treatment, on a bin that was not empty in
-//! practice, and the source of an nfreq-independent floor under the isotropy test.
+//! this path does not.  A bin outside the geometric family has no delta_a and could only
+//! be solved unshifted in its own lab bin, which is frame-inconsistent and puts an
+//! nfreq-independent floor under the isotropy test.
 
 TaskStatus Radiation::MultiFreqRadFluidCouplingNurates(Driver *pdriver, int stage) {
   if (!(rad_source)) {
@@ -458,9 +419,6 @@ TaskStatus Radiation::MultiFreqRadFluidCouplingNurates(Driver *pdriver, int stag
   bool &fixed_fluid_ = fixed_fluid;
   bool &affect_fluid_ = affect_fluid;
   bool &evolve_ye_ = evolve_ye;
-  Real &source_Ye_min_ = source_Ye_min;
-  Real &source_Ye_max_ = source_Ye_max;
-  Real &source_limiter_ = source_limiter;
   bool &backreact_chiral_ = backreact_chiral;
   bool is_dyngr = (pmy_pack->pdyngr != nullptr);
 
@@ -773,11 +731,12 @@ TaskStatus Radiation::MultiFreqRadFluidCouplingNurates(Driver *pdriver, int stag
       Real dm1 = m_old[1] - m_new[1];
       Real dm2 = m_old[2] - m_new[2];
       Real dm3 = m_old[3] - m_new[3];
-      // Valencia (dyngr) stores sqrt(gamma)*(E-D) and sqrt(gamma)*S_k; HARM stores
-      // T^t_t + D and T^t_k.  dm* are undensitised coordinate-frame -Delta R^t_mu, so
-      // the sign flip below is the two conventions, not a typo.  The general Valencia
-      // increments are sqrt(gamma)*(-dm0 + beta^k dm_k) and sqrt(gamma)*alpha*dm_k --
-      // which is what is written here only because the radiation module runs on the
+      // dm_mu is the undensitised coordinate-frame -Delta R^t_mu, so the fluid gains
+      // Delta T^t_mu = dm_mu.  Valencia carries sqrt(gamma)*(E-D) and sqrt(gamma)*S_k,
+      // and E = -T^t_t + beta^k T^t_k, which is where the minus sign comes from; HARM
+      // carries T^t_t + D and T^t_k instead, hence the branch.  The general Valencia
+      // increments are sqrt(gamma)*(-dm0 + beta^k dm_k) and sqrt(gamma)*alpha*dm_k;
+      // they take the form below only because the radiation module runs on the
       // analytic Cartesian Kerr-Schild metric, where det g = -1 so alpha*sqrt(gamma)
       // = 1: the 1/alpha IS the sqrt(gamma), and the momentum needs no factor.  On any
       // metric with sqrt(-g) != 1 this is wrong (as is taking alpha, beta and the
@@ -796,30 +755,12 @@ TaskStatus Radiation::MultiFreqRadFluidCouplingNurates(Driver *pdriver, int stag
         Real dN_anue = dN_rad_moment[1];
         // dN_rad_moment is comoving; IYF holds D*Ye = rho*W*Ye, so the increment
         // carries a factor W.  Matches the grey path above.
+        // Applied in full; see the grey path above for why it is not capped.
         Real dDYe = gamma*mb_code_*(-dN_nue + dN_anue);
-        Real cons_dens = u0_(m,IDN,k,j,i);
-        if (cons_dens > 0.0) {
-          Real ye_old = w0_(m,IYF,k,j,i);
-          if (source_limiter_ >= 0.0) {
-            Real raw_dYe = dDYe/cons_dens;
-            Real theta = 1.0;
-            if (raw_dYe > 0.0) {
-              theta = fmin(theta, source_limiter_*
-                                  fmax(source_Ye_max_ - ye_old, 0.0)/raw_dYe);
-            } else if (raw_dYe < 0.0) {
-              theta = fmin(theta, source_limiter_*
-                                  fmin(source_Ye_min_ - ye_old, 0.0)/raw_dYe);
-            }
-            dDYe *= fmax(theta, 0.0);
-          }
-          Real ye_new = ye_old + dDYe/cons_dens;
-          ye_new = fmin(fmax(ye_new, source_Ye_min_), source_Ye_max_);
-          Real dDYe_applied = cons_dens*(ye_new - ye_old);
-          u0_(m,IYF,k,j,i) += dDYe_applied;
-          // Y5 mirrors the applied Ye increment; see the grey path above.
-          if (backreact_chiral_) {
-            u0_(m,IYF+1,k,j,i) -= dDYe_applied;
-          }
+        u0_(m,IYF,k,j,i) += dDYe;
+        // Y5 mirrors the Ye increment; see the grey path above.
+        if (backreact_chiral_) {
+          u0_(m,IYF+1,k,j,i) -= dDYe;
         }
       }
     }

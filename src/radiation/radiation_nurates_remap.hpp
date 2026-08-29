@@ -64,9 +64,6 @@
 //!     are exactly conservative and exactly consistent with each other, with no remap
 //!     anywhere in the conservation path.
 //!
-//! The derivation, the fluid coupling and every measurement quoted here are in
-//! notes/multifreq-comoving-solve.md in the ChiralDynamo superproject.
-//!
 //! Templated on the array type so the kernel (team scratch) and the unit test (host
 //! mirrors) run the same code; see pgen/unit_tests/rad_freq_remap.cpp.
 
@@ -183,9 +180,9 @@ enum class RemapAsymptote { kOpacity, kSpectrum };
 //! The low-energy bound is the physics, not a numerical guard.  A bin-integrated
 //! intensity decays at least as fast as nu^4 going down -- I_nu = nu^3 f with f a bounded
 //! occupation increasing as nu falls, so d ln I/d ln nu <= 3 with equality attained as
-//! nu -> 0, and the log bin width adds the fourth power.  Capping there forces decay,
-//! where the old rule only forbade growth, and it costs nothing: measured, the p = 0
-//! spectral diffusion test is unchanged to seven digits.
+//! nu -> 0, and the log bin width adds the fourth power.  Capping there forces decay
+//! rather than merely forbidding growth, and it costs nothing: the p = 0 spectral
+//! diffusion test is unchanged to seven digits by it.
 template <class QT>
 KOKKOS_INLINE_FUNCTION
 Real RemapBinValue(const QT &q, const QT &lq,
@@ -227,12 +224,12 @@ Real RemapBinValue(const QT &q, const QT &lq,
       // I_nu = nu^3 f with f a bounded occupation increasing as nu falls, so the bin
       // integral's log-slope tends to 4 from below -- and because its slope is positive
       // the continuation can only fall going down, whatever the data does.  That is what
-      // makes it safe, and it is why there is no longer a hand-imposed "may not grow
-      // outward" clamp here: continuing the *measured* slope downward on the shock's cold
-      // upstream, where the whole grid sits on a falling tail, points the wrong way and
-      // reached Sx = 1e187 with NANS_IN_CONS from cycle 4.  The nu^4 line forbids that by
-      // construction rather than by fiat, and it is strictly stronger than the old clamp,
-      // which only forbade growth and did not require decay.
+      // makes it safe, and it is why no hand-imposed "may not grow outward" clamp is
+      // needed: continuing the *measured* slope downward on the shock's cold upstream,
+      // where the whole grid sits on a falling tail, points the wrong way and reaches
+      // Sx = 1e187 with NANS_IN_CONS within a few cycles.  The nu^4 line forbids that by
+      // construction, and it is strictly stronger than a no-growth clamp, which would
+      // permit a flat continuation.
       //
       // It is a cap, not a replacement: a spectrum with a sharper low-energy cutoff than
       // a saturating occupation falls faster than nu^4 well before reaching the limit,

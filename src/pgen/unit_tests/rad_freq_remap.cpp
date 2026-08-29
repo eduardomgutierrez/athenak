@@ -334,9 +334,8 @@ void ProblemGenerator::RadFreqRemap(ParameterInput *pin, const bool restart) {
       // jr(g) is clean only for g in [ceil(dmax), floor(nfreq-1+dmin)], because building
       // it un-shifts every ray by -dlt; and the read at f+dlt touches nodes
       // floor(f+dlt)-1 .. floor(f+dlt)+2.  Requiring the second inside the first is
-      // stricter than the two-bin margin this used to carry -- that margin left the
-      // outermost asserted bins reading one extrapolated node apiece, which the previous
-      // closure happened to be forgiving about and this one is not.
+      // stricter than a flat two-bin margin, which would leave the outermost asserted
+      // bins reading one extrapolated node apiece.
       int g_lo = static_cast<int>(ceil(dmax));
       int g_hi = static_cast<int>(floor(static_cast<Real>(nfreq-1) + dmin));
       int b_lo = static_cast<int>(ceil(static_cast<Real>(g_lo) + 2.0 - dmin));
@@ -392,10 +391,11 @@ void ProblemGenerator::RadFreqRemap(ParameterInput *pin, const bool restart) {
       // above is a statement about the grid's margin, not about the scheme.
 
       // ------------------------------------------------------------ 4. conditioning
-      // The question the previous closure failed.  Its target was an amplitude times a
-      // shifted spectrum, and both of the amplitude's angular sums divide by that ray's
-      // own spectrum, so once max/min across the ray set passes ~1e16 every ray but one
-      // falls below the summation rounding.  Here the sums carry the intensity itself.
+      // Conditioning of the angular sums.  A scheme that solved for an amplitude times a
+      // shifted spectrum would divide each sum by that ray's own spectrum, so once
+      // max/min across the ray set passes ~1e16 every ray but one falls below the
+      // summation rounding.  Here the sums carry the intensity itself; this checks that
+      // the spread across rays at the peak bin stays bounded.
       std::cout << "     " << tag << ": angular-sum term spread at the peak bin = "
                 << std::scientific << std::setprecision(3)
                 << spread_hi/fmax(spread_lo, 1.0e-300) << std::endl;

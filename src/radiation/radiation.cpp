@@ -282,10 +282,6 @@ Radiation::Radiation(MeshBlockPack *ppack, ParameterInput *pin) :
                 << std::endl;
       std::exit(EXIT_FAILURE);
     }
-    source_Ye_min = pin->GetOrAddReal("radiation", "source_Ye_min", 0.0);
-    source_Ye_max = pin->GetOrAddReal("radiation", "source_Ye_max", 0.6);
-    source_limiter = pin->GetOrAddReal("radiation", "source_limiter", 0.5);
-
     // Chiral magnetic effect.  Names deliberately match <radiation_m1> so that
     // the same physics reads the same way in both solvers' input files.
     backreact_chiral = pin->GetOrAddBoolean("radiation", "backreact_chiral", false);
