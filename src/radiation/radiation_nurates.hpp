@@ -52,6 +52,15 @@ struct NuratesParams {
   bool use_equilibrium_distribution;  // assume neutrinos in thermal equilibrium
   bool use_kirchhoff_law;    // replace gray emissivities by kappa times equilibrium density
 
+  // Partially-equilibrated (T*, Ye*) emissivity predictor.  Kirchhoff's law is applied
+  // against the blackbody at the state the matter is predicted to reach over the step,
+  // not the state it starts from.  Same names, same defaults and the same meaning as in
+  // radiation_m1/radiation_m1_params.hpp, so one <bns_nurates> block drives both solvers.
+  bool use_partial_equilibrium;
+  Real peq_w_floor;    // tier-0 gate: skip the cell outright below this weight
+  Real peq_dlnT_tol;   // tier-1 gate: skip when the predicted |dlnT| is below this
+  Real peq_dYe_tol;    // tier-1 gate: ... and the predicted |dYe| below this
+
   int quad_nx;               // number of quadrature points for 1d integration
   int quad_nx_2;             // number of quadrature points for 2d integration (-1 = same)
   MyQuadrature quadrature;   // 1d quadrature for bns_nurates
@@ -404,6 +413,115 @@ SpectralOpacities RadiationComputeSpectralOpacitiesStimulatedAbs(
 }
 
 //----------------------------------------------------------------------------------------
+//! \fn void NuratesEqDensities
+//! \brief Frequency-integrated equilibrium neutrino number and energy densities of a
+//!        matter state, in this module's per-slot convention.
+//!
+//! The state is given by its chemical potentials and temperature rather than by
+//! (nb, T, Ye), so the caller can hand it a *predicted* state without rebuilding the
+//! opacity parameters.  Slots 2 and 3 carry mu+tau combined while bns_nurates' id_nux is
+//! one species, hence the factors of two -- the same convention as the emissivities
+//! everywhere else in this file.
+//!
+//! \param[in]  temp      temperature (MeV)
+//! \param[in]  mu_n      neutron chemical potential (MeV)
+//! \param[in]  mu_p      proton chemical potential (MeV)
+//! \param[in]  mu_e      electron chemical potential (MeV)
+//! \param[in]  unit_num_dens  eos_units.NumberDensityConversion(nurates_units)
+//! \param[in]  unit_ene_dens  code_units.EnergyDensityConversion(nurates_units)
+//! \param[out] n_eq      equilibrium number densities [4] (fm^-3)
+//! \param[out] J_eq      equilibrium energy densities [4] (code units)
+//!
+//! The two conversions are passed in rather than rebuilt from the unit systems: every
+//! caller already has them, and recomputing them here made the arithmetic differ from
+//! the inline version this replaced in the last couple of bits, purely through where
+//! the compiler chose to contract multiply-adds.
+KOKKOS_INLINE_FUNCTION
+void NuratesEqDensities(Real temp, Real mu_n, Real mu_p, Real mu_e,
+                        Real unit_num_dens, Real unit_ene_dens,
+                        Real n_eq[4], Real J_eq[4]) {
+  MyEOSParams eq_eos_pars = {0};
+  eq_eos_pars.temp = temp;
+  eq_eos_pars.mu_n = mu_n;
+  eq_eos_pars.mu_p = mu_p;
+  eq_eos_pars.mu_e = mu_e;
+
+  M1Quantities eq_m1_pars = {0};
+  NuDistributionParams eq_distr_pars = NuEquilibriumParams(&eq_eos_pars);
+  ComputeM1DensitiesEq(&eq_eos_pars, &eq_distr_pars, &eq_m1_pars);
+
+  n_eq[0] = eq_m1_pars.n[id_nue] / unit_num_dens;
+  n_eq[1] = eq_m1_pars.n[id_anue] / unit_num_dens;
+  n_eq[2] = 2.0 * eq_m1_pars.n[id_nux] / unit_num_dens;
+  n_eq[3] = 2.0 * eq_m1_pars.n[id_anux] / unit_num_dens;
+
+  J_eq[0] = eq_m1_pars.J[id_nue] / unit_ene_dens;
+  J_eq[1] = eq_m1_pars.J[id_anue] / unit_ene_dens;
+  J_eq[2] = 2.0 * eq_m1_pars.J[id_nux] / unit_ene_dens;
+  J_eq[3] = 2.0 * eq_m1_pars.J[id_anux] / unit_ene_dens;
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void NuratesEqSpectrumBin
+//! \brief Bin-integrated equilibrium neutrino number and energy densities: the spectral
+//!        counterpart of NuratesEqDensities.
+//!
+//! Deliberately the same bin, the same quadrature and the same 4pi/(hc)^3 E^2 measure
+//! that bns_nurates_spectral_bin integrates the emissivity over, so that
+//! eta_1 = kappa*J_eq holds bin by bin instead of only in the frequency-integrated sense.
+//! That exactness is the point: the source term reads back eq_j = eta_1/kappa as the
+//! spectrum it relaxes towards, so any mismatch between the two is a shift of the
+//! equilibrium it converges to.
+//!
+//! \param[in]  e_lo_mev  lower bin edge (MeV)
+//! \param[in]  e_hi_mev  upper bin edge (MeV)
+//! \param[out] n_eq      bin-integrated equilibrium number densities [4] (fm^-3)
+//! \param[out] J_eq      bin-integrated equilibrium energy densities [4] (code units)
+KOKKOS_INLINE_FUNCTION
+void NuratesEqSpectrumBin(Real e_lo_mev, Real e_hi_mev,
+                          Real temp, Real mu_n, Real mu_p, Real mu_e,
+                          MyQuadrature const &quad,
+                          Real unit_num_dens, Real unit_ene_dens,
+                          Real n_eq[4], Real J_eq[4]) {
+  for (int idx = 0; idx < 4; ++idx) {
+    n_eq[idx] = 0.;
+    J_eq[idx] = 0.;
+  }
+  if (e_hi_mev <= e_lo_mev) {
+    return;
+  }
+
+  MyEOSParams eq_eos_pars = {0};
+  eq_eos_pars.temp = temp;
+  eq_eos_pars.mu_n = mu_n;
+  eq_eos_pars.mu_p = mu_p;
+  eq_eos_pars.mu_e = mu_e;
+  NuDistributionParams eq_distr_pars = NuEquilibriumParams(&eq_eos_pars);
+
+  const Real de = e_hi_mev - e_lo_mev;
+  for (int iq = 0; iq < quad.nx; ++iq) {
+    const Real e = e_lo_mev + de*quad.points[iq];
+    const Real wde = quad.w[iq] * de * kBS_FourPi_hc3 * SQR(e);
+    for (int idx = 0; idx < 4; ++idx) {
+      const Real f_eq = TotalNuF(e, &eq_distr_pars, idx);
+      n_eq[idx] += wde * f_eq;
+      J_eq[idx] += wde * e * f_eq;
+    }
+  }
+
+  // Slots 2 and 3 are mu+tau combined; see NuratesEqDensities.
+  n_eq[2] *= 2.;
+  n_eq[3] *= 2.;
+  J_eq[2] *= 2.;
+  J_eq[3] *= 2.;
+
+  for (int idx = 0; idx < 4; ++idx) {
+    n_eq[idx] /= unit_num_dens;
+    J_eq[idx] /= unit_ene_dens;
+  }
+}
+
+//----------------------------------------------------------------------------------------
 //! \fn void bns_nurates_gray
 //! \brief Wrapper for bns_nurates grey opacity call for gray (frequency-integrated)
 //!        neutrino transport.
@@ -593,25 +711,17 @@ void bns_nurates_gray(Real nb, Real temp, Real yp, Real yn,
   const Real eta1_to_code = unit_time / unit_ene_dens;
   const Real eta0_to_eos  = unit_time / unit_num_dens;
 
+  // Kirchhoff's law against the LOCAL blackbody, at (T^n, Ye^n).  Skipped when the
+  // partially-equilibrated predictor is on: that applies the same law against the
+  // blackbody at the predicted (T*, Ye*), from the caller, and doing it here first
+  // would only be overwritten.  The predictor's dt -> 0 limit is exactly this.
+  const bool kirchhoff_here =
+      nurates_params.use_kirchhoff_law && !nurates_params.use_partial_equilibrium;
   Real eq_n_eos[4] = {0., 0., 0., 0.};
   Real eq_J_code[4] = {0., 0., 0., 0.};
-  if (nurates_params.use_kirchhoff_law) {
-    M1Quantities eq_m1_pars = {0};
-    NuDistributionParams eq_distr_pars =
-        NuEquilibriumParams(&grey_op_params.eos_pars);
-    ComputeM1DensitiesEq(&grey_op_params.eos_pars,
-                         &eq_distr_pars,
-                         &eq_m1_pars);
-
-    eq_n_eos[0] = eq_m1_pars.n[id_nue] / unit_num_dens;
-    eq_n_eos[1] = eq_m1_pars.n[id_anue] / unit_num_dens;
-    eq_n_eos[2] = 2.0 * eq_m1_pars.n[id_nux] / unit_num_dens;
-    eq_n_eos[3] = 2.0 * eq_m1_pars.n[id_anux] / unit_num_dens;
-
-    eq_J_code[0] = eq_m1_pars.J[id_nue] / unit_ene_dens;
-    eq_J_code[1] = eq_m1_pars.J[id_anue] / unit_ene_dens;
-    eq_J_code[2] = 2.0 * eq_m1_pars.J[id_nux] / unit_ene_dens;
-    eq_J_code[3] = 2.0 * eq_m1_pars.J[id_anux] / unit_ene_dens;
+  if (kirchhoff_here) {
+    NuratesEqDensities(temp, mu_n, mu_p, mu_e, unit_num_dens, unit_ene_dens,
+                       eq_n_eos, eq_J_code);
   }
 
   for (int idx = 0; idx < 4; ++idx) {
@@ -622,7 +732,7 @@ void bns_nurates_gray(Real nb, Real temp, Real yp, Real yn,
     scat_1[idx] *= kap_to_code;
     // scat_0 is set to zero above; conversion unnecessary
 
-    if (nurates_params.use_kirchhoff_law) {
+    if (kirchhoff_here) {
       eta_0[idx] = (abs_0[idx] > 0.0) ? abs_0[idx] * eq_n_eos[idx] : eta_0[idx];
       eta_1[idx] = (abs_1[idx] > 0.0) ? abs_1[idx] * eq_J_code[idx] : eta_1[idx];
     }
@@ -738,22 +848,29 @@ void bns_nurates_spectral_bin(Real e_lo_mev, Real e_hi_mev,
   SpectralOpacities op_mid =
       RadiationComputeSpectralOpacitiesStimulatedAbs(e_mid, &quad, &grey_op_params);
 
-  for (int iq = 0; iq < quad.nx; ++iq) {
-    const Real x = quad.points[iq];
-    const Real w = quad.w[iq];
-    const Real e = e_lo + de*x;
-    SpectralOpacities op =
-        RadiationComputeSpectralOpacitiesStimulatedAbs(e, &quad, &grey_op_params);
-    for (int idx = 0; idx < 4; ++idx) {
-      eta_0[idx] += w * de * kBS_FourPi_hc3 * SQR(e) * op.j[idx];
-      eta_1[idx] += w * de * kBS_FourPi_hc3 * SQR(e) * e * op.j[idx];
+  // The emissivity, integrated over the bin.  Skipped outright when the partially-
+  // equilibrated predictor is on: the caller then sets eta from kappa times the
+  // blackbody at (T*, Ye*), so every one of these quadrature points -- a full spectral
+  // opacity evaluation each -- would be thrown away.  eta_* are left at the zeros set
+  // above; the caller overwrites them.
+  if (!nurates_params.use_partial_equilibrium) {
+    for (int iq = 0; iq < quad.nx; ++iq) {
+      const Real x = quad.points[iq];
+      const Real w = quad.w[iq];
+      const Real e = e_lo + de*x;
+      SpectralOpacities op =
+          RadiationComputeSpectralOpacitiesStimulatedAbs(e, &quad, &grey_op_params);
+      for (int idx = 0; idx < 4; ++idx) {
+        eta_0[idx] += w * de * kBS_FourPi_hc3 * SQR(e) * op.j[idx];
+        eta_1[idx] += w * de * kBS_FourPi_hc3 * SQR(e) * e * op.j[idx];
+      }
     }
-  }
 
-  eta_0[2] *= 2.;
-  eta_0[3] *= 2.;
-  eta_1[2] *= 2.;
-  eta_1[3] *= 2.;
+    eta_0[2] *= 2.;
+    eta_0[3] *= 2.;
+    eta_1[2] *= 2.;
+    eta_1[3] *= 2.;
+  }
 
   const Real kap_to_code  = unit_length;
   const Real eta0_to_eos  = unit_time / unit_num_dens;
