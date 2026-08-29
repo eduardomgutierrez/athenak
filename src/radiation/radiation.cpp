@@ -251,6 +251,26 @@ Radiation::Radiation(MeshBlockPack *ppack, ParameterInput *pin) :
     }
     affect_fluid = pin->GetOrAddBoolean("radiation","affect_fluid",true);
     evolve_ye = pin->GetOrAddBoolean("radiation","evolve_ye",true);
+#if ENABLE_NURATES
+    // The nurates source terms couple to Valencia (DynGRMHD) only.  Real opacities need
+    // the tabulated CompOSE EOS that only DynGRMHDPS carries, and the fluid coupling is
+    // written for Valencia's sqrt(gamma)*(E-D) and sqrt(gamma)*S_k, which differ from
+    // HARM's T^t_t + D and T^t_k by a sign and a densitisation.  Prescribed-opacity
+    // transport that never touches the fluid needs neither, and is the only exception:
+    // that is what the diffusion tests run, on ideal-gas hydro.
+    if (use_nurates && pmy_pack->pdyngr == nullptr) {
+      bool transport_only = (nurates_toy_scattering >= 0.0) && !affect_fluid;
+      if (!transport_only) {
+        std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+                  << std::endl
+                  << "use_nurates=true requires DynGRMHD (set <mhd>/dyn_eos), unless "
+                  << "the run is prescribed-opacity transport "
+                  << "(nurates_toy_scattering >= 0 and affect_fluid = false)."
+                  << std::endl;
+        std::exit(EXIT_FAILURE);
+      }
+    }
+#endif
     // The multifrequency path forms the number density change bin by bin from the
     // radiation field itself, so the mean-energy approximation that separates the two
     // grey routes does not arise there and there is nothing for 'opacity' to select.

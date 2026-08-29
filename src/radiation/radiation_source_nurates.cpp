@@ -17,11 +17,9 @@
 #include "coordinates/cartesian_ks.hpp"
 #include "coordinates/coordinates.hpp"
 #include "coordinates/cell_locations.hpp"
-#include "eos/eos.hpp"
 #include "geodesic-grid/geodesic_grid.hpp"
 #include "hydro/hydro.hpp"
 #include "mhd/mhd.hpp"
-#include "dyn_grmhd/dyn_grmhd.hpp"
 #include "radiation.hpp"
 #include "radiation/radiation_nurates.hpp"
 #include "radiation/radiation_nurates_remap.hpp"
@@ -49,12 +47,10 @@ TaskStatus Radiation::RadFluidCouplingNurates(Driver *pdriver, int stage) {
   bool &is_hydro_enabled_ = is_hydro_enabled;
   bool &is_mhd_enabled_ = is_mhd_enabled;
   bool &is_compton_enabled_ = is_compton_enabled;
-  bool &fixed_fluid_ = fixed_fluid;
   bool &affect_fluid_ = affect_fluid;
   bool &evolve_ye_ = evolve_ye;
   int ye_source_model_ = ye_source_model;
   bool &backreact_chiral_ = backreact_chiral;
-  bool is_dyngr = (pmy_pack->pdyngr != nullptr);
 
   // Extract coordinate/excision data
   auto &coord = pmy_pack->pcoord->coord_data;
@@ -72,7 +68,11 @@ TaskStatus Radiation::RadFluidCouplingNurates(Driver *pdriver, int stage) {
   auto &norm_to_tet_ = norm_to_tet;
   auto &solid_angles_ = prgeo->solid_angles;
 
-  // Extract hydro/mhd quantities
+  // Primitives are read, not refreshed: the source term only writes conserved
+  // variables, and the same w0_ is what CalcOpacityNurates tabulated the opacities
+  // against, so leaving them as they stand keeps the opacities and the boost on the
+  // same state.  Both are one ConsToPrim behind u0_, which is the usual operator-split
+  // staleness and is what radiation_m1/ does as well.
   DvceArray5D<Real> u0_, w0_;
   if (is_hydro_enabled_) {
     u0_ = pmy_pack->phydro->u0;
@@ -90,19 +90,6 @@ TaskStatus Radiation::RadFluidCouplingNurates(Driver *pdriver, int stage) {
   auto &nurates_abs_1_ = nurates_abs_1;
   auto &nurates_scat_1_ = nurates_scat_1;
   Real mb_code_ = nurates_baryon_mass;
-
-  // Update primitives before source term application
-  if (!(fixed_fluid_)) {
-    if (is_dyngr) {
-      pmy_pack->pdyngr->ConToPrimBC(is, ie, js, je, ks, ke);
-    } else if (is_hydro_enabled_) {
-      pmy_pack->phydro->peos->ConsToPrim(u0_,w0_,false,is,ie,js,je,ks,ke);
-    } else if (is_mhd_enabled_) {
-      auto &b0_ = pmy_pack->pmhd->b0;
-      auto &bcc0_ = pmy_pack->pmhd->bcc0;
-      pmy_pack->pmhd->peos->ConsToPrim(u0_,b0_,w0_,bcc0_,false,is,ie,js,je,ks,ke);
-    }
-  }
 
   par_for("radiation_source_nurates", DevExeSpace(), 0, nmb1, ks, ke, js, je, is, ie,
   KOKKOS_LAMBDA(int m, int k, int j, int i) {
@@ -281,19 +268,15 @@ TaskStatus Radiation::RadFluidCouplingNurates(Driver *pdriver, int stage) {
       Real dm3 = m_old[3] - m_new[3];
       // dm_mu is the undensitised coordinate-frame -Delta R^t_mu, so the fluid gains
       // Delta T^t_mu = dm_mu.  Valencia carries sqrt(gamma)*(E-D) and sqrt(gamma)*S_k,
-      // and E = -T^t_t + beta^k T^t_k, which is where the minus sign comes from; HARM
-      // carries T^t_t + D and T^t_k instead, hence the branch.  The general Valencia
-      // increments are sqrt(gamma)*(-dm0 + beta^k dm_k) and sqrt(gamma)*alpha*dm_k;
-      // they take the form below only because the radiation module runs on the
+      // and E = -T^t_t + beta^k T^t_k, which is where the minus sign comes from; the
+      // general increments are sqrt(gamma)*(-dm0 + beta^k dm_k) and sqrt(gamma)*alpha*
+      // dm_k.  They take the form below only because the radiation module runs on the
       // analytic Cartesian Kerr-Schild metric, where det g = -1 so alpha*sqrt(gamma)
       // = 1: the 1/alpha IS the sqrt(gamma), and the momentum needs no factor.  On any
       // metric with sqrt(-g) != 1 this is wrong (as is taking alpha, beta and the
-      // tetrad from the analytic background at all).
-      if (is_dyngr) {
-        u0_(m,IEN,k,j,i) += (1.0/alpha)*(-dm0+beta_u[0]*dm1+beta_u[1]*dm2+beta_u[2]*dm3);
-      } else {
-        u0_(m,IEN,k,j,i) += dm0;
-      }
+      // tetrad from the analytic background at all).  The constructor has already
+      // refused nurates + fluid coupling without DynGRMHD.
+      u0_(m,IEN,k,j,i) += (1.0/alpha)*(-dm0+beta_u[0]*dm1+beta_u[1]*dm2+beta_u[2]*dm3);
       u0_(m,IM1,k,j,i) += dm1;
       u0_(m,IM2,k,j,i) += dm2;
       u0_(m,IM3,k,j,i) += dm3;
@@ -416,11 +399,9 @@ TaskStatus Radiation::MultiFreqRadFluidCouplingNurates(Driver *pdriver, int stag
   auto &size = pmy_pack->pmb->mb_size;
   bool &is_hydro_enabled_ = is_hydro_enabled;
   bool &is_mhd_enabled_ = is_mhd_enabled;
-  bool &fixed_fluid_ = fixed_fluid;
   bool &affect_fluid_ = affect_fluid;
   bool &evolve_ye_ = evolve_ye;
   bool &backreact_chiral_ = backreact_chiral;
-  bool is_dyngr = (pmy_pack->pdyngr != nullptr);
 
   auto &coord = pmy_pack->pcoord->coord_data;
   bool &flat = coord.is_minkowski;
@@ -437,6 +418,7 @@ TaskStatus Radiation::MultiFreqRadFluidCouplingNurates(Driver *pdriver, int stag
   auto &solid_angles_ = prgeo->solid_angles;
   auto &nu_tet = freq_grid;
 
+  // Primitives are read, not refreshed; see the grey path above.
   DvceArray5D<Real> u0_, w0_;
   if (is_hydro_enabled_) {
     u0_ = pmy_pack->phydro->u0;
@@ -461,18 +443,6 @@ TaskStatus Radiation::MultiFreqRadFluidCouplingNurates(Driver *pdriver, int stag
   // holds.  The constructor has already refused a non-log grid, nfreq < 4 and nu_min <=
   // 0.
   Real grid_dln_ = log(grid_nu_max/grid_nu_min)/static_cast<Real>(nfrq_-1);
-
-  if (!(fixed_fluid_)) {
-    if (is_dyngr) {
-      pmy_pack->pdyngr->ConToPrimBC(is, ie, js, je, ks, ke);
-    } else if (is_hydro_enabled_) {
-      pmy_pack->phydro->peos->ConsToPrim(u0_,w0_,false,is,ie,js,je,ks,ke);
-    } else if (is_mhd_enabled_) {
-      auto &b0_ = pmy_pack->pmhd->b0;
-      auto &bcc0_ = pmy_pack->pmhd->bcc0;
-      pmy_pack->pmhd->peos->ConsToPrim(u0_,b0_,w0_,bcc0_,false,is,ie,js,je,ks,ke);
-    }
-  }
 
   // Flat par_for, one thread per cell: the body is serial over the whole cell and owns
   // it outright.  par_for_outer would be wrong here -- it requests Kokkos::AUTO team
@@ -733,19 +703,15 @@ TaskStatus Radiation::MultiFreqRadFluidCouplingNurates(Driver *pdriver, int stag
       Real dm3 = m_old[3] - m_new[3];
       // dm_mu is the undensitised coordinate-frame -Delta R^t_mu, so the fluid gains
       // Delta T^t_mu = dm_mu.  Valencia carries sqrt(gamma)*(E-D) and sqrt(gamma)*S_k,
-      // and E = -T^t_t + beta^k T^t_k, which is where the minus sign comes from; HARM
-      // carries T^t_t + D and T^t_k instead, hence the branch.  The general Valencia
-      // increments are sqrt(gamma)*(-dm0 + beta^k dm_k) and sqrt(gamma)*alpha*dm_k;
-      // they take the form below only because the radiation module runs on the
+      // and E = -T^t_t + beta^k T^t_k, which is where the minus sign comes from; the
+      // general increments are sqrt(gamma)*(-dm0 + beta^k dm_k) and sqrt(gamma)*alpha*
+      // dm_k.  They take the form below only because the radiation module runs on the
       // analytic Cartesian Kerr-Schild metric, where det g = -1 so alpha*sqrt(gamma)
       // = 1: the 1/alpha IS the sqrt(gamma), and the momentum needs no factor.  On any
       // metric with sqrt(-g) != 1 this is wrong (as is taking alpha, beta and the
-      // tetrad from the analytic background at all).
-      if (is_dyngr) {
-        u0_(m,IEN,k,j,i) += (1.0/alpha)*(-dm0+beta_u[0]*dm1+beta_u[1]*dm2+beta_u[2]*dm3);
-      } else {
-        u0_(m,IEN,k,j,i) += dm0;
-      }
+      // tetrad from the analytic background at all).  The constructor has already
+      // refused nurates + fluid coupling without DynGRMHD.
+      u0_(m,IEN,k,j,i) += (1.0/alpha)*(-dm0+beta_u[0]*dm1+beta_u[1]*dm2+beta_u[2]*dm3);
       u0_(m,IM1,k,j,i) += dm1;
       u0_(m,IM2,k,j,i) += dm2;
       u0_(m,IM3,k,j,i) += dm3;
