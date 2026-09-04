@@ -33,11 +33,18 @@ namespace radiation {
 //!        over one step, given the neutrino field it is in contact with.
 //!
 //! A one-parameter family in w = a/(1+a), a = dtau*kappa, evaluated per cell and per
-//! channel (nu_e pair energy, heavy pair energy, net lepton number).  At w = 1 the
-//! residuals are the fully-trapped weak equilibrium's exactly; at w = 0 they return
-//! (T, Ye), the local blackbody.  The interpolation is fixed by the step and the local
-//! opacity, not by a tuned threshold, and every intermediate point is a valid scheme --
-//! which is what lets a rejected root retry with the weights halved.
+//! channel -- one weight per species for the electron pair, one shared by the heavy
+//! pairs, in each of the energy and lepton-number channels.  At w = 1 the residuals are
+//! the fully-trapped weak equilibrium's exactly; at w = 0 they return (T, Ye), the local
+//! blackbody.  The interpolation is fixed by the step and the local opacity, not by a
+//! tuned threshold, and every intermediate point is a valid scheme -- which is what lets
+//! a rejected root retry with the weights halved.
+//!
+//! The electron pair takes one weight per species because lumping a pair under a common
+//! weight is exact only where the two terms that weight multiplies are equal, and they
+//! differ by exp(eta); the lepton residual is their difference, so the two errors
+//! reinforce rather than cancel.  The heavy pairs share one weight because nothing in
+//! the opacities distinguishes nu_x from its antiparticle -- see ps_types.hpp.
 //!
 //! Ported from radiation_m1/radiation_m1_calc_opacities_nurates.cpp; the gates, the
 //! trust region and the fallback ladder are deliberately identical, so the two solvers
@@ -47,17 +54,22 @@ namespace radiation {
 //! is gated out or that never produces an accepted root.
 //!
 //! \param[in]  dtau      proper time of the step, alpha*dt/W
-//! \param[in]  J_e,J_x   comoving energy density of the electron / heavy pairs (code)
-//! \param[in]  N_L       comoving net electron lepton number density (fm^-3)
-//! \param[in]  *_eq      the same three, for the local blackbody at (T, Ye)
-//! \param[in]  kbar_*    field-weighted mean absorption opacities, one per channel
+//! \param[in]  J_nu      comoving energy density of nu_e, nubar_e (code units)
+//! \param[in]  N_nu      comoving number density of nu_e, nubar_e (fm^-3)
+//! \param[in]  J_x       comoving energy density of the heavy pairs (code units)
+//! \param[in]  *_eq      the same, for the local blackbody at (T, Ye)
+//! \param[in]  kap_1     per-species energy absorption opacity of nu_e, nubar_e
+//! \param[in]  kap_0     per-species number absorption opacity of nu_e, nubar_e
+//! \param[in]  kbar_1x   field-weighted mean energy absorption opacity of the heavies
 template <class EOSPolicy, class ErrorPolicy>
 KOKKOS_INLINE_FUNCTION
 void PredictPartialEquilibrium(const Primitive::EOS<EOSPolicy, ErrorPolicy> &eos,
                                Real nb, Real T, Real Y, Real dtau,
-                               Real J_e, Real J_x, Real N_L,
-                               Real J_e_eq, Real J_x_eq, Real N_L_eq,
-                               Real kbar_1e, Real kbar_1x, Real kbar_0e,
+                               const Real J_nu[2], const Real N_nu[2], Real J_x,
+                               const Real J_nu_eq[2], const Real N_nu_eq[2],
+                               Real J_x_eq,
+                               const Real kap_1[2], const Real kap_0[2],
+                               Real kbar_1x,
                                NuratesParams const &nurates_params,
                                Primitive::UnitSystem &code_units,
                                Primitive::UnitSystem &eos_units,
@@ -70,21 +82,29 @@ void PredictPartialEquilibrium(const Primitive::EOS<EOSPolicy, ErrorPolicy> &eos
   // Halvings of the weights allowed before the cell is declared unusable.
   const int peq_max_halvings = 4;
 
-  const Real a_1e = dtau*kbar_1e;
+  const Real a_1p = dtau*kap_1[0];
+  const Real a_1m = dtau*kap_1[1];
   const Real a_1x = dtau*kbar_1x;
-  const Real a_0e = dtau*kbar_0e;
-  const Real w_1e = a_1e/(1.0 + a_1e);
+  const Real a_0p = dtau*kap_0[0];
+  const Real a_0m = dtau*kap_0[1];
+  const Real w_1p = a_1p/(1.0 + a_1p);
+  const Real w_1m = a_1m/(1.0 + a_1m);
   const Real w_1x = a_1x/(1.0 + a_1x);
-  const Real w_0e = a_0e/(1.0 + a_0e);
+  const Real w_0p = a_0p/(1.0 + a_0p);
+  const Real w_0m = a_0m/(1.0 + a_0m);
 
   // Tier-0 gate: no EOS calls at all.  An optically thin cell has nothing to
   // equilibrate with and must cost nothing.  Ternaries not fmax, per
-  // eos_compose.hpp:186 (SYCL's fmax(x, NaN) = NaN), so a NaN weight gates the cell out
-  // deliberately, not by luck.
-  const bool w_finite = Kokkos::isfinite(w_1e) && Kokkos::isfinite(w_1x) &&
-                        Kokkos::isfinite(w_0e);
-  Real w_max = (w_1e > w_1x) ? w_1e : w_1x;
-  w_max = (w_max > w_0e) ? w_max : w_0e;
+  // eos_compose.hpp:187 (SYCL's fmax(x, NaN) = NaN), so a NaN weight gates the cell out
+  // deliberately, not by luck.  All five have to be screened: a missed one routes a NaN
+  // weight into the solve instead of gating the cell out.
+  const bool w_finite = Kokkos::isfinite(w_1p) && Kokkos::isfinite(w_1m) &&
+                        Kokkos::isfinite(w_1x) && Kokkos::isfinite(w_0p) &&
+                        Kokkos::isfinite(w_0m);
+  Real w_max = (w_1p > w_1m) ? w_1p : w_1m;
+  w_max = (w_max > w_1x) ? w_max : w_1x;
+  w_max = (w_max > w_0p) ? w_max : w_0p;
+  w_max = (w_max > w_0m) ? w_max : w_0m;
   if (!(w_finite && w_max >= nurates_params.peq_w_floor)) {
     return;
   }
@@ -110,10 +130,16 @@ void PredictPartialEquilibrium(const Primitive::EOS<EOSPolicy, ErrorPolicy> &eos
                       : 0.0;
   const bool cv_ok = Kokkos::isfinite(cv) && cv > 0.0;
 
-  const Real dlnT_hat = cv_ok ? (w_1e*Kokkos::fabs(J_e_eq - J_e) +
+  // Sum of absolute per-species terms, not the absolute value of the weighted net: the
+  // gate's only job is to skip cells where nothing happens, and only the sum is
+  // guaranteed not to under-estimate the move, so only it cannot gate out a cell that
+  // would have moved.
+  const Real dlnT_hat = cv_ok ? (w_1p*Kokkos::fabs(J_nu_eq[0] - J_nu[0]) +
+                                 w_1m*Kokkos::fabs(J_nu_eq[1] - J_nu[1]) +
                                  w_1x*Kokkos::fabs(J_x_eq - J_x))/(T*cv)
                               : 0.0;
-  const Real dYe_hat = w_0e*Kokkos::fabs(N_L_eq - N_L)/nb;
+  const Real dYe_hat = (w_0p*Kokkos::fabs(N_nu_eq[0] - N_nu[0]) +
+                        w_0m*Kokkos::fabs(N_nu_eq[1] - N_nu[1]))/nb;
 
   // A bad c_v removes the gate and the trust region both -- everything below divides by
   // T*cv.  Predict nothing instead.
@@ -137,21 +163,24 @@ void PredictPartialEquilibrium(const Primitive::EOS<EOSPolicy, ErrorPolicy> &eos
 
   const Real e_mat = eos.GetEnergy(nb, T, Y_part);
 
-  // On failure, halve all three weights and retry: that slides the problem along the
+  // On failure, halve all five weights and retry: that slides the problem along the
   // same one-parameter family toward the trivial one, so every intermediate point is
-  // still a valid scheme.  A cell that never produces an accepted root keeps (T, Y_e).
+  // still a valid scheme.  Scaling all five is the same as scaling the pair mean and the
+  // half-difference, so this attacks the split terms too.  A cell that never produces an
+  // accepted root keeps (T, Y_e).
   Real f_soft = 1.0;
   for (int n_soft = 0; n_soft <= peq_max_halvings; ++n_soft, f_soft *= 0.5) {
-    const Real u_1e = f_soft*w_1e;
-    const Real u_1x = f_soft*w_1x;
-    const Real u_0e = f_soft*w_0e;
+    const Real u[PEQ_NWEIGHTS] = {f_soft*w_1p, f_soft*w_1m, f_soft*w_1x,
+                                  f_soft*w_0p, f_soft*w_0m};
 
-    const Real e_rhs = e_mat + u_1e*J_e + u_1x*J_x;
-    Real Yl_rhs[3] = {Y + u_0e*N_L/nb, 0.0, 0.0};
+    const Real e_rhs = e_mat + u[PEQ_W1_NUE]*J_nu[0] + u[PEQ_W1_ANUE]*J_nu[1] +
+                       u[PEQ_W1_X]*J_x;
+    Real Yl_rhs[3] = {Y + (u[PEQ_W0_NUE]*N_nu[0] -
+                           u[PEQ_W0_ANUE]*N_nu[1])/nb, 0.0, 0.0};
 
     Real T_try = T;
     Real Ye_try[3] = {Y, 0.0, 0.0};
-    bool ok = eos.GetBetaEquilibriumPartial(nb, e_rhs, Yl_rhs, u_1e, u_1x, u_0e,
+    bool ok = eos.GetBetaEquilibriumPartial(nb, e_rhs, Yl_rhs, u,
                                             T_try, &Ye_try[0], T, Y_part);
 
     if (ok && Kokkos::fabs(Kokkos::log(T_try/T)) <= dlnT_max &&
@@ -556,18 +585,24 @@ TaskStatus Radiation::CalcOpacityNurates_(Driver *pdrive, int stage) {
       // emissivity moves.  That is what makes the exchange saturate as dt grows,
       // instead of emitting at the start-of-step rate for the whole step.
       if (peq_on_) {
-        // Pair-averaged ABSORPTION opacities.  Elastic scattering neither thermalises
-        // the energy nor changes the number density, so scat_1 has no business here.
-        // The field-weighted mean makes kappa_bar*J equal the sum of the per-species
-        // kappa_x*J_x exactly at t^n; with an empty field there is nothing to weight
-        // with, so the arithmetic mean stands in.  These are the same coefficients the
-        // source term relaxes at, so the weight a = dtau*kappa is the step measured in
-        // units of the relaxation time the solver actually uses.
-        Real J_e = nudens_1[0] + nudens_1[1];
-        Real n_e = nudens_0[0] + nudens_0[1];
-        Real N_L = nudens_0[0] - nudens_0[1];
-        Real kJ_e = loc_abs_1[0]*nudens_1[0] + loc_abs_1[1]*nudens_1[1];
-        Real kN_e = loc_abs_0[0]*nudens_0[0] + loc_abs_0[1]*nudens_0[1];
+        // ABSORPTION opacities only.  The weights measure thermalisation, and elastic
+        // scattering neither thermalises the energy nor changes the number density, so
+        // scat_1 has no place in them.  These are the same coefficients the source term
+        // relaxes at, so the weight a = dtau*kappa is the step measured in units of the
+        // relaxation time the solver actually uses.
+        //
+        // The electron pair needs no average at all now that it carries one weight per
+        // species: loc_abs_1 and loc_abs_0 are already per species, and so are the
+        // densities they multiply.  The heavy pairs still share a weight, from a
+        // J-weighted mean, so that kappa_bar*J equals the sum of the per-species
+        // kappa_x*J_x at t^n -- falling back to the arithmetic mean when the field is
+        // empty and there is nothing to weight with.
+        const Real J_nu[2] = {nudens_1[0], nudens_1[1]};
+        const Real N_nu[2] = {nudens_0[0], nudens_0[1]};
+        const Real J_nu_eq[2] = {J_eq_loc[0], J_eq_loc[1]};
+        const Real N_nu_eq[2] = {n_eq_loc[0], n_eq_loc[1]};
+        const Real kap_1[2] = {loc_abs_1[0], loc_abs_1[1]};
+        const Real kap_0[2] = {loc_abs_0[0], loc_abs_0[1]};
         Real J_x = 0.0, kJ_x = 0.0, ks_x = 0.0, J_x_eq = 0.0;
         int n_x = 0;
         for (int isp = 2; isp < nspecies_; ++isp) {
@@ -577,17 +612,13 @@ TaskStatus Radiation::CalcOpacityNurates_(Driver *pdrive, int stage) {
           J_x_eq += J_eq_loc[isp];
           ++n_x;
         }
-        Real kbar_1e = (J_e > 0.0) ? kJ_e/J_e : 0.5*(loc_abs_1[0] + loc_abs_1[1]);
-        Real kbar_0e = (n_e > 0.0) ? kN_e/n_e : 0.5*(loc_abs_0[0] + loc_abs_0[1]);
         Real kbar_1x = (n_x == 0) ? 0.0 : ((J_x > 0.0) ? kJ_x/J_x : ks_x/n_x);
 
         Real T_star = T;
         Real Ye_star = Ye;
         PredictPartialEquilibrium(eos, nb, T, Ye, dt_*alpha_cell/w_lorentz,
-                                  J_e, J_x, N_L,
-                                  J_eq_loc[0] + J_eq_loc[1], J_x_eq,
-                                  n_eq_loc[0] - n_eq_loc[1],
-                                  kbar_1e, kbar_1x, kbar_0e,
+                                  J_nu, N_nu, J_x, J_nu_eq, N_nu_eq, J_x_eq,
+                                  kap_1, kap_0, kbar_1x,
                                   nurates_params_, code_units_l, eos_units_loc_l,
                                   T_star, Ye_star);
 
@@ -635,19 +666,22 @@ TaskStatus Radiation::CalcOpacityNurates_(Driver *pdrive, int stage) {
 
     if (multi_freq_) {
       // Field-weighted mean absorption opacities for the predictor.  kappa varies bin
-      // to bin, so the means run over (isp, ifr) weighted by the per-bin energy and
+      // to bin, so the means run over the bins weighted by the per-bin energy and
       // number densities -- the spectral generalisation of the grey averages above.
+      // The electron-flavour means are kept PER SPECIES, since each species now carries
+      // its own weight; only the heavy pairs are pooled.  Each species' denominator is
+      // its own frequency-integrated density: the per-bin sums below add up to
+      // nudens_1[isp] and nudens_0[isp] exactly, by construction.
       // The per-bin angular sum is fused into the opacity loop rather than stored: one
       // extra pass over the angles, and no workspace, against a loop already dominated
       // by the bns_nurates kernel integrals.
-      Real J_e = nudens_1[0] + nudens_1[1];
-      Real n_e = nudens_0[0] + nudens_0[1];
-      Real N_L = nudens_0[0] - nudens_0[1];
       Real J_x = 0.0;
       for (int isp = 2; isp < nspecies_; ++isp) { J_x += nudens_1[isp]; }
-      Real kJ_e = 0.0, kJ_x = 0.0, kN_e = 0.0;
-      Real ka_e = 0.0, ka_x = 0.0;
-      int nka_e = 0, nka_x = 0;
+      Real kJ_e[2] = {0.0, 0.0}, kN_e[2] = {0.0, 0.0};
+      Real ka1_e[2] = {0.0, 0.0}, ka0_e[2] = {0.0, 0.0};
+      int nka_e[2] = {0, 0};
+      Real kJ_x = 0.0, ka_x = 0.0;
+      int nka_x = 0;
 
       // freq_grid is in MeV, which is what bns_nurates_spectral_bin wants
       for (int ifr = 0; ifr < nfreq_; ++ifr) {
@@ -700,15 +734,24 @@ TaskStatus Radiation::CalcOpacityNurates_(Driver *pdrive, int stage) {
             // Same conversion the species totals get: a code-unit energy density over a
             // bin energy in MeV is a number density in fm^-3.
             N_f *= code_edens_to_eos/wght_sum;
-            Real ka = loc_abs_1_f[isp];
+            // Each channel takes the opacity it will itself be integrated with:
+            // abs_1 weights the energy equation, abs_0 the number equation, exactly as
+            // the grey block above does.  This loop used abs_1 for both before the
+            // weights were split.  That is a no-op today -- bns_nurates_spectral_bin
+            // sets abs_0 and abs_1 to the same monochromatic kappa, since the two only
+            // part company once an energy average is taken over a spectrum, and 3335 of
+            // 3335 single-zone dumps are bit-identical either way.  It is written the
+            // right way round so that it stays right if they ever differ per bin, as
+            // they would with the non-thermal separation the M1 path carries.
             if (isp < 2) {
-              kJ_e += ka*J_f;
-              kN_e += ka*N_f;
-              ka_e += ka;
-              ++nka_e;
+              kJ_e[isp] += loc_abs_1_f[isp]*J_f;
+              kN_e[isp] += loc_abs_0_f[isp]*N_f;
+              ka1_e[isp] += loc_abs_1_f[isp];
+              ka0_e[isp] += loc_abs_0_f[isp];
+              ++nka_e[isp];
             } else {
-              kJ_x += ka*J_f;
-              ka_x += ka;
+              kJ_x += loc_abs_1_f[isp]*J_f;
+              ka_x += loc_abs_1_f[isp];
               ++nka_x;
             }
           }
@@ -716,23 +759,31 @@ TaskStatus Radiation::CalcOpacityNurates_(Driver *pdrive, int stage) {
       }
 
       if (peq_on_) {
-        Real kbar_1e = (J_e > 0.0) ? kJ_e/J_e
-                                   : ((nka_e > 0) ? ka_e/nka_e : 0.0);
-        Real kbar_0e = (n_e > 0.0) ? kN_e/n_e
-                                   : ((nka_e > 0) ? ka_e/nka_e : 0.0);
+        Real kap_1[2] = {0.0, 0.0};
+        Real kap_0[2] = {0.0, 0.0};
+        for (int isp = 0; isp < 2; ++isp) {
+          kap_1[isp] = (nudens_1[isp] > 0.0)
+                       ? kJ_e[isp]/nudens_1[isp]
+                       : ((nka_e[isp] > 0) ? ka1_e[isp]/nka_e[isp] : 0.0);
+          kap_0[isp] = (nudens_0[isp] > 0.0)
+                       ? kN_e[isp]/nudens_0[isp]
+                       : ((nka_e[isp] > 0) ? ka0_e[isp]/nka_e[isp] : 0.0);
+        }
         Real kbar_1x = (J_x > 0.0) ? kJ_x/J_x
                                    : ((nka_x > 0) ? ka_x/nka_x : 0.0);
 
-        Real J_e_eq = J_eq_loc[0] + J_eq_loc[1];
-        Real N_L_eq = n_eq_loc[0] - n_eq_loc[1];
+        const Real J_nu[2] = {nudens_1[0], nudens_1[1]};
+        const Real N_nu[2] = {nudens_0[0], nudens_0[1]};
+        const Real J_nu_eq[2] = {J_eq_loc[0], J_eq_loc[1]};
+        const Real N_nu_eq[2] = {n_eq_loc[0], n_eq_loc[1]};
         Real J_x_eq = 0.0;
         for (int isp = 2; isp < nspecies_; ++isp) { J_x_eq += J_eq_loc[isp]; }
 
         Real T_star = T;
         Real Ye_star = Ye;
         PredictPartialEquilibrium(eos, nb, T, Ye, dt_*alpha_cell/w_lorentz,
-                                  J_e, J_x, N_L, J_e_eq, J_x_eq, N_L_eq,
-                                  kbar_1e, kbar_1x, kbar_0e,
+                                  J_nu, N_nu, J_x, J_nu_eq, N_nu_eq, J_x_eq,
+                                  kap_1, kap_0, kbar_1x,
                                   nurates_params_, code_units_l, eos_units_loc_l,
                                   T_star, Ye_star);
 

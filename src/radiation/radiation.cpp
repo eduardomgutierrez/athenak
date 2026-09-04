@@ -597,7 +597,7 @@ Radiation::Radiation(MeshBlockPack *ppack, ParameterInput *pin) :
     nurates_params.quad_nx = pin->GetOrAddInteger("bns_nurates","nurates_quad_nx",6);
     nurates_params.quadrature.nx   = nurates_params.quad_nx;
     nurates_params.quadrature.dim  = 1;
-    nurates_params.quadrature.type = kGauleg;
+    nurates_params.quadrature.type = bns_nurates::kGauleg;
     nurates_params.quadrature.x1   = 0.;
     nurates_params.quadrature.x2   = 1.;
     GaussLegendre(&nurates_params.quadrature);
@@ -609,7 +609,7 @@ Radiation::Radiation(MeshBlockPack *ppack, ParameterInput *pin) :
     }
     nurates_params.quadrature_2.nx   = nurates_params.quad_nx_2;
     nurates_params.quadrature_2.dim  = 1;
-    nurates_params.quadrature_2.type = kGauleg;
+    nurates_params.quadrature_2.type = bns_nurates::kGauleg;
     nurates_params.quadrature_2.x1   = 0.;
     nurates_params.quadrature_2.x2   = 1.;
     GaussLegendre(&nurates_params.quadrature_2);
