@@ -683,6 +683,11 @@ TaskStatus Radiation::CalcOpacityNurates_(Driver *pdrive, int stage) {
       Real kJ_x = 0.0, ka_x = 0.0;
       int nka_x = 0;
 
+      NuratesCellState nu_cell =
+          NuratesSpectralCellState(nb, T, yp, yn, mu_n, mu_p, mu_e,
+                                   nudens_0, nudens_1,
+                                   nurates_params_, code_units_l, eos_units_loc_l);
+
       // freq_grid is in MeV, which is what bns_nurates_spectral_bin wants
       for (int ifr = 0; ifr < nfreq_; ++ifr) {
         Real e_lo = 0.0, e_hi = 0.0;
@@ -693,12 +698,10 @@ TaskStatus Radiation::CalcOpacityNurates_(Driver *pdrive, int stage) {
         Real loc_abs_0_f[4]  = {0.};
         Real loc_abs_1_f[4]  = {0.};
         Real loc_scat_1_f[4] = {0.};
-        bns_nurates_spectral_bin(e_lo, e_hi, freq_scale_,
-                                 nb, T, yp, yn, mu_n, mu_p, mu_e,
-                                 nudens_0, nudens_1,
+        bns_nurates_spectral_bin(nu_cell, e_lo, e_hi, freq_scale_,
                                  loc_eta_0_f, loc_eta_1_f,
                                  loc_abs_0_f, loc_abs_1_f, loc_scat_1_f,
-                                 nurates_params_, code_units_l, eos_units_loc_l);
+                                 nurates_params_);
         for (int isp = 0; isp < nspecies_; ++isp) {
           eta_0_f_(m, isp, ifr, k, j, i)  = loc_eta_0_f[isp];
           eta_1_f_(m, isp, ifr, k, j, i)  = loc_eta_1_f[isp];

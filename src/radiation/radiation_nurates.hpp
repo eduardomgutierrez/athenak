@@ -138,9 +138,9 @@ bns_nurates::MyQuadratureIntegrand RadiationSpectralIntegrand(
   constexpr bns_nurates::BS_REAL zero = 0.0;
   constexpr bns_nurates::BS_REAL one  = 1.0;
 
-  bns_nurates::MyEOSParams my_eos_params  = grey_op_params.eos_pars;
-  bns_nurates::OpacityFlags opacity_flags = grey_op_params.opacity_flags;
-  bns_nurates::OpacityParams opacity_pars = grey_op_params.opacity_pars;
+  bns_nurates::MyEOSParams &my_eos_params        = grey_op_params.eos_pars;
+  const bns_nurates::OpacityFlags &opacity_flags = grey_op_params.opacity_flags;
+  const bns_nurates::OpacityParams &opacity_pars = grey_op_params.opacity_pars;
 
   bns_nurates::BS_REAL nu = grey_op_params.kernel_pars.pair_kernel_params.omega;
   bns_nurates::BS_REAL block_factor[total_num_species];
@@ -261,27 +261,33 @@ KOKKOS_INLINE_FUNCTION
 bns_nurates::MyQuadratureIntegrand RadiationIntegrateSpectral1D(
     bns_nurates::MyQuadrature* quad,
     bns_nurates::GreyOpacityParams &grey_op_params,
-    bns_nurates::BS_REAL* t) {
+    const bns_nurates::BS_REAL t) {
   constexpr int num_integrands = 8;
   bns_nurates::MyQuadratureIntegrand result = {0};
 
   result.n = num_integrands;
-  for (int k = 0; k < num_integrands; ++k) {
-    bns_nurates::BS_REAL f1_sum = 0.0;
-    bns_nurates::BS_REAL f2_sum = 0.0;
-    for (int i = 0; i < quad->nx; ++i) {
-      const bns_nurates::BS_REAL x = quad->points[i];
-      const bns_nurates::BS_REAL w = quad->w[i];
-      bns_nurates::MyQuadratureIntegrand f1_vals =
-          RadiationSpectralIntegrand(t[k] * x, grey_op_params);
-      f1_sum += w * f1_vals.integrand[k];
 
-      bns_nurates::MyQuadratureIntegrand f2_vals =
-          RadiationSpectralIntegrand(t[k] / x, grey_op_params);
-      f2_sum += w * f2_vals.integrand[k] / (x * x);
+  // The branch sums stay separate and the x*x division follows the weight;
+  // reassociating either changes the result in floating point.
+  bns_nurates::BS_REAL f1_sum[num_integrands] = {0.0};
+  bns_nurates::BS_REAL f2_sum[num_integrands] = {0.0};
+
+  for (int i = 0; i < quad->nx; ++i) {
+    const bns_nurates::BS_REAL x = quad->points[i];
+    const bns_nurates::BS_REAL w = quad->w[i];
+    const bns_nurates::MyQuadratureIntegrand f1_vals =
+        RadiationSpectralIntegrand(t * x, grey_op_params);
+    const bns_nurates::MyQuadratureIntegrand f2_vals =
+        RadiationSpectralIntegrand(t / x, grey_op_params);
+
+    for (int k = 0; k < num_integrands; ++k) {
+      f1_sum[k] += w * f1_vals.integrand[k];
+      f2_sum[k] += w * f2_vals.integrand[k] / (x * x);
     }
+  }
 
-    result.integrand[k] = t[k] * (f1_sum + f2_sum);
+  for (int k = 0; k < num_integrands; ++k) {
+    result.integrand[k] = t * (f1_sum[k] + f2_sum[k]);
   }
 
   return result;
@@ -309,12 +315,8 @@ bns_nurates::SpectralOpacities RadiationComputeSpectralOpacitiesNotStimulatedAbs
   }
 
   constexpr bns_nurates::BS_REAL temp_multiple = 0.5 * 4.364;
-  bns_nurates::BS_REAL s_pair[8];
-  bns_nurates::BS_REAL s_neps[8];
-  for (int i = 0; i < 8; ++i) {
-    s_pair[i] = temp_multiple * grey_op_params->eos_pars.temp;
-    s_neps[i] = nu;
-  }
+  const bns_nurates::BS_REAL s_pair = temp_multiple * grey_op_params->eos_pars.temp;
+  const bns_nurates::BS_REAL s_neps = nu;
 
   bns_nurates::MyQuadratureIntegrand integrals_pair_1d = {0};
   if (grey_op_params->opacity_flags.use_pair || grey_op_params->opacity_flags.use_brem) {
@@ -755,23 +757,35 @@ void bns_nurates_gray(Real nb, Real temp, Real yp, Real yn,
 }
 
 //----------------------------------------------------------------------------------------
-//! \fn void bns_nurates_spectral_bin
-//! \brief Midpoint/quadrature wrapper for bns_nurates spectral opacity coefficients.
-//!        The frequency bin bounds are in MeV, as freq_grid holds them; outputs are
-//!        bin-integrated emissivities and bin-centered opacities in code units, except
-//!        the number emissivity eta_0, which is in fm^-3 per code time (as is the
-//!        input nudens_0).
+//! \struct NuratesCellState
+//! \brief bns_nurates inputs that depend on the cell but not on the energy bin.
+//!        `active` is false where the density or temperature floor rejects the cell.
+
+struct NuratesCellState {
+  bns_nurates::GreyOpacityParams grey_op_params;
+  Real unit_length;
+  Real unit_time;
+  Real unit_num_dens;
+  Real unit_ene_dens;
+  bool active;
+};
+
+//----------------------------------------------------------------------------------------
+//! \fn NuratesCellState NuratesSpectralCellState
+//! \brief Builds the per-cell bns_nurates state for bns_nurates_spectral_bin. Call once
+//!        per cell, then pass the result to every energy bin.
+
 KOKKOS_INLINE_FUNCTION
-void bns_nurates_spectral_bin(Real e_lo_mev, Real e_hi_mev,
-                              int freq_scale,
-                              Real nb, Real temp, Real yp, Real yn,
-                              Real mu_n, Real mu_p, Real mu_e,
-                              Real nudens_0[4], Real nudens_1[4],
-                              Real eta_0[4], Real eta_1[4],
-                              Real abs_0[4], Real abs_1[4], Real scat_1[4],
-                              NuratesParams const &nurates_params,
-                              Primitive::UnitSystem &code_units,
-                              Primitive::UnitSystem &eos_units) {
+NuratesCellState NuratesSpectralCellState(
+    Real nb, Real temp, Real yp, Real yn,
+    Real mu_n, Real mu_p, Real mu_e,
+    Real nudens_0[4], Real nudens_1[4],
+    NuratesParams const &nurates_params,
+    Primitive::UnitSystem &code_units,
+    Primitive::UnitSystem &eos_units) {
+  NuratesCellState cell;
+  cell.grey_op_params = bns_nurates::GreyOpacityParams{0};
+
   Primitive::UnitSystem nurates_units = MakeNuratesUnitSystem();
 
   const Real unit_length    = code_units.LengthConversion(nurates_units);
@@ -783,23 +797,20 @@ void bns_nurates_spectral_bin(Real e_lo_mev, Real e_hi_mev,
   const Real unit_num_dens  = eos_units.NumberDensityConversion(nurates_units);
   const Real unit_ene_dens  = code_units.EnergyDensityConversion(nurates_units);
 
-  for (int idx = 0; idx < 4; ++idx) {
-    eta_0[idx]  = 0.;
-    eta_1[idx]  = 0.;
-    abs_0[idx]  = 0.;
-    abs_1[idx]  = 0.;
-    scat_1[idx] = 0.;
-  }
+  cell.unit_length   = unit_length;
+  cell.unit_time     = unit_time;
+  cell.unit_num_dens = unit_num_dens;
+  cell.unit_ene_dens = unit_ene_dens;
 
   // nb_min is in fm^-3 (the EOS number-density unit), so compare nb before the
   // conversion to bns_nurates units -- this is what radiation_m1_nurates.hpp does.
-  if ((nb < nurates_params.nb_min) ||
-      (temp < nurates_params.temp_min_mev) ||
-      (e_hi_mev <= e_lo_mev)) {
-    return;
+  cell.active = !((nb < nurates_params.nb_min) ||
+                  (temp < nurates_params.temp_min_mev));
+  if (!cell.active) {
+    return cell;
   }
 
-  bns_nurates::GreyOpacityParams grey_op_params = {0};
+  bns_nurates::GreyOpacityParams &grey_op_params = cell.grey_op_params;
   grey_op_params.opacity_flags.use_abs_em           = nurates_params.use_abs_em;
   grey_op_params.opacity_flags.use_brem             = nurates_params.use_brem;
   grey_op_params.opacity_flags.use_pair             = nurates_params.use_pair;
@@ -852,6 +863,40 @@ void bns_nurates_spectral_bin(Real e_lo_mev, Real e_hi_mev,
     grey_op_params.distr_pars =
         CalculateDistrParamsFromM1(&grey_op_params.m1_pars, &grey_op_params.eos_pars);
   }
+  return cell;
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void bns_nurates_spectral_bin
+//! \brief Midpoint/quadrature wrapper for bns_nurates spectral opacity coefficients.
+//!        The frequency bin bounds are in MeV, as freq_grid holds them; outputs are
+//!        bin-integrated emissivities and bin-centered opacities in code units, except
+//!        the number emissivity eta_0, which is in fm^-3 per code time (as is the
+//!        input nudens_0).
+
+KOKKOS_INLINE_FUNCTION
+void bns_nurates_spectral_bin(NuratesCellState &cell,
+                              Real e_lo_mev, Real e_hi_mev, int freq_scale,
+                              Real eta_0[4], Real eta_1[4],
+                              Real abs_0[4], Real abs_1[4], Real scat_1[4],
+                              NuratesParams const &nurates_params) {
+  for (int idx = 0; idx < 4; ++idx) {
+    eta_0[idx]  = 0.;
+    eta_1[idx]  = 0.;
+    abs_0[idx]  = 0.;
+    abs_1[idx]  = 0.;
+    scat_1[idx] = 0.;
+  }
+
+  if (!cell.active || (e_hi_mev <= e_lo_mev)) {
+    return;
+  }
+
+  bns_nurates::GreyOpacityParams &grey_op_params = cell.grey_op_params;
+  const Real unit_length   = cell.unit_length;
+  const Real unit_time     = cell.unit_time;
+  const Real unit_num_dens = cell.unit_num_dens;
+  const Real unit_ene_dens = cell.unit_ene_dens;
 
   const Real e_lo = e_lo_mev;
   const Real e_hi = e_hi_mev;
