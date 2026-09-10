@@ -586,6 +586,25 @@ Radiation::Radiation(MeshBlockPack *ppack, ParameterInput *pin) :
                 << "distribution." << std::endl;
       std::exit(EXIT_FAILURE);
     }
+
+    // NES/NPS is non-thermal emission and this module has no thermal/non-thermal
+    // split, so Kirchhoff and the partial-equilibrium predictor cannot represent
+    // it: see scripts/kokkos_perf/INELASTIC_SCATTERING.md.
+    if (nurates_params.use_inelastic_scatt) {
+      std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+                << std::endl
+                << "<bns_nurates>/use_inelastic_scatt = true is not supported by the "
+                   "<radiation> solver. Inelastic scattering on electrons is "
+                   "non-thermal emission, and this module has no thermal/non-thermal "
+                   "separation, so Kirchhoff's law and the partial-equilibrium "
+                   "predictor would thermalize it and pair the equilibrium spectrum "
+                   "with an absorption coefficient that still carries the NES "
+                   "out-scattering. Set use_inelastic_scatt = false. (<radiation_m1> "
+                   "does separate the two and is unaffected; see "
+                   "scripts/kokkos_perf/INELASTIC_SCATTERING.md.)" << std::endl;
+      std::exit(EXIT_FAILURE);
+    }
+
     // floors -- key names and defaults match radiation_m1.cpp.  nb_min is in
     // fm^-3, i.e. the EOS number-density unit, and is compared against nb before
     // the conversion to bns_nurates units; it used to be compared after, so the
