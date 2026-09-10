@@ -389,6 +389,8 @@ TaskStatus Radiation::CalcOpacityNurates_(Driver *pdrive, int stage) {
   auto &abs_0_f_   = nurates_abs_0_freq;
   auto &abs_1_f_   = nurates_abs_1_freq;
   auto &scat_1_f_  = nurates_scat_1_freq;
+  auto &jf_f_      = nurates_jf_freq;
+  auto &nf_f_      = nurates_nf_freq;
   auto &i0_ = i0;
   auto &freq_grid_ = freq_grid;
   auto &nh_c_ = nh_c;
@@ -450,8 +452,6 @@ TaskStatus Radiation::CalcOpacityNurates_(Driver *pdrive, int stage) {
     // reconstruction is handed on to bns_nurates below.
     Real alpha_cell = 1.0;
     Real w_lorentz = 1.0;
-    // Hoisted out of the block below: the multi-frequency weights re-sum the angles
-    // bin by bin, once the opacities are known, and need the same ray geometry.
     Real u_tet[4] = {1.0, 0.0, 0.0, 0.0};
     Real n0 = 1.0;
     Real wght_sum = 1.0;
@@ -502,6 +502,8 @@ TaskStatus Radiation::CalcOpacityNurates_(Driver *pdrive, int stage) {
             Real e_lo = 0.0, e_hi = 0.0;
             FreqBinEdgesMeV(freq_grid_, ifr, nfreq_, freq_scale_, e_lo, e_hi);
             Real e_mid = FreqBinMidMeV(e_lo, e_hi, freq_scale_);
+            Real jf_bin = 0.0;
+            Real nf_bin = 0.0;
             for (int iang = 0; iang <= nang1; ++iang) {
               int n = sp_off + ifr*nang_ + iang;
               Real n_0 = tc(m,0,0,k,j,i)*nh_c_.d_view(iang,0) +
@@ -516,7 +518,11 @@ TaskStatus Radiation::CalcOpacityNurates_(Driver *pdrive, int stage) {
               Real intensity_cm = 4.0*M_PI*(i0_(m,n,k,j,i)/(n0*n_0))*SQR(SQR(n0_cm));
               nudens_1[isp] += intensity_cm*omega_cm;
               nudens_0[isp] += intensity_cm*omega_cm/fmax(n0_cm*e_mid, 1.0e-100);
+              jf_bin += intensity_cm*omega_cm;
+              nf_bin += intensity_cm*omega_cm/fmax(n0_cm*e_mid, 1.0e-100);
             }
+            jf_f_(m, isp, ifr, k, j, i) = jf_bin;
+            nf_f_(m, isp, ifr, k, j, i) = nf_bin;
           }
           nudens_1[isp] /= wght_sum;
           nudens_0[isp] /= wght_sum;
@@ -710,51 +716,34 @@ TaskStatus Radiation::CalcOpacityNurates_(Driver *pdrive, int stage) {
           scat_1_f_(m, isp, ifr, k, j, i) = loc_scat_1_f[isp];
         }
 
-        if (peq_on_) {
-          Real e_mid = FreqBinMidMeV(e_lo, e_hi, freq_scale_);
+      }
+
+      // Partial-equilibrium weights.  A separate pass over the bins: the opacities and
+      // the per-bin angular sums are both in global memory by now, and the loop above is
+      // register-starved.
+      if (peq_on_) {
+        for (int ifr = 0; ifr < nfreq_; ++ifr) {
           for (int isp = 0; isp < nspecies_; ++isp) {
-            Real J_f = 0.0;
-            Real N_f = 0.0;
-            int sp_off = isp*nfreq_*nang_;
-            for (int iang = 0; iang <= nang1; ++iang) {
-              int n = sp_off + ifr*nang_ + iang;
-              Real n_0 = tc(m,0,0,k,j,i)*nh_c_.d_view(iang,0) +
-                         tc(m,1,0,k,j,i)*nh_c_.d_view(iang,1) +
-                         tc(m,2,0,k,j,i)*nh_c_.d_view(iang,2) +
-                         tc(m,3,0,k,j,i)*nh_c_.d_view(iang,3);
-              Real n0_cm = (u_tet[0]*nh_c_.d_view(iang,0) -
-                            u_tet[1]*nh_c_.d_view(iang,1) -
-                            u_tet[2]*nh_c_.d_view(iang,2) -
-                            u_tet[3]*nh_c_.d_view(iang,3));
-              Real omega_cm = solid_angles_.d_view(iang)/SQR(n0_cm);
-              Real intensity_cm = 4.0*M_PI*(i0_(m,n,k,j,i)/(n0*n_0))*SQR(SQR(n0_cm));
-              J_f += intensity_cm*omega_cm;
-              // Divided by the ray's OWN comoving bin energy, exactly as the species
-              // totals above are: the lab bin sits at n0_cm*[e_lo, e_hi] on this ray.
-              N_f += intensity_cm*omega_cm/fmax(n0_cm*e_mid, 1.0e-100);
-            }
-            J_f /= wght_sum;
+            Real J_f = jf_f_(m, isp, ifr, k, j, i)/wght_sum;
             // Same conversion the species totals get: a code-unit energy density over a
             // bin energy in MeV is a number density in fm^-3.
-            N_f *= code_edens_to_eos/wght_sum;
-            // Each channel takes the opacity it will itself be integrated with:
-            // abs_1 weights the energy equation, abs_0 the number equation, exactly as
-            // the grey block above does.  This loop used abs_1 for both before the
-            // weights were split.  That is a no-op today -- bns_nurates_spectral_bin
-            // sets abs_0 and abs_1 to the same monochromatic kappa, since the two only
-            // part company once an energy average is taken over a spectrum, and 3335 of
-            // 3335 single-zone dumps are bit-identical either way.  It is written the
-            // right way round so that it stays right if they ever differ per bin, as
+            Real N_f = nf_f_(m, isp, ifr, k, j, i)*code_edens_to_eos/wght_sum;
+            // Each channel takes the opacity it will itself be integrated with: abs_1
+            // weights the energy equation, abs_0 the number equation, exactly as the grey
+            // block above does.  abs_0 and abs_1 hold the same monochromatic kappa today;
+            // they part company only once an energy average is taken over a spectrum, as
             // they would with the non-thermal separation the M1 path carries.
+            Real ka1 = abs_1_f_(m, isp, ifr, k, j, i);
+            Real ka0 = abs_0_f_(m, isp, ifr, k, j, i);
             if (isp < 2) {
-              kJ_e[isp] += loc_abs_1_f[isp]*J_f;
-              kN_e[isp] += loc_abs_0_f[isp]*N_f;
-              ka1_e[isp] += loc_abs_1_f[isp];
-              ka0_e[isp] += loc_abs_0_f[isp];
+              kJ_e[isp] += ka1*J_f;
+              kN_e[isp] += ka0*N_f;
+              ka1_e[isp] += ka1;
+              ka0_e[isp] += ka0;
               ++nka_e[isp];
             } else {
-              kJ_x += loc_abs_1_f[isp]*J_f;
-              ka_x += loc_abs_1_f[isp];
+              kJ_x += ka1*J_f;
+              ka_x += ka1;
               ++nka_x;
             }
           }

@@ -134,6 +134,10 @@ class Radiation {
   DvceArray6D<Real> nurates_abs_0_freq;
   DvceArray6D<Real> nurates_abs_1_freq;
   DvceArray6D<Real> nurates_scat_1_freq;
+  // Per-bin angular sums of the comoving intensity, [nmb, nspecies, nfreq, nk, nj, ni].
+  // Raw sums over rays: the caller applies the wght_sum normalisation.
+  DvceArray6D<Real> nurates_jf_freq;   // energy   sum(intensity_cm*omega_cm)
+  DvceArray6D<Real> nurates_nf_freq;   // number   the same, over the bin mid energy
   // Per-cell workspace for the multi-frequency source term, [nmb, nwork, nk, nj, ni].
   // It lives here rather than in team scratch because the kernel is dispatched with a
   // flat par_for: the body is serial over the whole cell, so it must own its cell

@@ -648,6 +648,8 @@ Radiation::Radiation(MeshBlockPack *ppack, ParameterInput *pin) :
       Kokkos::realloc(nurates_abs_0_freq,  nmb, nspecies, nfreq, ncells3, ncells2, ncells1);
       Kokkos::realloc(nurates_abs_1_freq,  nmb, nspecies, nfreq, ncells3, ncells2, ncells1);
       Kokkos::realloc(nurates_scat_1_freq, nmb, nspecies, nfreq, ncells3, ncells2, ncells1);
+      Kokkos::realloc(nurates_jf_freq,     nmb, nspecies, nfreq, ncells3, ncells2, ncells1);
+      Kokkos::realloc(nurates_nf_freq,     nmb, nspecies, nfreq, ncells3, ncells2, ncells1);
       int nwork = NURATES_MF_WORK_SIZE(nfreq, prgeo->nangles);
       Kokkos::realloc(nurates_mf_work, nmb, nwork, ncells3, ncells2, ncells1);
     }
