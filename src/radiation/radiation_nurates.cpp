@@ -391,6 +391,13 @@ TaskStatus Radiation::CalcOpacityNurates_(Driver *pdrive, int stage) {
   auto &scat_1_f_  = nurates_scat_1_freq;
   auto &jf_f_      = nurates_jf_freq;
   auto &nf_f_      = nurates_nf_freq;
+  auto &f_f_       = nurates_f_freq;
+  const bool evolved_spec_ =
+      multi_freq && !nurates_params.use_equilibrium_distribution;
+  // Element strides of the species and frequency axes, so the device side can hand the
+  // integrand a flat view of one cell's spectrum.
+  const int f_sp_stride = evolved_spec_ ? static_cast<int>(nurates_f_freq.stride_1()) : 0;
+  const int f_fr_stride = evolved_spec_ ? static_cast<int>(nurates_f_freq.stride_2()) : 0;
   auto &i0_ = i0;
   auto &freq_grid_ = freq_grid;
   auto &nh_c_ = nh_c;
@@ -523,6 +530,21 @@ TaskStatus Radiation::CalcOpacityNurates_(Driver *pdrive, int stage) {
             }
             jf_f_(m, isp, ifr, k, j, i) = jf_bin;
             nf_f_(m, isp, ifr, k, j, i) = nf_bin;
+            if (evolved_spec_) {
+              // The bin's energy density read back as an occupancy, from
+              // J = int (4pi/(hc)^3) nu^3 f dnu with f flat across the bin.  It has to
+              // come from the energy and not from nf_bin: nf_bin is itself J/e_mid, and
+              // pairing that with the nu^2 integral biases f high -- 1.5% on a
+              // [10, 2000] MeV nfreq = 24 grid, 7.7% at nfreq = 12.  The half is the
+              // mu+tau slot convention (see NuratesEqDensities); the clamp keeps 1 - f,
+              // which multiplies the pair and bremsstrahlung emissivities, in [0, 1].
+              Real j_bin = jf_bin/wght_sum*unit_ene_dens_;
+              Real ph_bin = bns_nurates::kBS_FourPi_hc3*
+                            (e_hi*e_hi*e_hi*e_hi - e_lo*e_lo*e_lo*e_lo)/4.0;
+              Real f_bin = (ph_bin > 0.0)
+                           ? ((isp < 2) ? j_bin : 0.5*j_bin)/ph_bin : 0.0;
+              f_f_(m, isp, ifr, k, j, i) = fmin(fmax(f_bin, 0.0), 1.0);
+            }
           }
           nudens_1[isp] /= wght_sum;
           nudens_0[isp] /= wght_sum;
@@ -571,7 +593,6 @@ TaskStatus Radiation::CalcOpacityNurates_(Driver *pdrive, int stage) {
       Real loc_scat_1[4] = {0.};
 
       bns_nurates_gray(nb, T, yp, yn, mu_n, mu_p, mu_e,
-                       nudens_0, nudens_1,
                        loc_eta_0, loc_eta_1,
                        loc_abs_0, loc_abs_1,
                        loc_scat_0, loc_scat_1,
@@ -689,9 +710,25 @@ TaskStatus Radiation::CalcOpacityNurates_(Driver *pdrive, int stage) {
       Real kJ_x = 0.0, ka_x = 0.0;
       int nka_x = 0;
 
+      NuratesGroupOccupancy nu_spec = {};
+      if (evolved_spec_) {
+        Real b0_lo = 0.0, b0_hi = 0.0, b1_lo = 0.0, b1_hi = 0.0;
+        FreqBinEdgesMeV(freq_grid_, 0, nfreq_, freq_scale_, b0_lo, b0_hi);
+        FreqBinEdgesMeV(freq_grid_, 1, nfreq_, freq_scale_, b1_lo, b1_hi);
+        Real mid0 = FreqBinMidMeV(b0_lo, b0_hi, freq_scale_);
+        Real mid1 = FreqBinMidMeV(b1_lo, b1_hi, freq_scale_);
+        nu_spec.f         = &f_f_(m, 0, 0, k, j, i);
+        nu_spec.sp_stride = f_sp_stride;
+        nu_spec.fr_stride = f_fr_stride;
+        nu_spec.nspecies  = nspecies_;
+        nu_spec.nfreq     = nfreq_;
+        nu_spec.log_grid  = (freq_scale_ == 1);
+        nu_spec.x0        = nu_spec.log_grid ? log(mid0) : mid0;
+        nu_spec.inv_dx    = 1.0/((nu_spec.log_grid ? log(mid1) : mid1) - nu_spec.x0);
+      }
+
       NuratesCellState nu_cell =
-          NuratesSpectralCellState(nb, T, yp, yn, mu_n, mu_p, mu_e,
-                                   nudens_0, nudens_1,
+          NuratesSpectralCellState(nb, T, yp, yn, mu_n, mu_p, mu_e, nu_spec,
                                    nurates_params_, code_units_l, eos_units_loc_l);
 
       // freq_grid is in MeV, which is what bns_nurates_spectral_bin wants

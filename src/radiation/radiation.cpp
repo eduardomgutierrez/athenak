@@ -523,20 +523,14 @@ Radiation::Radiation(MeshBlockPack *ppack, ParameterInput *pin) :
     nurates_params.use_BRT_brem        = pin->GetOrAddBoolean("bns_nurates","use_BRT_brem",false);
     nurates_params.use_equilibrium_distribution =
         pin->GetOrAddBoolean("bns_nurates","use_equilibrium_distribution",true);
-    nurates_params.use_kirchhoff_law =
-        pin->GetOrAddBoolean("bns_nurates", "use_kirchhoff_law", true);
-
-    // Partially-equilibrated (T*, Ye*) emissivity predictor.  On by default: it is the
-    // scheme, not an option on top of one.  Off, Kirchhoff's law gets the local
-    // blackbody at (T^n, Ye^n) -- the predictor's own dt -> 0 limit -- which is a real
-    // fallback but runs the emission at the start-of-step rate for the whole step, and
-    // so puts a ceiling on dt that has nothing to do with transport.
-    // Key names and defaults are identical to the M1 parser in radiation_m1.cpp on
-    // purpose, so one <bns_nurates> block drives both solvers; any change here must be
-    // mirrored there.  GetOrAddBoolean writes the default into the input, so the
-    // "asked for by name?" test has to be read before it, not after.
-    const bool peq_requested =
-        pin->DoesParameterExist("bns_nurates", "use_partial_equilibrium");
+    // Partially-equilibrated (T*, Ye*) emissivity predictor, and the only equilibrium
+    // closure this module has.  On by default: it is the scheme, not an option on top of
+    // one.  Off, the emissivity is bns_nurates' own, from its per-bin quadrature at the
+    // start of the step, which runs the emission at the start-of-step rate for the whole
+    // step and so puts a ceiling on dt that has nothing to do with transport.
+    // <bns_nurates>/use_kirchhoff_law is deliberately not read here, though the input
+    // files carry it: M1 reads it from its own parser, and this solver has no
+    // frequency-integrated Kirchhoff step for it to gate.
     nurates_params.use_partial_equilibrium =
         pin->GetOrAddBoolean("bns_nurates", "use_partial_equilibrium", true);
     nurates_params.peq_w_floor =
@@ -545,36 +539,6 @@ Radiation::Radiation(MeshBlockPack *ppack, ParameterInput *pin) :
         pin->GetOrAddReal("bns_nurates", "peq_dlnT_tol", 1e-4);
     nurates_params.peq_dYe_tol =
         pin->GetOrAddReal("bns_nurates", "peq_dYe_tol", 1e-4);
-
-    // The predictor's only output is an equilibrium distribution, and in this module
-    // Kirchhoff's law is the only thing that consumes one -- unlike M1, where
-    // use_equilibrium_distribution also gives it a second consumer.  So the predictor
-    // needs use_kirchhoff_law, and after this block "use_partial_equilibrium" implies
-    // "use_kirchhoff_law", which every gate below relies on.
-    // Asking for it by name without Kirchhoff is an error; inheriting the default there
-    // is not, since "no equilibrium closure at all" is a legitimate thing to configure
-    // and it would be rude to fail at startup over a line the user never wrote.  Turn
-    // it off instead, and say so.
-    if (nurates_params.use_partial_equilibrium &&
-        !nurates_params.use_kirchhoff_law) {
-      if (peq_requested) {
-        std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
-                  << std::endl
-                  << "<bns_nurates>/use_partial_equilibrium = true requires "
-                     "use_kirchhoff_law = true; the predicted (T*, Ye*) blackbody is "
-                     "what Kirchhoff's law multiplies, and with it off nothing reads "
-                     "the prediction." << std::endl;
-        std::exit(EXIT_FAILURE);
-      }
-      nurates_params.use_partial_equilibrium = false;
-      if (global_variable::my_rank == 0) {
-        std::cout << "### WARNING: <bns_nurates>/use_partial_equilibrium defaults to "
-                     "true but use_kirchhoff_law is false, so nothing would read the "
-                     "predicted (T*, Ye*). Turning it off; the emissivity is "
-                     "bns_nurates' own, evaluated at the start of the step."
-                  << std::endl;
-      }
-    }
 
     if (!multi_freq && !nurates_params.use_equilibrium_distribution) {
       std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
@@ -650,6 +614,7 @@ Radiation::Radiation(MeshBlockPack *ppack, ParameterInput *pin) :
       Kokkos::realloc(nurates_scat_1_freq, nmb, nspecies, nfreq, ncells3, ncells2, ncells1);
       Kokkos::realloc(nurates_jf_freq,     nmb, nspecies, nfreq, ncells3, ncells2, ncells1);
       Kokkos::realloc(nurates_nf_freq,     nmb, nspecies, nfreq, ncells3, ncells2, ncells1);
+      Kokkos::realloc(nurates_f_freq,      nmb, nspecies, nfreq, ncells3, ncells2, ncells1);
       int nwork = NURATES_MF_WORK_SIZE(nfreq, prgeo->nangles);
       Kokkos::realloc(nurates_mf_work, nmb, nwork, ncells3, ncells2, ncells1);
     }

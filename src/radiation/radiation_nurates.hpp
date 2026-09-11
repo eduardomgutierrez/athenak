@@ -44,12 +44,12 @@ struct NuratesParams {
   bool use_decay;            // include muon decay
   bool use_BRT_brem;         // use BRT06 bremsstrahlung (instead of HR98)
   bool use_equilibrium_distribution;  // assume neutrinos in thermal equilibrium
-  bool use_kirchhoff_law;    // replace gray emissivities by kappa times equilibrium density
 
-  // Partially-equilibrated (T*, Ye*) emissivity predictor.  Kirchhoff's law is applied
-  // against the blackbody at the state the matter is predicted to reach over the step,
-  // not the state it starts from.  Same names, same defaults and the same meaning as in
-  // radiation_m1/radiation_m1_params.hpp, so one <bns_nurates> block drives both solvers.
+  // Partially-equilibrated (T*, Ye*) emissivity predictor, and the only equilibrium
+  // closure this module has: Kirchhoff's law against the blackbody at the state the
+  // matter is predicted to reach over the step, not the state it starts from.  Off, the
+  // emissivity is bns_nurates' own.  Same names, same defaults and the same meaning as
+  // in radiation_m1/radiation_m1_params.hpp, so one <bns_nurates> block drives both.
   bool use_partial_equilibrium;
   Real peq_w_floor;    // tier-0 gate: skip the cell outright below this weight
   Real peq_dlnT_tol;   // tier-1 gate: skip when the predicted |dlnT| is below this
@@ -132,9 +132,88 @@ Primitive::UnitSystem MakeNuratesUnitSystem() {
   };
 }
 
+//----------------------------------------------------------------------------------------
+//! \struct NuratesGroupOccupancy
+//! \brief One cell's evolved neutrino occupancy as the partner-energy integrals need to
+//!        see it: a flat view of f(species, bin), plus the uniform coordinate the bin
+//!        midpoints are spaced on.
+//!
+//! A null `f` means the cell carries no evolved spectrum, which is what
+//! `use_equilibrium_distribution` asks for; GreyOpacityParams::distr_pars is used then.
+
+struct NuratesGroupOccupancy {
+  const Real *f;    // f[isp*sp_stride + ifr*fr_stride], clamped to [0, 1]
+  int sp_stride;
+  int fr_stride;
+  int nspecies;
+  int nfreq;
+  Real x0;          // grid coordinate of bin 0's midpoint
+  Real inv_dx;      // reciprocal spacing of that coordinate
+  bool log_grid;    // the coordinate is log(E/MeV) rather than E
+};
+
+//----------------------------------------------------------------------------------------
+//! \fn void NuratesOccupancyAt
+//! \brief Occupancy of every species at energy nu (MeV), interpolated linearly between
+//!        the bins whose midpoints bracket it.
+//!
+//! Outside the grid the two ends take different values, matching the asymptotes the
+//! source term's frequency remap is built on (RemapAsymptote::kSpectrum,
+//! radiation_nurates_remap.hpp): below mid(0) a fermion occupation saturates, so 1;
+//! above mid(nfreq-1) it is Boltzmann-suppressed, so 0.  A non-positive or NaN energy
+//! takes the zero branch.
+
+KOKKOS_INLINE_FUNCTION
+void NuratesOccupancyAt(const NuratesGroupOccupancy &spec, const Real nu,
+                        bns_nurates::BS_REAL f[total_num_species]) {
+  for (int idx = 0; idx < total_num_species; ++idx) {
+    f[idx] = 0.0;
+  }
+  if (nu <= 0.0) {
+    return;
+  }
+  const Real s = ((spec.log_grid ? log(nu) : nu) - spec.x0)*spec.inv_dx;
+  if (!(s < static_cast<Real>(spec.nfreq - 1))) {
+    return;
+  }
+  const int nsp = (spec.nspecies < total_num_species) ? spec.nspecies
+                                                      : total_num_species;
+  if (s <= 0.0) {
+    for (int idx = 0; idx < nsp; ++idx) {
+      f[idx] = 1.0;
+    }
+    return;
+  }
+  const int il = static_cast<int>(s);
+  const Real w = s - static_cast<Real>(il);
+  for (int idx = 0; idx < nsp; ++idx) {
+    const Real *p = spec.f + idx*spec.sp_stride + il*spec.fr_stride;
+    f[idx] = p[0] + w*(p[spec.fr_stride] - p[0]);
+  }
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void NuratesOccupancy
+//! \brief Occupancy of every species at energy nu (MeV), from the evolved spectrum where
+//!        the cell has one and from the equilibrium distribution otherwise.
+
+KOKKOS_INLINE_FUNCTION
+void NuratesOccupancy(const NuratesGroupOccupancy &spec,
+                      bns_nurates::NuDistributionParams &distr_pars,
+                      const Real nu, bns_nurates::BS_REAL f[total_num_species]) {
+  if (spec.f != nullptr) {
+    NuratesOccupancyAt(spec, nu, f);
+  } else {
+    for (int idx = 0; idx < total_num_species; ++idx) {
+      f[idx] = TotalNuF(nu, &distr_pars, idx);
+    }
+  }
+}
+
 KOKKOS_INLINE_FUNCTION
 bns_nurates::MyQuadratureIntegrand RadiationSpectralIntegrand(
-    const bns_nurates::BS_REAL nu_bar, bns_nurates::GreyOpacityParams &grey_op_params) {
+    const bns_nurates::BS_REAL nu_bar, const NuratesGroupOccupancy &spec,
+    bns_nurates::GreyOpacityParams &grey_op_params) {
   constexpr bns_nurates::BS_REAL zero = 0.0;
   constexpr bns_nurates::BS_REAL one  = 1.0;
 
@@ -142,14 +221,10 @@ bns_nurates::MyQuadratureIntegrand RadiationSpectralIntegrand(
   const bns_nurates::OpacityFlags &opacity_flags = grey_op_params.opacity_flags;
   const bns_nurates::OpacityParams &opacity_pars = grey_op_params.opacity_pars;
 
-  bns_nurates::BS_REAL nu = grey_op_params.kernel_pars.pair_kernel_params.omega;
   bns_nurates::BS_REAL block_factor[total_num_species];
-  bns_nurates::BS_REAL g_nu[total_num_species], g_nu_bar[total_num_species];
+  bns_nurates::BS_REAL g_nu_bar[total_num_species];
 
-  for (int idx = 0; idx < total_num_species; ++idx) {
-    g_nu[idx] = TotalNuF(nu, &grey_op_params.distr_pars, idx);
-    g_nu_bar[idx] = TotalNuF(nu_bar, &grey_op_params.distr_pars, idx);
-  }
+  NuratesOccupancy(spec, grey_op_params.distr_pars, nu_bar, g_nu_bar);
 
   bns_nurates::MyKernelOutput pair_kernels_m1 = {0};
   if (opacity_flags.use_pair) {
@@ -228,17 +303,6 @@ bns_nurates::MyQuadratureIntegrand RadiationSpectralIntegrand(
       (pair_kernels_m1.abs[id_anux] + brem_kernels_m1.abs[id_anux]) *
       g_nu_bar[id_nux];
 
-  if (kirchoff_flag) {
-    ann_term[id_nue] +=
-        pair_kernels_m1.em[id_nue] * g_nu_bar[id_anue] / g_nu[id_nue];
-    ann_term[id_anue] +=
-        pair_kernels_m1.em[id_anue] * g_nu_bar[id_nue] / g_nu[id_anue];
-    ann_term[id_nux] +=
-        pair_kernels_m1.em[id_nux] * g_nu_bar[id_anux] / g_nu[id_nux];
-    ann_term[id_anux] +=
-        pair_kernels_m1.em[id_anux] * g_nu_bar[id_nux] / g_nu[id_anux];
-  }
-
   for (int idx = 0; idx < total_num_species; ++idx) {
     ann_term[idx] += inelastic_kernels_m1.abs[idx] * block_factor[idx];
   }
@@ -261,6 +325,7 @@ KOKKOS_INLINE_FUNCTION
 bns_nurates::MyQuadratureIntegrand RadiationIntegrateSpectral1D(
     bns_nurates::MyQuadrature* quad,
     bns_nurates::GreyOpacityParams &grey_op_params,
+    const NuratesGroupOccupancy &spec,
     const bns_nurates::BS_REAL t) {
   constexpr int num_integrands = 8;
   bns_nurates::MyQuadratureIntegrand result = {0};
@@ -276,9 +341,9 @@ bns_nurates::MyQuadratureIntegrand RadiationIntegrateSpectral1D(
     const bns_nurates::BS_REAL x = quad->points[i];
     const bns_nurates::BS_REAL w = quad->w[i];
     const bns_nurates::MyQuadratureIntegrand f1_vals =
-        RadiationSpectralIntegrand(t * x, grey_op_params);
+        RadiationSpectralIntegrand(t * x, spec, grey_op_params);
     const bns_nurates::MyQuadratureIntegrand f2_vals =
-        RadiationSpectralIntegrand(t / x, grey_op_params);
+        RadiationSpectralIntegrand(t / x, spec, grey_op_params);
 
     for (int k = 0; k < num_integrands; ++k) {
       f1_sum[k] += w * f1_vals.integrand[k];
@@ -293,12 +358,23 @@ bns_nurates::MyQuadratureIntegrand RadiationIntegrateSpectral1D(
   return result;
 }
 
+//----------------------------------------------------------------------------------------
+//! \fn bns_nurates::SpectralOpacities RadiationComputeSpectralOpacities
+//! \brief Spectral coefficients at energy nu (MeV): the emissivity `j`, the bare
+//!        absorption coefficient `kappa`, and the elastic scattering coefficient
+//!        `kappa_s`.
+//!
+//! `kappa_s` is already in the stimulated form the solver consumes -- see the elastic
+//! block below -- so `j_s` is left at zero and nothing adds it back.  `kappa` is the one
+//! coefficient still missing its stimulated correction, which
+//! RadiationComputeSpectralOpacitiesStimulatedAbs supplies.
+
 KOKKOS_INLINE_FUNCTION
-bns_nurates::SpectralOpacities RadiationComputeSpectralOpacitiesNotStimulatedAbs(
+bns_nurates::SpectralOpacities RadiationComputeSpectralOpacities(
     const bns_nurates::BS_REAL nu, bns_nurates::MyQuadrature* quad_1d,
+    const NuratesGroupOccupancy &spec,
     bns_nurates::GreyOpacityParams* grey_op_params) {
   constexpr bns_nurates::BS_REAL zero    = 0.0;
-  constexpr bns_nurates::BS_REAL one     = 1.0;
   constexpr bns_nurates::BS_REAL four_pi = 4.0 * bns_nurates::kBS_Pi;
   constexpr bns_nurates::BS_REAL c_light = bns_nurates::kBS_Clight;
 
@@ -309,11 +385,6 @@ bns_nurates::SpectralOpacities RadiationComputeSpectralOpacitiesNotStimulatedAbs
   bns_nurates::GreyOpacityParams local_grey_params = *grey_op_params;
   local_grey_params.opacity_flags.use_inelastic_scatt = 0;
 
-  bns_nurates::BS_REAL g_nu[total_num_species];
-  for (int idx = 0; idx < total_num_species; ++idx) {
-    g_nu[idx] = TotalNuF(nu, &grey_op_params->distr_pars, idx);
-  }
-
   constexpr bns_nurates::BS_REAL temp_multiple = 0.5 * 4.364;
   const bns_nurates::BS_REAL s_pair = temp_multiple * grey_op_params->eos_pars.temp;
   const bns_nurates::BS_REAL s_neps = nu;
@@ -321,15 +392,19 @@ bns_nurates::SpectralOpacities RadiationComputeSpectralOpacitiesNotStimulatedAbs
   bns_nurates::MyQuadratureIntegrand integrals_pair_1d = {0};
   if (grey_op_params->opacity_flags.use_pair || grey_op_params->opacity_flags.use_brem) {
     integrals_pair_1d =
-        RadiationIntegrateSpectral1D(quad_1d, local_grey_params, s_pair);
+        RadiationIntegrateSpectral1D(quad_1d, local_grey_params, spec, s_pair);
   }
 
   bns_nurates::MyQuadratureIntegrand integrals_neps_1d = {0};
   if (grey_op_params->opacity_flags.use_inelastic_scatt == 1) {
     local_grey_params.opacity_flags                     = {0};
     local_grey_params.opacity_flags.use_inelastic_scatt = 1;
+    // NES wants a thermal final state for its out-scattering blocking and the evolved
+    // one for its in-scattering, which this single source cannot give it: see
+    // scripts/kokkos_perf/INELASTIC_SCATTERING.md, and the constructor guard that
+    // makes the channel a fatal error here.
     integrals_neps_1d =
-        RadiationIntegrateSpectral1D(quad_1d, local_grey_params, s_neps);
+        RadiationIntegrateSpectral1D(quad_1d, local_grey_params, spec, s_neps);
   }
 
   bns_nurates::MyOpacity abs_em_beta = {0};
@@ -379,19 +454,13 @@ bns_nurates::SpectralOpacities RadiationComputeSpectralOpacitiesNotStimulatedAbs
        bns_nurates::kBS_FourPi_hc3 * (integrals_pair_1d.integrand[7] +
                          integrals_neps_1d.integrand[7])) / c_light;
 
-  sp_opacities.j_s[id_nue]  = four_pi * POW2(nu) * g_nu[id_nue] * iso_scatt;
-  sp_opacities.j_s[id_anue] = four_pi * POW2(nu) * g_nu[id_anue] * iso_scatt;
-  sp_opacities.j_s[id_nux]  = four_pi * POW2(nu) * g_nu[id_nux] * iso_scatt;
-  sp_opacities.j_s[id_anux] = four_pi * POW2(nu) * g_nu[id_anux] * iso_scatt;
-
-  sp_opacities.kappa_s[id_nue] =
-      four_pi * POW2(nu) * (one - g_nu[id_nue]) * iso_scatt / c_light;
-  sp_opacities.kappa_s[id_anue] =
-      four_pi * POW2(nu) * (one - g_nu[id_anue]) * iso_scatt / c_light;
-  sp_opacities.kappa_s[id_nux] =
-      four_pi * POW2(nu) * (one - g_nu[id_nux]) * iso_scatt / c_light;
-  sp_opacities.kappa_s[id_anux] =
-      four_pi * POW2(nu) * (one - g_nu[id_anux]) * iso_scatt / c_light;
+  // In- and out-scattering sit at the same energy for an elastic process, so the
+  // occupancy cancels: j_s/c + kappa_s is this, for any distribution.  It must stay
+  // exactly independent of the radiation field, so keep it as one product.
+  const bns_nurates::BS_REAL kappa_s_elastic = four_pi * POW2(nu) * iso_scatt / c_light;
+  for (int idx = 0; idx < total_num_species; ++idx) {
+    sp_opacities.kappa_s[idx] = kappa_s_elastic;
+  }
 
   return sp_opacities;
 }
@@ -399,14 +468,14 @@ bns_nurates::SpectralOpacities RadiationComputeSpectralOpacitiesNotStimulatedAbs
 KOKKOS_INLINE_FUNCTION
 bns_nurates::SpectralOpacities RadiationComputeSpectralOpacitiesStimulatedAbs(
     const bns_nurates::BS_REAL nu, bns_nurates::MyQuadrature* quad_1d,
+    const NuratesGroupOccupancy &spec,
     bns_nurates::GreyOpacityParams* grey_op_params) {
   constexpr bns_nurates::BS_REAL c_light = bns_nurates::kBS_Clight;
   bns_nurates::SpectralOpacities op =
-      RadiationComputeSpectralOpacitiesNotStimulatedAbs(nu, quad_1d, grey_op_params);
+      RadiationComputeSpectralOpacities(nu, quad_1d, spec, grey_op_params);
 
   for (int idx = 0; idx < total_num_species; ++idx) {
-    op.kappa[idx]   += op.j[idx] / c_light;
-    op.kappa_s[idx] += op.j_s[idx] / c_light;
+    op.kappa[idx] += op.j[idx] / c_light;
   }
 
   return op;
@@ -550,8 +619,6 @@ void NuratesEqSpectrumBin(Real e_lo_mev, Real e_hi_mev,
 //! \param[in]  mu_n        neutron chemical potential (MeV)
 //! \param[in]  mu_p        proton chemical potential (MeV)
 //! \param[in]  mu_e        electron chemical potential (MeV)
-//! \param[in]  nudens_0    neutrino number densities [4] (fm^-3, per species)
-//! \param[in]  nudens_1    neutrino energy densities [4] (code units, per species)
 //! \param[out] eta_0       number emissivity [nspecies] (fm^-3 per code time)
 //! \param[out] eta_1       energy emissivity [nspecies] (code units)
 //! \param[out] abs_0       number absorption opacity [nspecies] (code units)
@@ -563,7 +630,6 @@ void NuratesEqSpectrumBin(Real e_lo_mev, Real e_hi_mev,
 KOKKOS_INLINE_FUNCTION
 void bns_nurates_gray(Real nb, Real temp, Real yp, Real yn,
                       Real mu_n, Real mu_p, Real mu_e,
-                      Real nudens_0[4], Real nudens_1[4],
                       Real eta_0[4], Real eta_1[4],
                       Real abs_0[4], Real abs_1[4],
                       Real scat_0[4], Real scat_1[4],
@@ -579,10 +645,9 @@ void bns_nurates_gray(Real nb, Real temp, Real yp, Real yn,
 
   const Real unit_length    = code_units.LengthConversion(nurates_units);
   const Real unit_time      = code_units.TimeConversion(nurates_units);
-  // Every number density crossing this interface -- the baryon density nb, the
-  // neutrino densities nudens_0 and the number emissivity eta_0 -- is in the EOS
-  // number-density unit (fm^-3), as in radiation_m1/.  Energy densities stay in
-  // code units, per the G = c = 1 convention.
+  // Every number density crossing this interface -- the baryon density nb and the
+  // number emissivity eta_0 -- is in the EOS number-density unit (fm^-3), as in
+  // radiation_m1/.  Energy densities stay in code units, per the G = c = 1 convention.
   const Real unit_num_dens  = eos_units.NumberDensityConversion(nurates_units);
   const Real unit_ene_dens  = code_units.EnergyDensityConversion(nurates_units);
 
@@ -634,39 +699,17 @@ void bns_nurates_gray(Real nb, Real temp, Real yp, Real yn,
   grey_op_params.eos_pars.dU      = 0.;
   grey_op_params.eos_pars.dm_eff  = 0.;
 
-  // neutrino distribution: equilibrium or reconstructed from M1 moments
-  if (nurates_params.use_equilibrium_distribution) {
-    // equilibrium distribution: assume full LTE for all species
-    grey_op_params.distr_pars = NuEquilibriumParams(&grey_op_params.eos_pars);
-    ComputeM1DensitiesEq(&grey_op_params.eos_pars,
-                         &grey_op_params.distr_pars,
-                         &grey_op_params.m1_pars);
-    grey_op_params.m1_pars.chi[id_nue]  = 1./3.;
-    grey_op_params.m1_pars.chi[id_anue] = 1./3.;
-    grey_op_params.m1_pars.chi[id_nux]  = 1./3.;
-    grey_op_params.m1_pars.chi[id_anux] = 1./3.;
-  } else {
-    // reconstruct from gray radiation moments (frequency-integrated)
-    // nudens_0[isp] = number density, nudens_1[isp] = energy density
-    // factor 1/2 for nux/anux: bns_nurates uses "mu or tau", gray rad uses "mu+tau"
-    grey_op_params.m1_pars.n[id_nue]  = nudens_0[0] * unit_num_dens;
-    grey_op_params.m1_pars.n[id_anue] = nudens_0[1] * unit_num_dens;
-    grey_op_params.m1_pars.n[id_nux]  = 0.5 * nudens_0[2] * unit_num_dens;
-    grey_op_params.m1_pars.n[id_anux] = 0.5 * nudens_0[3] * unit_num_dens;
-
-    grey_op_params.m1_pars.J[id_nue]  = nudens_1[0] * unit_ene_dens;
-    grey_op_params.m1_pars.J[id_anue] = nudens_1[1] * unit_ene_dens;
-    grey_op_params.m1_pars.J[id_nux]  = 0.5 * nudens_1[2] * unit_ene_dens;
-    grey_op_params.m1_pars.J[id_anux] = 0.5 * nudens_1[3] * unit_ene_dens;
-
-    // eddington factor: assume isotropic (1/3) for gray
-    grey_op_params.m1_pars.chi[id_nue]  = 1./3.;
-    grey_op_params.m1_pars.chi[id_anue] = 1./3.;
-    grey_op_params.m1_pars.chi[id_nux]  = 1./3.;
-    grey_op_params.m1_pars.chi[id_anux] = 1./3.;
-
-    grey_op_params.distr_pars =
-        CalculateDistrParamsFromM1(&grey_op_params.m1_pars, &grey_op_params.eos_pars);
+  // Full LTE, which is the only distribution the grey variables can support: they carry
+  // no independent neutrino number density to reconstruct a non-equilibrium one from,
+  // and the constructor rejects use_equilibrium_distribution = false here for that
+  // reason.  m1_pars is load-bearing here: ComputeM1Opacities normalises its
+  // energy-averaged opacities by n and J.
+  grey_op_params.distr_pars = NuEquilibriumParams(&grey_op_params.eos_pars);
+  ComputeM1DensitiesEq(&grey_op_params.eos_pars,
+                       &grey_op_params.distr_pars,
+                       &grey_op_params.m1_pars);
+  for (int idx = 0; idx < total_num_species; ++idx) {
+    grey_op_params.m1_pars.chi[idx] = 1./3.;
   }
 
   // compute opacities
@@ -728,19 +771,12 @@ void bns_nurates_gray(Real nb, Real temp, Real yp, Real yn,
   const Real eta1_to_code = unit_time / unit_ene_dens;
   const Real eta0_to_eos  = unit_time / unit_num_dens;
 
-  // Kirchhoff's law against the LOCAL blackbody, at (T^n, Ye^n).  Skipped when the
-  // partially-equilibrated predictor is on: that applies the same law against the
-  // blackbody at the predicted (T*, Ye*), from the caller, and doing it here first
-  // would only be overwritten.  The predictor's dt -> 0 limit is exactly this.
-  const bool kirchhoff_here =
-      nurates_params.use_kirchhoff_law && !nurates_params.use_partial_equilibrium;
-  Real eq_n_eos[4] = {0., 0., 0., 0.};
-  Real eq_J_code[4] = {0., 0., 0., 0.};
-  if (kirchhoff_here) {
-    NuratesEqDensities(temp, mu_n, mu_p, mu_e, unit_num_dens, unit_ene_dens,
-                       eq_n_eos, eq_J_code);
-  }
-
+  // The emissivity is bns_nurates' own, at (T^n, Ye^n).  The predictor is the module's
+  // only equilibrium closure and it acts in the caller, overwriting eta with kappa times
+  // the blackbody at the predicted (T*, Ye*); a local-blackbody Kirchhoff here would only
+  // be overwritten when it is on, and is the wrong law when it is off -- bns_nurates
+  // already enforces detailed balance bin by bin, and re-imposing it on frequency-
+  // integrated coefficients is not equivalent out of equilibrium.
   for (int idx = 0; idx < 4; ++idx) {
     eta_0[idx]  *= eta0_to_eos;
     eta_1[idx]  *= eta1_to_code;
@@ -748,11 +784,6 @@ void bns_nurates_gray(Real nb, Real temp, Real yp, Real yn,
     abs_1[idx]  *= kap_to_code;
     scat_1[idx] *= kap_to_code;
     // scat_0 is set to zero above; conversion unnecessary
-
-    if (kirchhoff_here) {
-      eta_0[idx] = (abs_0[idx] > 0.0) ? abs_0[idx] * eq_n_eos[idx] : eta_0[idx];
-      eta_1[idx] = (abs_1[idx] > 0.0) ? abs_1[idx] * eq_J_code[idx] : eta_1[idx];
-    }
   }
 }
 
@@ -763,6 +794,7 @@ void bns_nurates_gray(Real nb, Real temp, Real yp, Real yn,
 
 struct NuratesCellState {
   bns_nurates::GreyOpacityParams grey_op_params;
+  NuratesGroupOccupancy spec;
   Real unit_length;
   Real unit_time;
   Real unit_num_dens;
@@ -774,26 +806,30 @@ struct NuratesCellState {
 //! \fn NuratesCellState NuratesSpectralCellState
 //! \brief Builds the per-cell bns_nurates state for bns_nurates_spectral_bin. Call once
 //!        per cell, then pass the result to every energy bin.
+//!
+//! The partner-neutrino occupancy the kernels need comes from `spec`, so no moment
+//! reconstruction happens here and `m1_pars` is left empty: nothing on this path reads
+//! it, unlike the grey wrapper above.
 
 KOKKOS_INLINE_FUNCTION
 NuratesCellState NuratesSpectralCellState(
     Real nb, Real temp, Real yp, Real yn,
     Real mu_n, Real mu_p, Real mu_e,
-    Real nudens_0[4], Real nudens_1[4],
+    NuratesGroupOccupancy const &spec,
     NuratesParams const &nurates_params,
     Primitive::UnitSystem &code_units,
     Primitive::UnitSystem &eos_units) {
   NuratesCellState cell;
   cell.grey_op_params = bns_nurates::GreyOpacityParams{0};
+  cell.spec = spec;
 
   Primitive::UnitSystem nurates_units = MakeNuratesUnitSystem();
 
   const Real unit_length    = code_units.LengthConversion(nurates_units);
   const Real unit_time      = code_units.TimeConversion(nurates_units);
-  // Every number density crossing this interface -- the baryon density nb, the
-  // neutrino densities nudens_0 and the number emissivity eta_0 -- is in the EOS
-  // number-density unit (fm^-3), as in radiation_m1/.  Energy densities stay in
-  // code units, per the G = c = 1 convention.
+  // Every number density crossing this interface -- the baryon density nb and the
+  // number emissivity eta_0 -- is in the EOS number-density unit (fm^-3), as in
+  // radiation_m1/.  Energy densities stay in code units, per the G = c = 1 convention.
   const Real unit_num_dens  = eos_units.NumberDensityConversion(nurates_units);
   const Real unit_ene_dens  = code_units.EnergyDensityConversion(nurates_units);
 
@@ -837,31 +873,9 @@ NuratesCellState NuratesSpectralCellState(
   grey_op_params.eos_pars.dU      = 0.;
   grey_op_params.eos_pars.dm_eff  = 0.;
 
-  // TODO(@dradice): are these needed for spectral opacities?
-  if (nurates_params.use_equilibrium_distribution) {
+  // The one case with no evolved spectrum to take the partner occupancy from.
+  if (spec.f == nullptr) {
     grey_op_params.distr_pars = NuEquilibriumParams(&grey_op_params.eos_pars);
-    ComputeM1DensitiesEq(&grey_op_params.eos_pars,
-                         &grey_op_params.distr_pars,
-                         &grey_op_params.m1_pars);
-    for (int idx = 0; idx < 4; ++idx) {
-      grey_op_params.m1_pars.chi[idx] = 1./3.;
-    }
-  } else {
-    grey_op_params.m1_pars.n[id_nue]  = nudens_0[0] * unit_num_dens;
-    grey_op_params.m1_pars.n[id_anue] = nudens_0[1] * unit_num_dens;
-    grey_op_params.m1_pars.n[id_nux]  = 0.5 * nudens_0[2] * unit_num_dens;
-    grey_op_params.m1_pars.n[id_anux] = 0.5 * nudens_0[3] * unit_num_dens;
-
-    grey_op_params.m1_pars.J[id_nue]  = nudens_1[0] * unit_ene_dens;
-    grey_op_params.m1_pars.J[id_anue] = nudens_1[1] * unit_ene_dens;
-    grey_op_params.m1_pars.J[id_nux]  = 0.5 * nudens_1[2] * unit_ene_dens;
-    grey_op_params.m1_pars.J[id_anux] = 0.5 * nudens_1[3] * unit_ene_dens;
-
-    for (int idx = 0; idx < 4; ++idx) {
-      grey_op_params.m1_pars.chi[idx] = 1./3.;
-    }
-    grey_op_params.distr_pars =
-        CalculateDistrParamsFromM1(&grey_op_params.m1_pars, &grey_op_params.eos_pars);
   }
   return cell;
 }
@@ -871,8 +885,7 @@ NuratesCellState NuratesSpectralCellState(
 //! \brief Midpoint/quadrature wrapper for bns_nurates spectral opacity coefficients.
 //!        The frequency bin bounds are in MeV, as freq_grid holds them; outputs are
 //!        bin-integrated emissivities and bin-centered opacities in code units, except
-//!        the number emissivity eta_0, which is in fm^-3 per code time (as is the
-//!        input nudens_0).
+//!        the number emissivity eta_0, which is in fm^-3 per code time.
 
 KOKKOS_INLINE_FUNCTION
 void bns_nurates_spectral_bin(NuratesCellState &cell,
@@ -906,7 +919,8 @@ void bns_nurates_spectral_bin(NuratesCellState &cell,
 
   bns_nurates::MyQuadrature quad = nurates_params.quadrature;
   bns_nurates::SpectralOpacities op_mid =
-      RadiationComputeSpectralOpacitiesStimulatedAbs(e_mid, &quad, &grey_op_params);
+      RadiationComputeSpectralOpacitiesStimulatedAbs(e_mid, &quad, cell.spec,
+                                                     &grey_op_params);
 
   // The emissivity, integrated over the bin.  Skipped outright when the partially-
   // equilibrated predictor is on: the caller then sets eta from kappa times the
@@ -919,7 +933,8 @@ void bns_nurates_spectral_bin(NuratesCellState &cell,
       const Real w = quad.w[iq];
       const Real e = e_lo + de*x;
       bns_nurates::SpectralOpacities op =
-          RadiationComputeSpectralOpacitiesStimulatedAbs(e, &quad, &grey_op_params);
+          RadiationComputeSpectralOpacitiesStimulatedAbs(e, &quad, cell.spec,
+                                                         &grey_op_params);
       for (int idx = 0; idx < 4; ++idx) {
         eta_0[idx] += w * de * bns_nurates::kBS_FourPi_hc3 * SQR(e) * op.j[idx];
         eta_1[idx] += w * de * bns_nurates::kBS_FourPi_hc3 * SQR(e) * e * op.j[idx];
