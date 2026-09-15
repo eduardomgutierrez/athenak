@@ -494,50 +494,58 @@ void NeutrinoDominatedShock(Mesh *pmesh, ParameterInput* pin) {
         // spreading it flat.  Bin weights are integrals of x^3/(exp(x-eta)+1)
         // over x = E/T.
         //
-        // The weights are normalised by their own sum, not by the analytic
-        // Fermi integral F3(eta).  That keeps the total energy per species
-        // exactly equal to nuJ[isp] -- the same total the M1 branch above
-        // deposits -- so the two solvers still start from identical total
+        // The weights are normalised by their own sum over the ray, not by the
+        // analytic Fermi integral F3(eta).  That keeps the comoving energy of
+        // every ray exactly equal to nuJ[isp] -- the same total the M1 branch
+        // above deposits -- so the two solvers still start from identical total
         // energy and differ only in how it is distributed spectrally, which is
         // the point of this pgen.  It also folds the energy belonging above the
         // grid into the open-ended top bin, which is where the transport keeps
         // it in any case.
         const Real eta = (isp == 0) ? eta_nue : ((isp == 1) ? -eta_nue : 0.0);
 
-        // Grey Boltzmann (<radiation>/multi_freq = false) reaches this branch too,
-        // since has_multifreq only tests for a <radiation> block.  There nfreq = 1
-        // and freq_grid is never allocated, so there is nothing to distribute and
-        // nothing safe to index: the single bin carries the whole species energy.
-        Real wsum = 0.0;
-        if (nfreq > 1) {
-          for (int ifr = 0; ifr < nfreq; ++ifr) {
-            Real e_lo, e_hi;
-            radiation::FreqBinEdgesMeV(freq_grid, ifr, nfreq, freq_scale, e_lo, e_hi);
-            wsum += FermiDiracEnergyWeight(e_lo/temp, e_hi/temp, eta);
+        // The weights are sampled on n0_f*[e_lo, e_hi], not on the grid itself: i0 is
+        // binned in the tetrad frame, so lab bin ifr covers that comoving interval and
+        // it is a different one on every ray.  A comoving-isotropic spectrum is the same
+        // function of comoving energy for all of them, which makes the ray-dependent
+        // sampling the whole content of the boost -- the n0_f^-4 amplitude factor below
+        // carries none of it.  radiation_nurates.cpp's occupancy remap is the inverse,
+        // and the two have to agree on the convention.
+        for (int n = 0; n < nang; ++n) {
+          Real un_t = u_tet[1]*nh_c.d_view(n,1) +
+                      u_tet[2]*nh_c.d_view(n,2) +
+                      u_tet[3]*nh_c.d_view(n,3);
+          Real n0_f = u_tet[0]*nh_c.d_view(n,0) - un_t;
+          Real n0 = tet_c(m,0,0,k,j,i);
+          Real n_0 = 0.0;
+          for (int d = 0; d < 4; ++d) {
+            n_0 += tetcov_c(m,d,0,k,j,i)*nh_c.d_view(n,d);
           }
-        }
-        const bool use_spectrum = (nfreq > 1) && (wsum > 0.0);
-        const Real inv_wsum = use_spectrum ? 1.0/wsum : 0.0;
 
-        for (int ifr = 0; ifr < nfreq; ++ifr) {
-          // Fall back to an even spread if the weights underflow, so that the
-          // species energy is conserved rather than silently zeroed.
-          Real erad_freq = nuJ[isp]/static_cast<Real>(nfreq);
-          if (use_spectrum) {
-            Real e_lo, e_hi;
-            radiation::FreqBinEdgesMeV(freq_grid, ifr, nfreq, freq_scale, e_lo, e_hi);
-            erad_freq =
-                nuJ[isp]*FermiDiracEnergyWeight(e_lo/temp, e_hi/temp, eta)*inv_wsum;
+          // Grey Boltzmann (<radiation>/multi_freq = false) reaches this branch too,
+          // since has_multifreq only tests for a <radiation> block.  There nfreq = 1
+          // and freq_grid is never allocated, so there is nothing to distribute and
+          // nothing safe to index: the single bin carries the whole species energy.
+          Real wsum = 0.0;
+          if (nfreq > 1) {
+            for (int ifr = 0; ifr < nfreq; ++ifr) {
+              Real e_lo, e_hi;
+              radiation::FreqBinEdgesMeV(freq_grid, ifr, nfreq, freq_scale, e_lo, e_hi);
+              wsum += FermiDiracEnergyWeight(n0_f*e_lo/temp, n0_f*e_hi/temp, eta);
+            }
           }
-          for (int n = 0; n < nang; ++n) {
-            Real un_t = u_tet[1]*nh_c.d_view(n,1) +
-                        u_tet[2]*nh_c.d_view(n,2) +
-                        u_tet[3]*nh_c.d_view(n,3);
-            Real n0_f = u_tet[0]*nh_c.d_view(n,0) - un_t;
-            Real n0 = tet_c(m,0,0,k,j,i);
-            Real n_0 = 0.0;
-            for (int d = 0; d < 4; ++d) {
-              n_0 += tetcov_c(m,d,0,k,j,i)*nh_c.d_view(n,d);
+          const bool use_spectrum = (nfreq > 1) && (wsum > 0.0);
+          const Real inv_wsum = use_spectrum ? 1.0/wsum : 0.0;
+
+          for (int ifr = 0; ifr < nfreq; ++ifr) {
+            // Fall back to an even spread if the weights underflow, so that the
+            // species energy is conserved rather than silently zeroed.
+            Real erad_freq = nuJ[isp]/static_cast<Real>(nfreq);
+            if (use_spectrum) {
+              Real e_lo, e_hi;
+              radiation::FreqBinEdgesMeV(freq_grid, ifr, nfreq, freq_scale, e_lo, e_hi);
+              erad_freq = nuJ[isp]*FermiDiracEnergyWeight(n0_f*e_lo/temp,
+                                                          n0_f*e_hi/temp, eta)*inv_wsum;
             }
             int nn = (isp*nfreq + ifr)*nang + n;
             i0(m, nn, k, j, i) = n0*n_0*(erad_freq/(4.0*M_PI))/SQR(SQR(n0_f));

@@ -155,8 +155,99 @@ void RemapFillLogs(const QT &q, LT &lq, const int off, const int flo, const int 
 enum class RemapAsymptote { kOpacity, kSpectrum };
 
 //----------------------------------------------------------------------------------------
+//! \struct RemapStencil
+//! \brief A four-point window on the grid and the Lagrange weights that go with it.
+//!
+//! Split out from the lookup so that lookups sharing a fractional position pay for the
+//! weights once.  Two patterns share one, and between them they are every lookup the
+//! solver makes:
+//!
+//!   * several quantities at one energy -- pass 3 of MultiFreqRadFluidCouplingNurates
+//!     reads sigma_a, sigma_s, eq_j and jr_cm at the same xpos;
+//!   * one ray walked across the grid at fixed Doppler displacement.  With
+//!     xpos = ifr +- dlt and ifr an integer, floor(xpos) = ifr + floor(+-dlt), so the
+//!     unclamped origin advances exactly one bin per ifr while t = frac(+-dlt) + 1 does
+//!     not move at all.  Only a window clamped against an end of the grid breaks that,
+//!     which is the outermost |dlt| + 1 bins.
+struct RemapStencil {
+  int st;
+  Real t, w0, w1, w2, w3;
+};
+
+//----------------------------------------------------------------------------------------
+//! \fn void RemapSetWeights
+//! \brief Cubic Lagrange weights for offset t from the window's first node.
+KOKKOS_INLINE_FUNCTION
+void RemapSetWeights(RemapStencil &s) {
+  const Real t = s.t;
+  s.w0 = -(t - 1.0)*(t - 2.0)*(t - 3.0)/6.0;
+  s.w1 = t*(t - 2.0)*(t - 3.0)/2.0;
+  s.w2 = -t*(t - 1.0)*(t - 3.0)/2.0;
+  s.w3 = t*(t - 1.0)*(t - 2.0)/6.0;
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn RemapStencil RemapStencilAt
+//! \brief The window for one real-valued bin index, slid to stay inside [flo, fhi].
+//!
+//! Requires fhi - flo >= 3, which the <radiation> constructor enforces as nfreq >= 4.
+KOKKOS_INLINE_FUNCTION
+RemapStencil RemapStencilAt(const int flo, const int fhi, const Real xpos) {
+  RemapStencil s;
+  int st = static_cast<int>(Kokkos::floor(xpos)) - 1;
+  if (st < flo) { st = flo; }
+  if (st > fhi - 3) { st = fhi - 3; }
+  s.st = st;
+  s.t = xpos - static_cast<Real>(st);
+  RemapSetWeights(s);
+  return s;
+}
+
+//----------------------------------------------------------------------------------------
+//! \struct RemapRay
+//! \brief The window one ray reuses across the whole grid, built once per ray.
+//!
+//! `in` carries the interior weights; `st0` is the unclamped origin at bin 0, so bin ifr
+//! sits at st0 + ifr.  t here is the exact fractional part of the displacement rather
+//! than xpos - st recovered from a rounded xpos, which is the same number to within an
+//! ulp and the more accurate of the two.
+struct RemapRay {
+  RemapStencil in;
+  int st0;
+};
+
+//----------------------------------------------------------------------------------------
+//! \fn RemapRay RemapMakeRay
+//! \brief Build a ray's window from its displacement, x0 being xpos at bin 0.
+KOKKOS_INLINE_FUNCTION
+RemapRay RemapMakeRay(const Real x0) {
+  RemapRay r;
+  r.st0 = static_cast<int>(Kokkos::floor(x0)) - 1;
+  r.in.st = r.st0;
+  r.in.t = x0 - static_cast<Real>(r.st0);
+  RemapSetWeights(r.in);
+  return r;
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn RemapStencil RemapRayStencil
+//! \brief The window for bin ifr of a ray: the ray's own wherever it clears both ends of
+//!        the grid, rebuilt where the clamp holds it still.
+KOKKOS_INLINE_FUNCTION
+RemapStencil RemapRayStencil(const RemapRay &r, const int flo, const int fhi,
+                             const int ifr, const Real xpos) {
+  const int st = r.st0 + ifr;
+  if (st >= flo && st <= fhi - 3) {
+    RemapStencil s = r.in;
+    s.st = st;
+    return s;
+  }
+  return RemapStencilAt(flo, fhi, xpos);
+}
+
+//----------------------------------------------------------------------------------------
 //! \fn Real RemapBinValue
-//! \brief Per-bin quantity at a real-valued bin index, by four-point Lagrange on ln(q).
+//! \brief Per-bin quantity on a prepared four-point window, by Lagrange on ln(q).
 //!
 //! Exact for a power law in energy, for point-sampled quantities (sigma_a, sigma_s) and
 //! bin-integrated ones (the equilibrium spectrum, the mean intensity) alike -- the latter
@@ -168,7 +259,7 @@ enum class RemapAsymptote { kOpacity, kSpectrum };
 //! The window is slid to stay inside [flo, fhi] rather than dropping to two-point near
 //! the ends: a centred window with a linear fallback is wrong by -18% on the peak bin and
 //! a factor two above it, because the equilibrium intensity turns over two bins below the
-//! top of the grid.
+//! top of the grid.  RemapStencilAt and RemapRayStencil build the window.
 //!
 //! Outside the grid the cubic alone is useless -- |w| reaches 26 for the 2.3 bins the
 //! shock
@@ -185,32 +276,11 @@ enum class RemapAsymptote { kOpacity, kSpectrum };
 //! diffusion test is unchanged to seven digits by it.
 template <class QT>
 KOKKOS_INLINE_FUNCTION
-Real RemapBinValue(const QT &q, const QT &lq,
-                   const int off, const int flo, const int fhi, const Real xpos,
+Real RemapBinValue(const QT &q, const QT &lq, const int off, const RemapStencil &s,
                    const RemapAsymptote asym, const Real dln) {
-  // Two-point fallback.  Unreachable from the source term, which requires nfreq >= 4, so
-  // it deliberately carries no asymptote handling; anything calling RemapBinValue with a
-  // narrowed [flo, fhi] would need to revisit that.
-  if (fhi - flo < 3) {
-    int jb = static_cast<int>(Kokkos::floor(xpos));
-    if (jb < flo) { jb = flo; }
-    if (jb > fhi - 1) { jb = fhi - 1; }
-    Real s = xpos - static_cast<Real>(jb);
-    int a = off + jb, b = off + jb + 1;
-    if (lq(a) > -1.0e29 && lq(b) > -1.0e29) {
-      return Kokkos::exp(lq(a) + s*(lq(b) - lq(a)));
-    }
-    return Kokkos::fmax(q(a) + s*(q(b) - q(a)), 0.0);
-  }
-  int st = static_cast<int>(Kokkos::floor(xpos)) - 1;
-  if (st < flo) { st = flo; }
-  if (st > fhi - 3) { st = fhi - 3; }
-  Real t = xpos - static_cast<Real>(st);
-  Real w0 = -(t - 1.0)*(t - 2.0)*(t - 3.0)/6.0;
-  Real w1 = t*(t - 2.0)*(t - 3.0)/2.0;
-  Real w2 = -t*(t - 1.0)*(t - 3.0)/2.0;
-  Real w3 = t*(t - 1.0)*(t - 2.0)/6.0;
-  int a = off + st, b = off + st + 1, c = off + st + 2, d = off + st + 3;
+  const Real t = s.t;
+  const Real w0 = s.w0, w1 = s.w1, w2 = s.w2, w3 = s.w3;
+  const int a = off + s.st, b = a + 1, c = a + 2, d = a + 3;
   if (lq(a) > -1.0e29 && lq(b) > -1.0e29 && lq(c) > -1.0e29 && lq(d) > -1.0e29) {
     Real lval = w0*lq(a) + w1*lq(b) + w2*lq(c) + w3*lq(d);
     Real lo = Kokkos::fmin(Kokkos::fmin(lq(a), lq(b)), Kokkos::fmin(lq(c), lq(d)));

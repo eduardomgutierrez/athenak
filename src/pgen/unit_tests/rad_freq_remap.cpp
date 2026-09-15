@@ -219,7 +219,9 @@ void ProblemGenerator::RadFreqRemap(ParameterInput *pin, const bool restart) {
     radiation::RemapFillLogs(q, lq, 0, 0, nfreq-1);
     Real worst = 0.0;
     for (int f = 0; f < nfreq; ++f) {
-      Real got = radiation::RemapBinValue(q, lq, 0, 0, nfreq-1, static_cast<Real>(f),
+      Real x = static_cast<Real>(f);
+      Real got = radiation::RemapBinValue(q, lq, 0,
+                                          radiation::RemapStencilAt(0, nfreq-1, x),
                                           radiation::RemapAsymptote::kOpacity, g.dln);
       worst = fmax(worst, fabs(got - q(f))/q(f));
     }
@@ -243,7 +245,8 @@ void ProblemGenerator::RadFreqRemap(ParameterInput *pin, const bool restart) {
       Real dlt = log(ncm)/g.dln;
       for (int ifr = 0; ifr < nfreq; ++ifr) {
         Real x = static_cast<Real>(ifr) + dlt;
-        Real got = radiation::RemapBinValue(q, lq, 0, 0, nfreq-1, x,
+        Real got = radiation::RemapBinValue(q, lq, 0,
+                                            radiation::RemapStencilAt(0, nfreq-1, x),
                                             radiation::RemapAsymptote::kOpacity, g.dln);
         // The bin the shifted index points at is ncm*[e_lo, e_hi] of bin ifr.
         Real want = PowerLawBin(ncm*g.edges[ifr], ncm*g.edges[ifr+1], p);
@@ -298,8 +301,9 @@ void ProblemGenerator::RadFreqRemap(ParameterInput *pin, const bool restart) {
         }
         radiation::RemapFillLogs(ray, lray, 0, 0, nfreq-1);
         for (int f = 0; f < nfreq; ++f) {
-          Real un = radiation::RemapBinValue(ray, lray, 0, 0, nfreq-1,
-                                             static_cast<Real>(f) - dlt_a(a),
+          Real xun = static_cast<Real>(f) - dlt_a(a);
+          Real un = radiation::RemapBinValue(ray, lray, 0,
+                                             radiation::RemapStencilAt(0, nfreq-1, xun),
                                              radiation::RemapAsymptote::kSpectrum, g.dln);
           // n0 = 1 in flat space with this tetrad; the algebra below mirrors the kernel.
           Real vnc = 1.0/(1.0 + dtcsigs*ncm);
@@ -360,8 +364,9 @@ void ProblemGenerator::RadFreqRemap(ParameterInput *pin, const bool restart) {
           // of the angular average happens to contain, and asserting on it measures the
           // test's own seed rather than the scheme.
           if (own < 1.0e-8*peak) { continue; }
+          Real xtg = static_cast<Real>(f) + dlt_a(a);
           Real tgt = radiation::RemapBinValue(
-              jr, ljr, 0, 0, nfreq-1, static_cast<Real>(f) + dlt_a(a),
+              jr, ljr, 0, radiation::RemapStencilAt(0, nfreq-1, xtg),
               radiation::RemapAsymptote::kSpectrum, g.dln);
           Real err = fabs(tgt - own)/own;
           if (f >= b_lo && f <= b_hi) {
@@ -426,7 +431,8 @@ void ProblemGenerator::RadFreqRemap(ParameterInput *pin, const bool restart) {
     for (int f = 0; f < nfreq; ++f) {
       for (Real off : {-dlt, dlt}) {
         Real x = static_cast<Real>(f) + off;
-        Real got = radiation::RemapBinValue(q, lq, 0, 0, nfreq-1, x,
+        Real got = radiation::RemapBinValue(q, lq, 0,
+                                            radiation::RemapStencilAt(0, nfreq-1, x),
                                             radiation::RemapAsymptote::kSpectrum, g.dln);
         if (!(got >= 0.0) || !std::isfinite(got)) { ok = false; }
         if (x < 0.0) {
@@ -450,8 +456,9 @@ void ProblemGenerator::RadFreqRemap(ParameterInput *pin, const bool restart) {
     Real acc = 0.0;
     bool finite = true;
     for (int f = 0; f < nfreq; ++f) {
-      Real got = radiation::RemapBinValue(q, lq, 0, 0, nfreq-1,
-                                          static_cast<Real>(f) + dlt,
+      Real x = static_cast<Real>(f) + dlt;
+      Real got = radiation::RemapBinValue(q, lq, 0,
+                                          radiation::RemapStencilAt(0, nfreq-1, x),
                                           radiation::RemapAsymptote::kSpectrum, g.dln);
       acc += fabs(got);
       if (!std::isfinite(got)) { finite = false; }

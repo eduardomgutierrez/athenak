@@ -24,6 +24,7 @@
 #include "eos/primitive-solver/unit_system.hpp"
 #include "radiation.hpp"
 #include "radiation_nurates.hpp"
+#include "radiation_nurates_remap.hpp"
 
 namespace radiation {
 
@@ -398,6 +399,13 @@ TaskStatus Radiation::CalcOpacityNurates_(Driver *pdrive, int stage) {
   // integrand a flat view of one cell's spectrum.
   const int f_sp_stride = evolved_spec_ ? static_cast<int>(nurates_f_freq.stride_1()) : 0;
   const int f_fr_stride = evolved_spec_ ? static_cast<int>(nurates_f_freq.stride_2()) : 0;
+  // Width of a bin in ln(nu), and the per-cell scratch the occupancy remap runs in.  The
+  // constructor has already refused a non-log grid, nfreq < 4 and nu_min <= 0, so this is
+  // one number for the whole grid wherever evolved_spec_ is set.
+  auto &work_ = nurates_mf_work;
+  const int wstride = evolved_spec_ ? static_cast<int>(nurates_mf_work.stride(1)) : 0;
+  const Real grid_dln_ = evolved_spec_
+      ? log(grid_nu_max/grid_nu_min)/static_cast<Real>(nfreq - 1) : 1.0;
   auto &i0_ = i0;
   auto &freq_grid_ = freq_grid;
   auto &nh_c_ = nh_c;
@@ -503,6 +511,33 @@ TaskStatus Radiation::CalcOpacityNurates_(Driver *pdrive, int stage) {
         wght_sum += solid_angles_.d_view(iang)/SQR(n0_cm);
       }
       if (multi_freq_) {
+        // Per-ray geometry for the occupancy remap below.  None of it depends on species
+        // or on frequency, so it is built once for the cell; dlt is the rigid
+        // displacement in bin index that ray's Doppler factor induces on a log grid.
+        WorkSlice n_0_iang{}, n0_cm_iang{}, dlt_iang{}, espec{}, lspec{}, jcm{};
+        if (evolved_spec_) {
+          Real *wbase = &work_(m, 0, k, j, i);
+          int woff = 0;
+          n_0_iang   = MakeWorkSlice(wbase, wstride, woff, nang_);
+          n0_cm_iang = MakeWorkSlice(wbase, wstride, woff, nang_);
+          dlt_iang   = MakeWorkSlice(wbase, wstride, woff, nang_);
+          espec      = MakeWorkSlice(wbase, wstride, woff, nfreq_);
+          lspec      = MakeWorkSlice(wbase, wstride, woff, nfreq_);
+          jcm        = MakeWorkSlice(wbase, wstride, woff, nfreq_);
+          for (int iang = 0; iang <= nang1; ++iang) {
+            Real n_0 = tc(m,0,0,k,j,i)*nh_c_.d_view(iang,0) +
+                       tc(m,1,0,k,j,i)*nh_c_.d_view(iang,1) +
+                       tc(m,2,0,k,j,i)*nh_c_.d_view(iang,2) +
+                       tc(m,3,0,k,j,i)*nh_c_.d_view(iang,3);
+            Real n0_cm = (u_tet[0]*nh_c_.d_view(iang,0) -
+                          u_tet[1]*nh_c_.d_view(iang,1) -
+                          u_tet[2]*nh_c_.d_view(iang,2) -
+                          u_tet[3]*nh_c_.d_view(iang,3));
+            n_0_iang(iang)   = n_0;
+            n0_cm_iang(iang) = n0_cm;
+            dlt_iang(iang)   = (n0_cm > 0.0) ? log(n0_cm)/grid_dln_ : 0.0;
+          }
+        }
         for (int isp = 0; isp < nspecies_; ++isp) {
           int sp_off = isp*nfreq_*nang_;
           for (int ifr = 0; ifr < nfreq_; ++ifr) {
@@ -530,15 +565,59 @@ TaskStatus Radiation::CalcOpacityNurates_(Driver *pdrive, int stage) {
             }
             jf_f_(m, isp, ifr, k, j, i) = jf_bin;
             nf_f_(m, isp, ifr, k, j, i) = nf_bin;
-            if (evolved_spec_) {
-              // The bin's energy density read back as an occupancy, from
+          }
+          nudens_1[isp] /= wght_sum;
+          nudens_0[isp] /= wght_sum;
+          nudens_0[isp] *= code_edens_to_eos;
+
+          if (evolved_spec_) {
+            // The occupancy the pair and bremsstrahlung partner integrals block against,
+            // on the fixed comoving grid bns_nurates is tabulated on.  i0_ is binned in
+            // the lab frame, so ray a's bin ifr holds the comoving interval
+            // n0_cm(a)*[e_lo, e_hi] and has to be un-shifted onto the grid before the
+            // angular average means anything -- the same rigid translation
+            // MultiFreqRadFluidCouplingNurates applies, see radiation_nurates_remap.hpp.
+            //
+            // The remapped quantity is the bin-integrated comoving intensity, not the
+            // occupancy: f is a Lorentz invariant, so the n0_cm^4 in sfac cancels against
+            // the stretch of the comoving bin it covers, and carrying both through a
+            // kSpectrum continuation whose asymptotics are stated for an intensity is
+            // what keeps the extrapolation off the ends of the grid physical.
+            for (int ifr = 0; ifr < nfreq_; ++ifr) { jcm(ifr) = 0.0; }
+            for (int iang = 0; iang <= nang1; ++iang) {
+              Real n0_cm = n0_cm_iang(iang);
+              Real dlt = dlt_iang(iang);
+              Real sfac = 4.0*M_PI*SQR(SQR(n0_cm))/(n0*n_0_iang(iang));
+              for (int ifr = 0; ifr < nfreq_; ++ifr) {
+                espec(ifr) = sfac*i0_(m, sp_off + ifr*nang_ + iang, k, j, i);
+              }
+              // At rest the ray already sits on the grid, so the stored values are read
+              // back exactly rather than through the interpolant.
+              bool shift = (fabs(dlt) > 1.0e-12);
+              if (shift) { RemapFillLogs(espec, lspec, 0, 0, nfreq_-1); }
+              RemapRay ray = RemapMakeRay(-dlt);
+              Real omega_cm = solid_angles_.d_view(iang)/SQR(n0_cm);
+              for (int ifr = 0; ifr < nfreq_; ++ifr) {
+                Real icm = espec(ifr);
+                if (shift) {
+                  RemapStencil sten = RemapRayStencil(ray, 0, nfreq_-1, ifr,
+                                                      static_cast<Real>(ifr) - dlt);
+                  icm = RemapBinValue(espec, lspec, 0, sten,
+                                        RemapAsymptote::kSpectrum, grid_dln_);
+                }
+                jcm(ifr) += icm*omega_cm;
+              }
+            }
+            for (int ifr = 0; ifr < nfreq_; ++ifr) {
+              Real e_lo = 0.0, e_hi = 0.0;
+              FreqBinEdgesMeV(freq_grid_, ifr, nfreq_, freq_scale_, e_lo, e_hi);
               // J = int (4pi/(hc)^3) nu^3 f dnu with f flat across the bin.  It has to
-              // come from the energy and not from nf_bin: nf_bin is itself J/e_mid, and
-              // pairing that with the nu^2 integral biases f high -- 1.5% on a
-              // [10, 2000] MeV nfreq = 24 grid, 7.7% at nfreq = 12.  The half is the
-              // mu+tau slot convention (see NuratesEqDensities); the clamp keeps 1 - f,
-              // which multiplies the pair and bremsstrahlung emissivities, in [0, 1].
-              Real j_bin = jf_bin/wght_sum*unit_ene_dens_;
+              // come from the energy and not from a number density: J/e_mid paired with
+              // the nu^2 integral biases f high -- 1.5% on a [10, 2000] MeV nfreq = 24
+              // grid, 7.7% at nfreq = 12.  The half is the mu+tau slot convention (see
+              // NuratesEqDensities); the clamp keeps 1 - f, which multiplies the pair and
+              // bremsstrahlung emissivities, in [0, 1].
+              Real j_bin = jcm(ifr)/wght_sum*unit_ene_dens_;
               Real ph_bin = bns_nurates::kBS_FourPi_hc3*
                             (e_hi*e_hi*e_hi*e_hi - e_lo*e_lo*e_lo*e_lo)/4.0;
               Real f_bin = (ph_bin > 0.0)
@@ -546,9 +625,6 @@ TaskStatus Radiation::CalcOpacityNurates_(Driver *pdrive, int stage) {
               f_f_(m, isp, ifr, k, j, i) = fmin(fmax(f_bin, 0.0), 1.0);
             }
           }
-          nudens_1[isp] /= wght_sum;
-          nudens_0[isp] /= wght_sum;
-          nudens_0[isp] *= code_edens_to_eos;
         }
       } else {
         // Grey: an angular sum and nothing else.  The bin midpoint that turns energy
