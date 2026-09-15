@@ -74,13 +74,22 @@ namespace radiation {
 //! Sentinel stored in the log arrays where the value is not positive.
 #define NURATES_REMAP_LOG_SENTINEL (-1.0e30)
 
-//! Size of the multi-frequency source term's per-cell workspace, as a count of bin-sized
-//! and ray-sized vectors.  Defined here so the allocation in Radiation::Radiation and the
-//! sequence of MakeWorkSlice calls in the kernel cannot drift apart.
+//! Per-cell workspace, as a count of bin-sized and ray-sized vectors.  **Two** kernels
+//! carve up the same array -- MultiFreqRadFluidCouplingNurates and the occupancy pass of
+//! CalcOpacityNurates_ -- so the allocation has to cover whichever needs more, and these
+//! counts have to track the MakeWorkSlice sequence in both.  Each kernel asserts its own
+//! total against the allocation once it has finished slicing, so a count that drifts
+//! fails loudly in a debug build instead of writing into the next cell's column.
 #define NURATES_MF_WORK_BIN_VECS 13
 #define NURATES_MF_WORK_RAY_VECS 3
+#define NURATES_OPAC_WORK_BIN_VECS 3
+#define NURATES_OPAC_WORK_RAY_VECS 3
+#define NURATES_WORK_VEC_MAX(a, b) ((a) > (b) ? (a) : (b))
 #define NURATES_MF_WORK_SIZE(nfreq, nang) \
-  (NURATES_MF_WORK_BIN_VECS*(nfreq) + NURATES_MF_WORK_RAY_VECS*(nang))
+  (NURATES_WORK_VEC_MAX(NURATES_MF_WORK_BIN_VECS, \
+                        NURATES_OPAC_WORK_BIN_VECS)*(nfreq) + \
+   NURATES_WORK_VEC_MAX(NURATES_MF_WORK_RAY_VECS, \
+                        NURATES_OPAC_WORK_RAY_VECS)*(nang))
 
 //----------------------------------------------------------------------------------------
 //! \struct WorkSlice
@@ -159,16 +168,14 @@ enum class RemapAsymptote { kOpacity, kSpectrum };
 //! \brief A four-point window on the grid and the Lagrange weights that go with it.
 //!
 //! Split out from the lookup so that lookups sharing a fractional position pay for the
-//! weights once.  Two patterns share one, and between them they are every lookup the
-//! solver makes:
-//!
-//!   * several quantities at one energy -- pass 3 of MultiFreqRadFluidCouplingNurates
-//!     reads sigma_a, sigma_s, eq_j and jr_cm at the same xpos;
-//!   * one ray walked across the grid at fixed Doppler displacement.  With
-//!     xpos = ifr +- dlt and ifr an integer, floor(xpos) = ifr + floor(+-dlt), so the
-//!     unclamped origin advances exactly one bin per ifr while t = frac(+-dlt) + 1 does
-//!     not move at all.  Only a window clamped against an end of the grid breaks that,
-//!     which is the outermost |dlt| + 1 bins.
+//! weights once.  That is every lookup the solver makes: each is one ray walked across
+//! the grid at a fixed Doppler displacement, and with xpos = ifr +- dlt and ifr an
+//! integer, floor(xpos) = ifr + floor(+-dlt), so the unclamped origin advances exactly
+//! one bin per ifr while t = frac(+-dlt) + 1 does not move at all.  Only a window
+//! clamped against an end of the grid breaks that, which is the outermost |dlt| + 3
+//! bins or so.  RemapMakeRay and RemapRayStencil build and walk such a ray;
+//! RemapStencilAt serves a lookup that stands alone, and several quantities read at one
+//! energy can share one window between them.
 struct RemapStencil {
   int st;
   Real t, w0, w1, w2, w3;

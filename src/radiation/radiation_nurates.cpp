@@ -524,6 +524,7 @@ TaskStatus Radiation::CalcOpacityNurates_(Driver *pdrive, int stage) {
           espec      = MakeWorkSlice(wbase, wstride, woff, nfreq_);
           lspec      = MakeWorkSlice(wbase, wstride, woff, nfreq_);
           jcm        = MakeWorkSlice(wbase, wstride, woff, nfreq_);
+          assert(woff <= NURATES_MF_WORK_SIZE(nfreq_, nang_));
           for (int iang = 0; iang <= nang1; ++iang) {
             Real n_0 = tc(m,0,0,k,j,i)*nh_c_.d_view(iang,0) +
                        tc(m,1,0,k,j,i)*nh_c_.d_view(iang,1) +

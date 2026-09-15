@@ -552,8 +552,7 @@ Radiation::Radiation(MeshBlockPack *ppack, ParameterInput *pin) :
     }
 
     // NES/NPS is non-thermal emission and this module has no thermal/non-thermal
-    // split, so Kirchhoff and the partial-equilibrium predictor cannot represent
-    // it: see scripts/kokkos_perf/INELASTIC_SCATTERING.md.
+    // split, so Kirchhoff and the partial-equilibrium predictor cannot represent it.
     if (nurates_params.use_inelastic_scatt) {
       std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
                 << std::endl
@@ -564,8 +563,7 @@ Radiation::Radiation(MeshBlockPack *ppack, ParameterInput *pin) :
                    "predictor would thermalize it and pair the equilibrium spectrum "
                    "with an absorption coefficient that still carries the NES "
                    "out-scattering. Set use_inelastic_scatt = false. (<radiation_m1> "
-                   "does separate the two and is unaffected; see "
-                   "scripts/kokkos_perf/INELASTIC_SCATTERING.md.)" << std::endl;
+                   "does separate the two and is unaffected.)" << std::endl;
       std::exit(EXIT_FAILURE);
     }
 

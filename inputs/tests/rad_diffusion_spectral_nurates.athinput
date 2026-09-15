@@ -79,6 +79,12 @@ nu_max      = 3000.0     # MeV
 freq_scale  = log
 freq_fluxes = false
 
+<bns_nurates>
+# Stated because the <radiation> constructor rejects inelastic scattering for every
+# use_nurates run, including this one, which takes its opacity from
+# nurates_toy_scattering and never reaches the library.
+use_inelastic_scatt = false
+
 <problem>
 pgen_name      = rad_m1_diffusiontest
 initial_data   = diffusion

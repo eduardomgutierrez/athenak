@@ -400,9 +400,9 @@ bns_nurates::SpectralOpacities RadiationComputeSpectralOpacities(
     local_grey_params.opacity_flags                     = {0};
     local_grey_params.opacity_flags.use_inelastic_scatt = 1;
     // NES wants a thermal final state for its out-scattering blocking and the evolved
-    // one for its in-scattering, which this single source cannot give it: see
-    // scripts/kokkos_perf/INELASTIC_SCATTERING.md, and the constructor guard that
-    // makes the channel a fatal error here.
+    // one for its in-scattering, which this single source cannot give it.  The
+    // constructor makes the channel a fatal error for that reason; this branch is
+    // unreachable and kept only so the integrand stays complete.
     integrals_neps_1d =
         RadiationIntegrateSpectral1D(quad_1d, local_grey_params, spec, s_neps);
   }

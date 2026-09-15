@@ -480,6 +480,7 @@ TaskStatus Radiation::MultiFreqRadFluidCouplingNurates(Driver *pdriver, int stag
     WorkSlice n_0_iang = MakeWorkSlice(wbase, wstride, woff, nang_);
     WorkSlice n0_cm_iang = MakeWorkSlice(wbase, wstride, woff, nang_);
     WorkSlice dlt_iang = MakeWorkSlice(wbase, wstride, woff, nang_);
+    assert(woff <= NURATES_MF_WORK_SIZE(nfrq_, nang_));
 
     Real &x1min = size.d_view(m).x1min;
     Real &x1max = size.d_view(m).x1max;

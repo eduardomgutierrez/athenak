@@ -507,6 +507,53 @@ void ProblemGenerator::RadFreqRemap(ParameterInput *pin, const bool restart) {
     CheckExact("no source: i0_ unchanged, all rays", worst, 0.0);
   }
 
+  // ------------------------------------- 7. the ray cursor agrees with a fresh window
+  // RemapMakeRay/RemapRayStencil reuse one set of Lagrange weights across a ray on the
+  // grounds that floor(ifr + x0) = ifr + floor(x0) for integer ifr, so the window's
+  // origin advances one bin per ifr while t does not move.  The kernels are the only
+  // consumers, so without this the one piece of arithmetic that could carry an
+  // off-by-one is unexercised.  Probed on a power law, where the lookup is exact
+  // algebra: a window off by one bin evaluates a point exp(p*dlnnu) away and shows up
+  // far above roundoff, while a window that legitimately differs at an integer crossing
+  // still returns the same value.
+  std::cout << "-- ray cursor matches a per-lookup window" << std::endl;
+  {
+    const Real p = 2.0;
+    for (int f = 0; f < nfreq; ++f) {
+      q(f) = PowerLawBin(g.edges[f], g.edges[f+1], p);
+    }
+    radiation::RemapFillLogs(q, lq, 0, 0, nfreq-1);
+    // Displacements past the ends of the grid on both sides, plus exact integers and
+    // near-integers, which are where the clamp and the floor are most fragile.
+    const Real dscan[] = {0.0, 1.0e-13, 0.5, 1.0, 1.0 - 1.0e-13, 1.0 + 1.0e-13, 2.385,
+                          3.0, static_cast<Real>(nfreq)/2.0, static_cast<Real>(nfreq)};
+    Real worst = 0.0;
+    bool in_bounds = true;
+    for (Real mag : dscan) {
+      for (Real x0 : {-mag, mag}) {
+        radiation::RemapRay ray = radiation::RemapMakeRay(x0);
+        for (int f = 0; f < nfreq; ++f) {
+          Real x = static_cast<Real>(f) + x0;
+          radiation::RemapStencil sc = radiation::RemapRayStencil(ray, 0, nfreq-1, f, x);
+          if (sc.st < 0 || sc.st > nfreq-4) { in_bounds = false; }
+          for (auto asym : {radiation::RemapAsymptote::kOpacity,
+                            radiation::RemapAsymptote::kSpectrum}) {
+            Real cached = radiation::RemapBinValue(q, lq, 0, sc, asym, g.dln);
+            Real fresh = radiation::RemapBinValue(
+                q, lq, 0, radiation::RemapStencilAt(0, nfreq-1, x), asym, g.dln);
+            Real ref = fmax(fabs(fresh), 1.0e-300);
+            worst = fmax(worst, fabs(cached - fresh)/ref);
+          }
+        }
+      }
+    }
+    ++nrun;
+    if (!in_bounds) { ++nfail; }
+    std::cout << (in_bounds ? "  [ ok ] " : "  [FAIL] ")
+              << "ray window stays inside [0, nfreq-4]" << std::endl;
+    Check("ray window reproduces a per-lookup window", worst, 0.0, tol_exact);
+  }
+
   std::cout << "=== rad_freq_remap: " << (nrun - nfail) << "/" << nrun
             << " checks passed" << std::endl;
   if (nfail > 0) {
