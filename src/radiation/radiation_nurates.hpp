@@ -59,7 +59,83 @@ struct NuratesParams {
   int quad_nx_2;             // number of quadrature points for 2d integration (-1 = same)
   bns_nurates::MyQuadrature quadrature;   // 1d quadrature for bns_nurates
   bns_nurates::MyQuadrature quadrature_2; // 2d quadrature for bns_nurates
+
+  int nspecies;              // <radiation>/nspecies; 3 merges the heavy flavours
 };
+
+//----------------------------------------------------------------------------------------
+//! \brief The heavy-flavour slot convention, and the fold between the two choices.
+//!
+//! bns_nurates always resolves four species.  This module carries them in as many slots
+//! as <radiation>/nspecies asks for:
+//!
+//!   nspecies = 4   slot 2 = nu_x (mu + tau), slot 3 = nubar_x (mubar + taubar)
+//!   nspecies = 3   slot 2 = all four heavy states, slot 3 unused
+//!
+//! so slot 2's multiplicity is 2 or 4 and the per-state occupancy is j/2 or j/4.
+//! Extensive per-slot quantities -- emissivities and equilibrium densities -- add; the
+//! intensive ones -- absorption and scattering coefficients, which are per-particle
+//! inverse mean free paths -- average.
+//!
+//! Given the same inputs the fold is exact: it reproduces the four-slot sum term for
+//! term, differing only in summation order.  The approximation lives in the inputs, in
+//! two places of the same order, both quadratic in a nu_x/nubar_x difference that only
+//! the electron-positron pair kernel produces at all:
+//!
+//!   extinction  kappa_bar*(J_x + J_xbar) vs kappa_x*J_x + kappa_xbar*J_xbar,
+//!               short by the covariance (kappa_x - kappa_xbar)(J_x - J_xbar)/2
+//!   blocking    the kernels block each heavy species against its PARTNER, so feeding
+//!               both ids the merged mean fbar costs (em_x - em_xbar)(f_x - f_xbar)/2
+//!
+//! The second reaches the emissivity even under use_partial_equilibrium, where
+//! eta = kappa*J_eq: J_eq[2] == J_eq[3] identically (both carry eta_t = 0), so J_eq is
+//! untouched, but kappa is not.  It is inert only when the occupancy comes from the
+//! equilibrium distribution rather than the evolved field.
+//!
+//! Fold* writes this module's slots; Mirror writes bns_nurates' species ids.  The two
+//! run in opposite directions and are named apart for that reason.
+
+KOKKOS_INLINE_FUNCTION
+bool NuratesMergeHeavy(const int nspecies) {
+  return (nspecies == 3);
+}
+
+//! \brief Reciprocal of a slot's state count, which turns its energy into an occupancy.
+KOKKOS_INLINE_FUNCTION
+Real NuratesInvMultiplicity(const int nspecies, const int isp) {
+  if (isp < 2) { return 1.0; }
+  return NuratesMergeHeavy(nspecies) ? 0.25 : 0.5;
+}
+
+//! \brief Collapse an extensive per-slot quantity onto the merged heavy slot.
+KOKKOS_INLINE_FUNCTION
+void NuratesFoldHeavySum(const int nspecies, Real q[4]) {
+  if (NuratesMergeHeavy(nspecies)) {
+    q[2] += q[3];
+    q[3] = 0.0;
+  }
+}
+
+//! \brief Collapse an intensive per-slot quantity onto the merged heavy slot.
+KOKKOS_INLINE_FUNCTION
+void NuratesFoldHeavyMean(const int nspecies, Real q[4]) {
+  if (NuratesMergeHeavy(nspecies)) {
+    q[2] = 0.5*(q[2] + q[3]);
+    q[3] = 0.0;
+  }
+}
+
+//! \brief Give bns_nurates' antineutrino heavy id the merged slot's occupancy.
+//!
+//! The pair and bremsstrahlung kernels block each heavy species against its partner
+//! (pro_term[id_nux] carries block_factor[id_anux]), so a merged species blocks against
+//! itself and both ids must see the same number.
+KOKKOS_INLINE_FUNCTION
+void NuratesMirrorHeavy(const int nspecies, bns_nurates::BS_REAL f[total_num_species]) {
+  if (NuratesMergeHeavy(nspecies)) {
+    f[id_anux] = f[id_nux];
+  }
+}
 
 //----------------------------------------------------------------------------------------
 //! \fn void FreqBinEdgesMeV
@@ -182,14 +258,18 @@ void NuratesOccupancyAt(const NuratesGroupOccupancy &spec, const Real nu,
     for (int idx = 0; idx < nsp; ++idx) {
       f[idx] = 1.0;
     }
-    return;
+  } else {
+    const int il = static_cast<int>(s);
+    const Real w = s - static_cast<Real>(il);
+    for (int idx = 0; idx < nsp; ++idx) {
+      const Real *p = spec.f + idx*spec.sp_stride + il*spec.fr_stride;
+      f[idx] = p[0] + w*(p[spec.fr_stride] - p[0]);
+    }
   }
-  const int il = static_cast<int>(s);
-  const Real w = s - static_cast<Real>(il);
-  for (int idx = 0; idx < nsp; ++idx) {
-    const Real *p = spec.f + idx*spec.sp_stride + il*spec.fr_stride;
-    f[idx] = p[0] + w*(p[spec.fr_stride] - p[0]);
-  }
+  // Single exit past this point: every slot bns_nurates resolves has to be filled, and
+  // the merged run stores only one heavy slot.  The two zero returns above need no
+  // mirror -- f = 0 for all four is what the mirror would produce there anyway.
+  NuratesMirrorHeavy(spec.nspecies, f);
 }
 
 //----------------------------------------------------------------------------------------
@@ -508,7 +588,8 @@ bns_nurates::SpectralOpacities RadiationComputeSpectralOpacitiesStimulatedAbs(
 KOKKOS_INLINE_FUNCTION
 void NuratesEqDensities(Real temp, Real mu_n, Real mu_p, Real mu_e,
                         Real unit_num_dens, Real unit_ene_dens,
-                        Real n_eq[4], Real J_eq[4]) {
+                        Real n_eq[4], Real J_eq[4],
+                        NuratesParams const &nurates_params) {
   // A live screen on the INPUTS, not an assert on the outputs, and not optional.
   // ComputeM1DensitiesEq below goes through bns_nurates' FDI_p2/FDI_p3, which return a
   // clean 0.0 for a non-finite argument -- so a NaN chemical potential or temperature
@@ -545,6 +626,9 @@ void NuratesEqDensities(Real temp, Real mu_n, Real mu_p, Real mu_e,
   J_eq[1] = eq_m1_pars.J[id_anue] / unit_ene_dens;
   J_eq[2] = 2.0 * eq_m1_pars.J[id_nux] / unit_ene_dens;
   J_eq[3] = 2.0 * eq_m1_pars.J[id_anux] / unit_ene_dens;
+
+  NuratesFoldHeavySum(nurates_params.nspecies, n_eq);
+  NuratesFoldHeavySum(nurates_params.nspecies, J_eq);
 }
 
 //----------------------------------------------------------------------------------------
@@ -568,7 +652,8 @@ void NuratesEqSpectrumBin(Real e_lo_mev, Real e_hi_mev,
                           Real temp, Real mu_n, Real mu_p, Real mu_e,
                           bns_nurates::MyQuadrature const &quad,
                           Real unit_num_dens, Real unit_ene_dens,
-                          Real n_eq[4], Real J_eq[4]) {
+                          Real n_eq[4], Real J_eq[4],
+                          NuratesParams const &nurates_params) {
   for (int idx = 0; idx < 4; ++idx) {
     n_eq[idx] = 0.;
     J_eq[idx] = 0.;
@@ -605,6 +690,9 @@ void NuratesEqSpectrumBin(Real e_lo_mev, Real e_hi_mev,
     n_eq[idx] /= unit_num_dens;
     J_eq[idx] /= unit_ene_dens;
   }
+
+  NuratesFoldHeavySum(nurates_params.nspecies, n_eq);
+  NuratesFoldHeavySum(nurates_params.nspecies, J_eq);
 }
 
 //----------------------------------------------------------------------------------------
@@ -785,6 +873,12 @@ void bns_nurates_gray(Real nb, Real temp, Real yp, Real yn,
     scat_1[idx] *= kap_to_code;
     // scat_0 is set to zero above; conversion unnecessary
   }
+
+  NuratesFoldHeavySum(nurates_params.nspecies, eta_0);
+  NuratesFoldHeavySum(nurates_params.nspecies, eta_1);
+  NuratesFoldHeavyMean(nurates_params.nspecies, abs_0);
+  NuratesFoldHeavyMean(nurates_params.nspecies, abs_1);
+  NuratesFoldHeavyMean(nurates_params.nspecies, scat_1);
 }
 
 //----------------------------------------------------------------------------------------
@@ -958,6 +1052,12 @@ void bns_nurates_spectral_bin(NuratesCellState &cell,
     abs_1[idx]   = op_mid.kappa[idx] * kap_to_code;
     scat_1[idx]  = op_mid.kappa_s[idx] * kap_to_code;
   }
+
+  NuratesFoldHeavySum(nurates_params.nspecies, eta_0);
+  NuratesFoldHeavySum(nurates_params.nspecies, eta_1);
+  NuratesFoldHeavyMean(nurates_params.nspecies, abs_0);
+  NuratesFoldHeavyMean(nurates_params.nspecies, abs_1);
+  NuratesFoldHeavyMean(nurates_params.nspecies, scat_1);
 }
 
 } // namespace radiation

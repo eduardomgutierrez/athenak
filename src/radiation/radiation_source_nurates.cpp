@@ -693,7 +693,7 @@ TaskStatus Radiation::MultiFreqRadFluidCouplingNurates(Driver *pdriver, int stag
         }
       }
     }
-    for (int isp=0; isp<4; ++isp) {
+    for (int isp=0; isp<nsp_; ++isp) {
       dN_rad_moment[isp] /= wght_sum;
       // the sum above is a code-unit energy density over a bin energy in MeV;
       // rescaling the energy density to MeV/fm^3 makes it a number density in

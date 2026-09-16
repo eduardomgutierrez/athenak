@@ -458,7 +458,7 @@ TaskStatus Radiation::CalcOpacityNurates_(Driver *pdrive, int stage) {
     Real J_eq_loc[4] = {0., 0., 0., 0.};
     if (peq_on_) {
       NuratesEqDensities(T, mu_n, mu_p, mu_e, unit_num_dens_, unit_ene_dens_,
-                         n_eq_loc, J_eq_loc);
+                         n_eq_loc, J_eq_loc, nurates_params_);
     }
 
     // The comoving moments of the ACTUAL neutrino field, and the geometry they need.
@@ -615,14 +615,15 @@ TaskStatus Radiation::CalcOpacityNurates_(Driver *pdrive, int stage) {
               // J = int (4pi/(hc)^3) nu^3 f dnu with f flat across the bin.  It has to
               // come from the energy and not from a number density: J/e_mid paired with
               // the nu^2 integral biases f high -- 1.5% on a [10, 2000] MeV nfreq = 24
-              // grid, 7.7% at nfreq = 12.  The half is the mu+tau slot convention (see
-              // NuratesEqDensities); the clamp keeps 1 - f, which multiplies the pair and
-              // bremsstrahlung emissivities, in [0, 1].
+              // grid, 7.7% at nfreq = 12.  f is per STATE, so the heavy slot divides by
+              // its multiplicity: two states per slot at nspecies = 4, four at
+              // nspecies = 3 (see NuratesMergeHeavy).  The clamp keeps 1 - f, which
+              // multiplies the pair and bremsstrahlung emissivities, in [0, 1].
+              Real inv_mult = NuratesInvMultiplicity(nspecies_, isp);
               Real j_bin = jcm(ifr)/wght_sum*unit_ene_dens_;
               Real ph_bin = bns_nurates::kBS_FourPi_hc3*
                             (e_hi*e_hi*e_hi*e_hi - e_lo*e_lo*e_lo*e_lo)/4.0;
-              Real f_bin = (ph_bin > 0.0)
-                           ? ((isp < 2) ? j_bin : 0.5*j_bin)/ph_bin : 0.0;
+              Real f_bin = (ph_bin > 0.0) ? (inv_mult*j_bin)/ph_bin : 0.0;
               f_f_(m, isp, ifr, k, j, i) = fmin(fmax(f_bin, 0.0), 1.0);
             }
           }
@@ -676,7 +677,7 @@ TaskStatus Radiation::CalcOpacityNurates_(Driver *pdrive, int stage) {
                        nurates_params_, code_units_l, eos_units_loc_l);
 
       // assert no NaN/Inf in output opacities
-      for (int idx = 0; idx < 4; ++idx) {
+      for (int idx = 0; idx < nspecies_; ++idx) {
         assert(Kokkos::isfinite(loc_eta_0[idx]));
         assert(Kokkos::isfinite(loc_eta_1[idx]));
         assert(Kokkos::isfinite(loc_abs_0[idx]));
@@ -737,13 +738,14 @@ TaskStatus Radiation::CalcOpacityNurates_(Driver *pdrive, int stage) {
         Real n_eq_s[4] = {0., 0., 0., 0.};
         Real J_eq_s[4] = {0., 0., 0., 0.};
         NuratesEqDensities(T_star, mu_b_s, mu_b_s + mu_q_s, mu_le_s - mu_q_s,
-                           unit_num_dens_, unit_ene_dens_, n_eq_s, J_eq_s);
+                           unit_num_dens_, unit_ene_dens_, n_eq_s, J_eq_s,
+                           nurates_params_);
 
         // Finiteness screen.  Nothing downstream catches this: kappa*NaN would go
         // straight into eta and on into the source term.  Fall back to the local
         // blackbody, the w -> 0 answer.
         bool eq_finite = true;
-        for (int idx = 0; idx < 4; ++idx) {
+        for (int idx = 0; idx < nspecies_; ++idx) {
           eq_finite = eq_finite && Kokkos::isfinite(n_eq_s[idx]) &&
                       Kokkos::isfinite(J_eq_s[idx]);
         }
@@ -922,7 +924,8 @@ TaskStatus Radiation::CalcOpacityNurates_(Driver *pdrive, int stage) {
           Real J_eq_f[4] = {0., 0., 0., 0.};
           NuratesEqSpectrumBin(e_lo, e_hi, T_star, mu_n_s, mu_p_s, mu_e_s,
                                nurates_params_.quadrature,
-                               unit_num_dens_, unit_ene_dens_, n_eq_f, J_eq_f);
+                               unit_num_dens_, unit_ene_dens_, n_eq_f, J_eq_f,
+                               nurates_params_);
           for (int isp = 0; isp < nspecies_; ++isp) {
             Real ka0 = abs_0_f_(m, isp, ifr, k, j, i);
             Real ka1 = abs_1_f_(m, isp, ifr, k, j, i);

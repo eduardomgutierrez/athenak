@@ -227,6 +227,10 @@ void SingleZoneImpl(Mesh *pmesh, ParameterInput *pin, const bool restart) {
 
             Real erad_freq = erad/static_cast<Real>(nfreq);
             for (int isp = 0; isp < nspecies; ++isp) {
+              // problem/erad is the seed energy density of ONE heavy-flavour slot at
+              // nspecies = 4.  A merged slot holds twice the states, so it takes twice
+              // the energy and the two species counts start from the same total.
+              const Real mult = ((nspecies == 3) && (isp == 2)) ? 2.0 : 1.0;
               for (int ifr = 0; ifr < nfreq; ++ifr) {
                 for (int n = 0; n < nang; ++n) {
                   Real un_t = u_tet[1]*nh_c.d_view(n,1) +
@@ -251,7 +255,7 @@ void SingleZoneImpl(Mesh *pmesh, ParameterInput *pin, const bool restart) {
                   }
 #endif
                   i0(m, nn, k, j, i) =
-                      n0*n_0*(intensity_cm/(4.0*M_PI))/SQR(SQR(n0_f));
+                      n0*n_0*(mult*intensity_cm/(4.0*M_PI))/SQR(SQR(n0_f));
                 }
               }
             }

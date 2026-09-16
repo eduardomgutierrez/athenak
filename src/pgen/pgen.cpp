@@ -1036,6 +1036,8 @@ void ProblemGenerator::CallProblemGenerator(ParameterInput *pin, bool is_restart
     GaussLegendre(pin, is_restart);
   } else if (pgen_fun_name.compare("rad_freq_remap") == 0) {
     RadFreqRemap(pin, is_restart);
+  } else if (pgen_fun_name.compare("rad_nu_merge") == 0) {
+    RadNuMerge(pin, is_restart);
   // else, name not set on command line or input file, print warning and quit
   } else {
     // name not set on command line or input file, print warning and quit

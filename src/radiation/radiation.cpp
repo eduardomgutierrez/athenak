@@ -113,7 +113,8 @@ Radiation::Radiation(MeshBlockPack *ppack, ParameterInput *pin) :
       std::exit(EXIT_FAILURE);
     }
     std::cout << "### Radiation: neutrino transport with " << nspecies
-              << " species" << std::endl;
+              << " species"
+              << ((nspecies == 3) ? " (heavy flavours merged)" : "") << std::endl;
   } else {
     is_neutrino = false;
     nspecies = 1;
@@ -123,6 +124,19 @@ Radiation::Radiation(MeshBlockPack *ppack, ParameterInput *pin) :
     std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
               << std::endl
               << "use_nurates=true requires <radiation>/radiation_type = neutrino"
+              << std::endl;
+    std::exit(EXIT_FAILURE);
+  }
+  // nurates_toy_scattering >= 0 prescribes the opacity and never reaches the library,
+  // so it carries no species structure and any count is meaningful there.
+  if (use_nurates && !(nurates_toy_scattering >= 0.0) &&
+      (nspecies != 3 && nspecies != 4)) {
+    std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+              << std::endl
+              << "use_nurates=true with the bns_nurates library requires "
+              << "<radiation>/nspecies = 3 (nu_e, nubar_e, and all four heavy states "
+              << "in one slot) or 4 (nu_e, nubar_e, nu_x, nubar_x).  Other counts are "
+              << "supported only alongside <radiation>/nurates_toy_scattering >= 0."
               << std::endl;
     std::exit(EXIT_FAILURE);
   }
@@ -567,10 +581,12 @@ Radiation::Radiation(MeshBlockPack *ppack, ParameterInput *pin) :
       std::exit(EXIT_FAILURE);
     }
 
+    nurates_params.nspecies    = nspecies;
+
     // floors -- key names and defaults match radiation_m1.cpp.  nb_min is in
-    // fm^-3, i.e. the EOS number-density unit, and is compared against nb before
-    // the conversion to bns_nurates units; it used to be compared after, so the
-    // same number meant two things 1e18 apart in the two solvers.
+    // fm^-3, i.e. the EOS number-density unit, and must be compared against nb
+    // BEFORE the conversion to bns_nurates units, or the same number means two
+    // things 1e18 apart in the two solvers.
     nurates_params.nb_min      = pin->GetOrAddReal("bns_nurates","nb_min_fm-3",0.0);
     nurates_params.temp_min_mev = pin->GetOrAddReal("bns_nurates","temp_min_mev",0.0);
 

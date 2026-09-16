@@ -462,8 +462,10 @@ void NeutrinoDominatedShock(Mesh *pmesh, ParameterInput* pin) {
                                 e_nue, e_anue, e_nux,
                                 m1_unused_params, code_units, eos_units,
                                 nurates_units);
-      // heavy flavours are carried as two species, each half the total
-      Real nuJ[4] = {e_nue, e_anue, 0.5*e_nux, 0.5*e_nux};
+      // NeutrinoDens returns e_nux for all four heavy states at once, so the seed
+      // splits it across as many heavy slots as <radiation>/nspecies carries.
+      Real nuJ[4] = {e_nue, e_anue,
+                     (nspecies_ == 3) ? e_nux : 0.5*e_nux, 0.5*e_nux};
 
       // Boost the isotropic fluid-frame intensity into the coordinate frame.
       // The fluid streams inward from both sides -- w0_(IVX) carries the same

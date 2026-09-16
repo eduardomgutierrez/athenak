@@ -1,0 +1,58 @@
+# Unit test for the heavy-flavour slot fold of the nurates opacity path.
+#
+# <radiation>/nspecies selects how many slots the heavy flavours occupy: two at
+# nspecies = 4 (nu_x and nubar_x, two states each) or one at nspecies = 3 (all four
+# states).  The fold primitives are exercised directly on host mirrors, so no radiation
+# module or EOS table is needed -- the mesh below exists only because AthenaK requires
+# one.  The pgen exits before any evolution.
+#
+# Every check is exact.  The fold is algebra, not approximation: the merged slot must
+# radiate what the two slots radiated between them, equal coefficients must be a fixed
+# point of the averaging, and the Kirchhoff pairing kappa_bar*(J_eq[2]+J_eq[3]) must
+# reproduce kappa_2*J_eq + kappa_3*J_eq term for term.  Section 6 covers the occupancy
+# handed back to bns_nurates, whose two heavy ids block against each other.
+
+<comment>
+problem = heavy-flavour slot fold for the nurates opacity path
+
+<job>
+basename = ut_rad_nu_merge
+
+<mesh>
+nghost = 2
+
+nx1    = 4
+x1min  = -0.5
+x1max  = 0.5
+ix1_bc = periodic
+ox1_bc = periodic
+
+nx2    = 1
+x2min  = -0.5
+x2max  = 0.5
+ix2_bc = periodic
+ox2_bc = periodic
+
+nx3    = 1
+x3min  = -0.5
+x3max  = 0.5
+ix3_bc = periodic
+ox3_bc = periodic
+
+<time>
+evolution  = dynamic
+integrator = rk2
+cfl_number = 0.3
+tlim       = 0.0
+nlim       = 0
+
+# AthenaK insists on at least one physics module; an ideal-gas hydro block is the
+# cheapest one that needs no EOS table.  Nothing is evolved -- the pgen exits first.
+<hydro>
+eos         = ideal
+reconstruct = plm
+rsolver     = hlle
+gamma       = 1.666666666666667
+
+<problem>
+pgen_name  = rad_nu_merge
