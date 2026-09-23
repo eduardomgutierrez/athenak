@@ -185,7 +185,7 @@ TaskStatus Radiation::RadFluidCouplingNurates(Driver *pdriver, int stage) {
     // (analogous to arad*T^4 in the non-nurates case; intensity_cm = 4pi*I so
     // the equilibrium intensity_cm^eq = eta_1/kappa_a, not eta_1/(4pi))
     Real m_old[4] = {0.0}; Real m_new[4] = {0.0};
-    Real dJ_fluid[4] = {0.0};
+    Real dNe_fluid[4] = {0.0};
     Real dN_rad_source[4] = {0.0};
     for (int isp = 0; isp < nsp_; ++isp) {
       Real emission_sp = (sigma_a_sp[isp] > 0.0) ?
@@ -196,9 +196,10 @@ TaskStatus Radiation::RadFluidCouplingNurates(Driver *pdriver, int stage) {
       Real jr_cm_s = (suma1_sp[isp]*emission_sp + suma2_sp[isp])/(1.0 - suma3_sp[isp]);
       int sp_off = isp * nang_;
       Real J_old_sp = 0.0;
-      Real J_new_sp = 0.0;
+      Real dNe_sp = 0.0;
       for (int n = 0; n <= nang1; ++n) {
         int nn = sp_off + n;
+        Real i0_old = i0_(m,nn,k,j,i);
         Real n_0 = tc(m,0,0,k,j,i)*nh_c_.d_view(n,0) + tc(m,1,0,k,j,i)*nh_c_.d_view(n,1)
                  + tc(m,2,0,k,j,i)*nh_c_.d_view(n,2) + tc(m,3,0,k,j,i)*nh_c_.d_view(n,3);
         Real n_1 = tc(m,0,1,k,j,i)*nh_c_.d_view(n,0) + tc(m,1,1,k,j,i)*nh_c_.d_view(n,1)
@@ -231,8 +232,10 @@ TaskStatus Radiation::RadFluidCouplingNurates(Driver *pdriver, int stage) {
         m_new[2] += (n_2*i0_(m,nn,k,j,i)/n_0*solid_angles_.d_view(n));
         m_new[3] += (n_3*i0_(m,nn,k,j,i)/n_0*solid_angles_.d_view(n));
 
-        Real intensity_cm_new = 4.0*M_PI*(i0_(m,nn,k,j,i)/(n0*n_0))*SQR(SQR(n0_cm));
-        J_new_sp += intensity_cm_new*omega_cm;
+        // The coordinate-frame number moment times the comoving mean energy: i0_ stores
+        // n^0 n_0 I, and a ray carrying comoving energy eps* carries lab energy
+        // eps*/n0_cm, so dividing by eps* below leaves N^t.
+        dNe_sp += (i0_(m,nn,k,j,i) - i0_old)*n0_cm*solid_angles_.d_view(n)/n_0;
 
         if (excise) {
           bool apply_excision = (rad_mask_(m,k,j,i) ||
@@ -242,8 +245,7 @@ TaskStatus Radiation::RadFluidCouplingNurates(Driver *pdriver, int stage) {
       }
       if (isp < 4) {
         Real J_old = J_old_sp/wght_sum;
-        Real J_new = J_new_sp/wght_sum;
-        dJ_fluid[isp] = J_new - J_old;
+        dNe_fluid[isp] = dNe_sp;
 
         Real eta0 = nurates_eta_0_(m, isp, k, j, i);
         Real eta1 = nurates_eta_1_(m, isp, k, j, i);
@@ -281,10 +283,11 @@ TaskStatus Radiation::RadFluidCouplingNurates(Driver *pdriver, int stage) {
       u0_(m,IM2,k,j,i) += dm2;
       u0_(m,IM3,k,j,i) += dm3;
       if (evolve_ye_ && nsp_ > 1 && is_mhd_enabled_) {
-        // Both routes produce dN_*, the *comoving* neutrino number density change in
-        // fm^-3 -- the EOS number-density unit that GetBaryonMass() is defined against.
-        // 'opacity' integrates the number source directly; 'moment' divides the energy
-        // density change by a mean energy.
+        // Both routes produce dN_*, the coordinate-frame neutrino number density change
+        // in fm^-3 -- the EOS number-density unit that GetBaryonMass() is defined
+        // against.  'opacity' integrates the comoving number source over the coordinate
+        // step, which is already the coordinate-frame change because det g = -1 here;
+        // 'moment' divides the number moment above by a mean energy.
         Real dN_nue = dN_rad_source[0];
         Real dN_anue = dN_rad_source[1];
         if (ye_source_model_ == 1) {
@@ -294,22 +297,20 @@ TaskStatus Radiation::RadFluidCouplingNurates(Driver *pdriver, int stage) {
                          nurates_eta_1_(m, 0, k, j, i)/eta0_nue : 0.0;
           Real eps_anue = (eta0_anue > 0.0) ?
                           nurates_eta_1_(m, 1, k, j, i)/eta0_anue : 0.0;
-          dN_nue = (eps_nue > 0.0) ? dJ_fluid[0]/eps_nue : 0.0;
-          dN_anue = (eps_anue > 0.0) ? dJ_fluid[1]/eps_anue : 0.0;
+          dN_nue = (eps_nue > 0.0) ? dNe_fluid[0]/eps_nue : 0.0;
+          dN_anue = (eps_anue > 0.0) ? dNe_fluid[1]/eps_anue : 0.0;
         }
-        // u0_(IYF) holds the conserved D*Ye = rho*W*Ye, so a comoving number density
-        // change enters it with one factor of W = gamma.  Applied here, once, for both
-        // routes.  It used to be applied inside the 'moment' branch, which left
-        // 'opacity' -- the default -- short by exactly W, so the two routes disagreed
-        // on a moving fluid and only one of them was right.  Same form as the
-        // multifrequency path below; keep them textually identical.
+        // u0_(IYF) holds sqrt(gamma)*D*Ye and det g = -1 here, so both sides of the
+        // lepton balance are coordinate-frame conserved densities and the increment
+        // takes no frame factor.  Same form as the multifrequency path below; keep them
+        // textually identical.
         // Applied in full.  Any cap on this increment that is not matched by the same
         // cap on the neutrino field destroys lepton number: the neutrinos have already
         // been updated by dN_nue and dN_anue by this point, so whatever the fluid does
         // not accept is simply lost -- and the energy and momentum above are not capped
         // either, which would leave the lepton exchange inconsistent with the energy
         // exchange that produced it.
-        Real dDYe = gamma*mb_code_*(-dN_nue + dN_anue);
+        Real dDYe = mb_code_*(-dN_nue + dN_anue);
         u0_(m,IYF,k,j,i) += dDYe;
         // The weak reactions that convert protons to neutrons also flip electron
         // chirality, so the chiral imbalance Y5 is sourced with the opposite sign to Ye.
@@ -622,7 +623,6 @@ TaskStatus Radiation::MultiFreqRadFluidCouplingNurates(Driver *pdriver, int stag
                    tc(m,2,3,k,j,i)*nh_c_.d_view(iang,2) +
                    tc(m,3,3,k,j,i)*nh_c_.d_view(iang,3);
         Real domega = solid_angles_.d_view(iang);
-        Real omega_cm = domega/SQR(n0_cm);
         Real sfac = 4.0*M_PI*SQR(SQR(n0_cm))/(n0*n_0);
         RemapRay ray3 = RemapMakeRay(dlt);
 
@@ -654,7 +654,6 @@ TaskStatus Radiation::MultiFreqRadFluidCouplingNurates(Driver *pdriver, int stag
                                   RemapAsymptote::kSpectrum, grid_dln_);
           }
 
-          Real e_cm = n0_cm*emid_f(ifr);
           Real i_old = sfac*i0_old;
           Real vncsigma = 1.0/(n0 + dtsig*n0_cm);
           // A comoving-isotropic field makes the scattering target the common spectrum,
@@ -673,12 +672,11 @@ TaskStatus Radiation::MultiFreqRadFluidCouplingNurates(Driver *pdriver, int stag
           i0_(m,nn,k,j,i) = i0_new;
 
           if (isp < 4) {
-            // Differenced on the stored field, at the bin's own comoving energy, so
-            // this is the *same* difference the energy moments below take -- including
-            // where the floor binds, which the raw increment di_cm would miss.  No
-            // rebinned spectrum is involved anywhere in either.
-            dN_rad_moment[isp] +=
-                sfac*(i0_new - i0_old)*omega_cm/fmax(e_cm, 1.0e-100);
+            // i0_ stores n^0 n_0 I, so this is the coordinate-frame number moment
+            // N^t = SUM n^0 (I/e) dOmega: the same stored-field difference the energy
+            // moments below take -- including where the floor binds, which the raw
+            // increment di_cm would miss -- over the bin's lab energy.
+            dN_rad_moment[isp] += (i0_new - i0_old)*domega/(n_0*emid_f(ifr));
           }
 
           m_new[0] += i0_(m,nn,k,j,i)*domega;
@@ -694,7 +692,6 @@ TaskStatus Radiation::MultiFreqRadFluidCouplingNurates(Driver *pdriver, int stag
       }
     }
     for (int isp=0; isp<nsp_; ++isp) {
-      dN_rad_moment[isp] /= wght_sum;
       // the sum above is a code-unit energy density over a bin energy in MeV;
       // rescaling the energy density to MeV/fm^3 makes it a number density in
       // fm^-3, which is the convention throughout the nurates interface
@@ -724,10 +721,11 @@ TaskStatus Radiation::MultiFreqRadFluidCouplingNurates(Driver *pdriver, int stag
       if (evolve_ye_ && nsp_ > 1 && is_mhd_enabled_) {
         Real dN_nue = dN_rad_moment[0];
         Real dN_anue = dN_rad_moment[1];
-        // dN_rad_moment is comoving; IYF holds D*Ye = rho*W*Ye, so the increment
-        // carries a factor W.  Matches the grey path above.
+        // u0_(IYF) holds sqrt(gamma)*D*Ye and det g = -1 here, so both sides of the
+        // lepton balance are coordinate-frame conserved densities and the increment
+        // takes no frame factor -- the same statement as the energy coupling above.
         // Applied in full; see the grey path above for why it is not capped.
-        Real dDYe = gamma*mb_code_*(-dN_nue + dN_anue);
+        Real dDYe = mb_code_*(-dN_nue + dN_anue);
         u0_(m,IYF,k,j,i) += dDYe;
         // Y5 mirrors the Ye increment; see the grey path above.
         if (backreact_chiral_) {
