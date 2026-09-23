@@ -534,9 +534,12 @@ TaskStatus Radiation::CalcOpacityNurates_(Driver *pdrive, int stage) {
                           u_tet[1]*nh_c_.d_view(iang,1) -
                           u_tet[2]*nh_c_.d_view(iang,2) -
                           u_tet[3]*nh_c_.d_view(iang,3));
+            // n0_cm = W - u.nhat >= 1/(W + |u|), strictly positive for a subluminal
+            // fluid and a future-directed null ray, so the logarithm is unguarded here
+            // as it is in MultiFreqRadFluidCouplingNurates.
             n_0_iang(iang)   = n_0;
             n0_cm_iang(iang) = n0_cm;
-            dlt_iang(iang)   = (n0_cm > 0.0) ? log(n0_cm)/grid_dln_ : 0.0;
+            dlt_iang(iang)   = log(n0_cm)/grid_dln_;
           }
         }
         for (int isp = 0; isp < nspecies_; ++isp) {
@@ -603,8 +606,8 @@ TaskStatus Radiation::CalcOpacityNurates_(Driver *pdrive, int stage) {
                 if (shift) {
                   RemapStencil sten = RemapRayStencil(ray, 0, nfreq_-1, ifr,
                                                       static_cast<Real>(ifr) - dlt);
-                  icm = RemapBinValue(espec, lspec, 0, sten,
-                                        RemapAsymptote::kSpectrum, grid_dln_);
+                  icm = RemapBinValue(lspec, 0, sten,
+                                      RemapAsymptote::kSpectrum, grid_dln_);
                 }
                 jcm(ifr) += icm*omega_cm;
               }

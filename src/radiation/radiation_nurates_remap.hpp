@@ -71,8 +71,13 @@
 
 namespace radiation {
 
-//! Sentinel stored in the log arrays where the value is not positive.
-#define NURATES_REMAP_LOG_SENTINEL (-1.0e30)
+//! Stored in the log arrays where the value is not positive, and the threshold that
+//! detects it.  Both ends of the gap between them are wide: Kokkos::log bottoms out at
+//! -745 on the smallest subnormal, so no real logarithm approaches the threshold from
+//! above, and no Lagrange weight -- |w| reaches 26 off the grid -- can carry the sentinel
+//! back over it from below.
+constexpr Real kRemapLogSentinel = -1.0e30;
+constexpr Real kRemapLogLive = 0.1*kRemapLogSentinel;
 
 //! How far outside the two nodes it interpolates between the cubic may land, in e-folds.
 //! Measured over 2.2e5 evaluations of the single-zone relaxation: the interpolation
@@ -142,7 +147,7 @@ template <class QT, class LT>
 KOKKOS_INLINE_FUNCTION
 void RemapFillLogs(const QT &q, LT &lq, const int off, const int flo, const int fhi) {
   for (int f = flo; f <= fhi; ++f) {
-    lq(off+f) = (q(off+f) > 0.0) ? Kokkos::log(q(off+f)) : NURATES_REMAP_LOG_SENTINEL;
+    lq(off+f) = (q(off+f) > 0.0) ? Kokkos::log(q(off+f)) : kRemapLogSentinel;
   }
 }
 
@@ -267,9 +272,8 @@ RemapStencil RemapRayStencil(const RemapRay &r, const int flo, const int fhi,
 //! Exact for a power law in energy, for point-sampled quantities (sigma_a, sigma_s) and
 //! bin-integrated ones (the equilibrium spectrum, the mean intensity) alike -- the latter
 //! pick up the n0_cm^(p+1) stretch of the bin width on their own, so the caller applies
-//! no Jacobian.  lq holds log(q), or the sentinel where q is not positive; if any stencil
-//! node is flagged, q itself is interpolated and the result is clamped to the tabulated
-//! range, which costs accuracy in an empty bin but never produces a NaN.
+//! no Jacobian.  lq holds log(q), or the sentinel where q is not positive; the raw values
+//! are never needed here, which is what keeps the two spaces from disagreeing.
 //!
 //! The window is slid to stay inside [flo, fhi] rather than dropping to two-point near
 //! the ends: a centred window with a linear fallback is wrong by -18% on the peak bin and
@@ -277,108 +281,111 @@ RemapStencil RemapRayStencil(const RemapRay &r, const int flo, const int fhi,
 //! top of the grid.  RemapStencilAt and RemapRayStencil build the window.
 //!
 //! Outside the grid the cubic alone is useless -- |w| reaches 26 for the 2.3 bins the
-//! shock
-//! grid asks for, and it overshoots a Fermi-Dirac tail by many decades -- so the
+//! shock grid asks for, and it overshoots a Fermi-Dirac tail by many decades -- so the
 //! continuation is bounded, and what bounds it depends on the quantity: see
 //! RemapAsymptote.  dln is the grid's bin width in ln(nu), needed because the asymptotic
 //! slopes are stated per unit ln(nu) while this function works in bin index.
+//!
+//! ## One operator, at whatever order the live nodes support
+//!
+//! lo and hi are the live nodes bracketing t, lo2 and hi2 the next ones out.  Three
+//! positions follow -- between two live nodes, below them all, above them all -- and the
+//! cubic joins in only where all four nodes are live, so a window that straddles the edge
+//! of the live spectrum degrades cubic -> linear -> asymptote -> zero without leaving log
+//! space.  That matters because a dead node is not corrupt data: measured over a whole
+//! snapshot of the 1D shock, interior holes were 1 in 1536 spectra and every other zero
+//! was the high-energy tail past underflow or the floor.  Such a window is straddling a
+//! boundary of the same kind as the edge of the tabulated grid, and gets the same
+//! treatment, with the error staying relative to the local value rather than absolute
+//! against the window's largest node.
 //!
 //! The low-energy bound is the physics, not a numerical guard.  A bin-integrated
 //! intensity decays at least as fast as nu^4 going down -- I_nu = nu^3 f with f a bounded
 //! occupation increasing as nu falls, so d ln I/d ln nu <= 3 with equality attained as
 //! nu -> 0, and the log bin width adds the fourth power.  Capping there forces decay
 //! rather than merely forbidding growth, and it costs nothing: the p = 0 spectral
-//! diffusion test is unchanged to seven digits by it.
-template <class QT>
+//! diffusion test is unchanged to seven digits by it.  Continuing the *measured* slope
+//! alone points the wrong way on the shock's cold upstream, where the whole grid sits on
+//! a falling tail, and reaches Sx = 1e187 with NANS_IN_CONS within a few cycles.
+//!
+//! Above the grid the opacities keep growing as E^2 with no cutoff at all -- the
+//! beta-process exponentials cancel identically against kappa = eta exp((E-mu)/T),
+//! leaving Bruenn's E^2 phase space -- so their measured slope is continued uncapped,
+//! and must not be capped the way a spectrum is.  The intensities do cut off, and a
+//! Boltzmann tail was tried for them: ln q ~ 4 y - nu/T gives a cutoff scale readable
+//! straight off the edge slope, nu_edge/T = 4 - s/dln, with no EOS lookup.  It is the
+//! right asymptotics for a thermal neutrino spectrum and it is *not* used, because
+//! measurement did not support it: it doubled the error of the p = 0 spectral diffusion
+//! test (2.480e-2 -> 5.106e-2), the one case here with an exact solution, while changing
+//! the scattering-isotropy residual by 0.4% and the production shock not at all.
+//! Imposing exp(-nu/T) steepening beyond what the edge slope already shows is an
+//! extrapolation the data does not carry, and it over-decays any tail that is not
+//! Boltzmann.  So above the grid a spectrum gets the same shape as below minus the
+//! physical floor, which has no counterpart there: the cubic where it decays faster, the
+//! chord as the power-law-exact bound, and no growth past the edge node.
+template <class LT>
 KOKKOS_INLINE_FUNCTION
-Real RemapBinValue(const QT &q, const QT &lq, const int off, const RemapStencil &s,
+Real RemapBinValue(const LT &lq, const int off, const RemapStencil &s,
                    const RemapAsymptote asym, const Real dln) {
   const Real t = s.t;
-  const Real w0 = s.w0, w1 = s.w1, w2 = s.w2, w3 = s.w3;
-  const int a = off + s.st, b = a + 1, c = a + 2, d = a + 3;
-  if (lq(a) > -1.0e29 && lq(b) > -1.0e29 && lq(c) > -1.0e29 && lq(d) > -1.0e29) {
-    Real lval = w0*lq(a) + w1*lq(b) + w2*lq(c) + w3*lq(d);
-    if (t < 0.0) {
-      // Below the grid.  kOpacity continues the measured edge slope: exact for E^p, and
-      // where sigma_a has a threshold that slope is steep, so it continues toward zero.
-      Real chord = lq(a) + t*(lq(b) - lq(a));
-      if (asym == RemapAsymptote::kOpacity) { return Kokkos::exp(chord); }
-      // kSpectrum decays *at least* as fast as nu^4.  That line is the physical limit --
-      // I_nu = nu^3 f with f a bounded occupation increasing as nu falls, so the bin
-      // integral's log-slope tends to 4 from below -- and because its slope is positive
-      // the continuation can only fall going down, whatever the data does.  That is what
-      // makes it safe, and it is why no hand-imposed "may not grow outward" clamp is
-      // needed: continuing the *measured* slope downward on the shock's cold upstream,
-      // where the whole grid sits on a falling tail, points the wrong way and reaches
-      // Sx = 1e187 with NANS_IN_CONS within a few cycles.  The nu^4 line forbids that by
-      // construction, and it is strictly stronger than a no-growth clamp, which would
-      // permit a flat continuation.
-      //
-      // It is a cap, not a replacement: a spectrum with a sharper low-energy cutoff than
-      // a saturating occupation falls faster than nu^4 well before reaching the limit,
-      // and that curvature is real information the cubic carries.  Take whichever decays
-      // fastest.  Measured, this whole branch costs nothing -- the p = 0 diffusion test
-      // reproduces its pre-existing 2.480037e-02 to every digit.
-      Real limit = lq(a) + t*(4.0*dln);
-      return Kokkos::exp(Kokkos::fmin(Kokkos::fmin(lval, chord), limit));
+  const int a = off + s.st;
+  int lo = -1, lo2 = -1, hi = -1, hi2 = -1, nlive = 0;
+  for (int k=0; k<=3; ++k) {
+    if (!(lq(a+k) > kRemapLogLive)) { continue; }
+    ++nlive;
+    if (static_cast<Real>(k) <= t) { lo2 = lo; lo = k; }
+    if (static_cast<Real>(k) >= t) {
+      if (hi < 0) { hi = k; } else if (hi2 < 0) { hi2 = k; }
     }
-    if (t > 3.0) {
-      // Above the grid.  The opacities keep growing as E^2 with no cutoff at all -- the
-      // beta-process exponentials cancel identically against kappa = eta exp((E-mu)/T),
-      // leaving Bruenn's E^2 phase space -- so continuing their measured slope is both
-      // exact and correct, and must not be capped the way a spectrum is.
-      Real u = t - 3.0;
-      Real slope = lq(d) - lq(c);
-      if (asym == RemapAsymptote::kOpacity) { return Kokkos::exp(lq(d) + u*slope); }
-      // The intensities do cut off, and a Boltzmann tail was tried here: ln q ~ 4 y -
-      // nu/T
-      // gives a cutoff scale readable straight off the edge slope, nu_edge/T = 4 - s/dln,
-      // with no EOS lookup.  It is the right asymptotics for a thermal neutrino spectrum
-      // and it is *not* used, because measurement did not support it: it doubled the
-      // error
-      // of the p = 0 spectral diffusion test (2.480e-2 -> 5.106e-2), the one case here
-      // with an exact solution, while changing the scattering-isotropy residual by 0.4%
-      // and the production shock not at all.  The reason is that imposing exp(-nu/T)
-      // steepening beyond what the edge slope already shows is an extrapolation the data
-      // does not carry, and it over-decays anything whose tail is not Boltzmann.
-      //
-      // So the continuation here is the same shape as the low end minus the physical
-      // floor, which has no counterpart above: the cubic where it decays faster, the
-      // chord as the power-law-exact bound, and no growth past the edge node.
-      return Kokkos::exp(Kokkos::fmin(Kokkos::fmin(lval, lq(d) + u*slope), lq(d)));
+  }
+  const bool full = (nlive == 4);
+  Real lval = 0.0;
+  if (full) {
+    lval = s.w0*lq(a) + s.w1*lq(a+1) + s.w2*lq(a+2) + s.w3*lq(a+3);
+  }
+  if (lo >= 0 && hi >= 0) {
+    // Between two live nodes.  The cubic leaves their interval only by the curvature it
+    // carries -- kRemapOvershoot e-folds, measured.  The bound has to be those two nodes
+    // rather than the window, because w0 and w3 are NEGATIVE for the 1 < t < 2 that a ray
+    // window always lands in: a node far BELOW its neighbours enters lval as a large
+    // POSITIVE contribution, so a window-scaled bound grows with exactly the excursion it
+    // is meant to catch.  A neutrino spectrum spanning 69 e-folds across the grid, with
+    // tail bins underflowing and a charged-current threshold putting a cliff in the
+    // middle, supplies such nodes as a matter of course.
+    const Real llo = lq(a+lo), lhi = lq(a+hi);
+    if (!full) {
+      return (hi > lo) ? Kokkos::exp(llo + (t - static_cast<Real>(lo))*(lhi - llo)
+                                           /static_cast<Real>(hi - lo))
+                       : Kokkos::exp(llo);
     }
-    // Inside the window the value interpolates between the two nodes that bracket t, and
-    // it leaves their interval only by the curvature the cubic carries -- kRemapOvershoot
-    // e-folds, measured.  The bound has to be those two nodes rather than the window,
-    // because w0 and w3 are NEGATIVE for the 1 < t < 2 that a ray window always lands in:
-    // a node far BELOW its neighbours enters lval as a large POSITIVE contribution, so a
-    // window-scaled bound grows with exactly the excursion it is meant to catch.  A
-    // neutrino spectrum spanning 69 e-folds across the grid, with tail bins underflowing
-    // and a charged-current threshold putting a cliff in the middle, supplies such nodes
-    // as a matter of course.
-    Real lb = (t < 1.0) ? lq(a) : ((t < 2.0) ? lq(b) : lq(c));
-    Real lc = (t < 1.0) ? lq(b) : ((t < 2.0) ? lq(c) : lq(d));
     return Kokkos::exp(
-        Kokkos::fmin(Kokkos::fmax(lval, Kokkos::fmin(lb, lc) - kRemapOvershoot),
-                     Kokkos::fmax(lb, lc) + kRemapOvershoot));
+        Kokkos::fmin(Kokkos::fmax(lval, Kokkos::fmin(llo, lhi) - kRemapOvershoot),
+                     Kokkos::fmax(llo, lhi) + kRemapOvershoot));
   }
-  // Sentinel path: a non-positive node means the log-space form is unavailable, so the
-  // cubic would run in linear space where its |w| ~ 26 has nothing to temper it.  Nothing
-  // here is a power law any more, so clamp to the tabulated range outright.
-  Real qlo = Kokkos::fmin(Kokkos::fmin(q(a), q(b)), Kokkos::fmin(q(c), q(d)));
-  Real qhi = Kokkos::fmax(Kokkos::fmax(q(a), q(b)), Kokkos::fmax(q(c), q(d)));
-  Real lin = w0*q(a) + w1*q(b) + w2*q(c) + w3*q(d);
-  Real val = Kokkos::fmin(Kokkos::fmax(lin, Kokkos::fmax(qlo, 0.0)), qhi);
-  // The nu^4 bound below the grid is a property of the spectrum, not of the
-  // interpolation, so it has to hold on this path too.  Without it a single hole
-  // anywhere in the stencil -- and the update floors i0_ at zero, and jr_cm likewise, so
-  // holes are the normal case on a cold upstream -- returns a value bounded only by the
-  // largest node, i.e. a flat continuation where the spectrum must be decaying.
-  if (t < 0.0 && asym == RemapAsymptote::kSpectrum) {
-    Real cap = (q(a) > 0.0) ? q(a)*Kokkos::exp(t*(4.0*dln)) : 0.0;
-    val = Kokkos::fmin(val, cap);
+  if (hi >= 0) {
+    // Below every live node.  kOpacity continues the measured edge slope: exact for E^p,
+    // and where sigma_a has a threshold that slope is steep, so it continues toward zero.
+    const Real lref = lq(a+hi);
+    const Real slope = (hi2 >= 0) ? (lq(a+hi2) - lref)/static_cast<Real>(hi2 - hi) : 0.0;
+    const Real chord = lref + (t - static_cast<Real>(hi))*slope;
+    if (asym == RemapAsymptote::kOpacity) { return Kokkos::exp(chord); }
+    // The nu^4 line is a cap, not a replacement: a spectrum with a sharper low-energy
+    // cutoff than a saturating occupation falls faster than nu^4 well before reaching the
+    // limit, and that curvature is real information the cubic carries.  Take whichever
+    // decays fastest.
+    Real lval_out = Kokkos::fmin(chord, lref + (t - static_cast<Real>(hi))*(4.0*dln));
+    return Kokkos::exp(full ? Kokkos::fmin(lval, lval_out) : lval_out);
   }
-  return val;
+  if (lo >= 0) {
+    // Above every live node.
+    const Real lref = lq(a+lo);
+    const Real slope = (lo2 >= 0) ? (lref - lq(a+lo2))/static_cast<Real>(lo - lo2) : 0.0;
+    const Real chord = lref + (t - static_cast<Real>(lo))*slope;
+    if (asym == RemapAsymptote::kOpacity) { return Kokkos::exp(chord); }
+    Real lval_out = Kokkos::fmin(chord, lref);
+    return Kokkos::exp(full ? Kokkos::fmin(lval, lval_out) : lval_out);
+  }
+  return 0.0;
 }
 
 }  // namespace radiation

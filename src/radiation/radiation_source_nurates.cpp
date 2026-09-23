@@ -358,8 +358,10 @@ TaskStatus Radiation::RadFluidCouplingNurates(Driver *pdriver, int stage) {
 //!     finiteness at sigma_s = 0 and isoenergeticity all follow from that and need no
 //!     construction.
 //!  3. **Update the stored bins.** For ray a's bin ifr, sitting at fixed-grid position
-//!     x = ifr + delta_a, the opacities, the equilibrium spectrum and jr_cm are read at
-//!     x and the implicit update is applied to i0_ in place.
+//!     x = ifr + delta_a, the total extinction and the source function
+//!     (sigma_s jr_cm + sigma_a eq_j)/(sigma_s + sigma_a) are read at x, and the implicit
+//!     update is applied to i0_ in place.  Those two are what the update reads, so those
+//!     two are what the interpolation lands on.
 //!
 //! ## Why the field itself is never rebinned
 //!
@@ -462,6 +464,7 @@ TaskStatus Radiation::MultiFreqRadFluidCouplingNurates(Driver *pdriver, int stag
     int woff = 0;
     // The angular sums of the implicit solve, accumulated ray by ray.  Two numbers per
     // bin, not the whole un-shifted field: see the fused pass below.
+    WorkSlice acc0 = MakeWorkSlice(wbase, wstride, woff, nfrq_);
     WorkSlice acc1 = MakeWorkSlice(wbase, wstride, woff, nfrq_);
     WorkSlice acc2 = MakeWorkSlice(wbase, wstride, woff, nfrq_);
     WorkSlice sigma_a = MakeWorkSlice(wbase, wstride, woff, nfrq_);
@@ -472,10 +475,9 @@ TaskStatus Radiation::MultiFreqRadFluidCouplingNurates(Driver *pdriver, int stag
     // log-space interpolation untouched, the weights summing to one.
     WorkSlice dt_sig = MakeWorkSlice(wbase, wstride, woff, nfrq_);
     WorkSlice ldtsig = MakeWorkSlice(wbase, wstride, woff, nfrq_);
-    WorkSlice dt_src = MakeWorkSlice(wbase, wstride, woff, nfrq_);
-    WorkSlice ldtsrc = MakeWorkSlice(wbase, wstride, woff, nfrq_);
+    WorkSlice src_j = MakeWorkSlice(wbase, wstride, woff, nfrq_);
+    WorkSlice lsrcj = MakeWorkSlice(wbase, wstride, woff, nfrq_);
     WorkSlice emid_f = MakeWorkSlice(wbase, wstride, woff, nfrq_);
-    WorkSlice jr_cm = MakeWorkSlice(wbase, wstride, woff, nfrq_);
     WorkSlice espec = MakeWorkSlice(wbase, wstride, woff, nfrq_);
     WorkSlice lspec = MakeWorkSlice(wbase, wstride, woff, nfrq_);
     WorkSlice n_0_iang = MakeWorkSlice(wbase, wstride, woff, nang_);
@@ -530,8 +532,12 @@ TaskStatus Radiation::MultiFreqRadFluidCouplingNurates(Driver *pdriver, int stag
                        tc(m,3,0,k,j,i)*nh_c_.d_view(iang,3);
       Real n0_cm = (u_tet[0]*nh_c_.d_view(iang,0) - u_tet[1]*nh_c_.d_view(iang,1) -
                     u_tet[2]*nh_c_.d_view(iang,2) - u_tet[3]*nh_c_.d_view(iang,3));
+      // n0_cm = W - u.nhat >= 1/(W + |u|), strictly positive for a subluminal fluid and
+      // a future-directed null ray.  The logarithm here, the sign of vncsigma and the
+      // positivity of den below all rest on it, so it is not guarded separately in any of
+      // them: a violation has to surface, not be absorbed.
       n0_cm_iang(iang) = n0_cm;
-      dlt_iang(iang) = (n0_cm > 0.0) ? log(n0_cm)/grid_dln_ : 0.0;
+      dlt_iang(iang) = log(n0_cm)/grid_dln_;
       wght_sum += solid_angles_.d_view(iang)/SQR(n0_cm);
     }
     for (int ifr=0; ifr<nfrq_; ++ifr) {
@@ -559,7 +565,9 @@ TaskStatus Radiation::MultiFreqRadFluidCouplingNurates(Driver *pdriver, int stag
       // only consumer is the sum below, and each ray contributes to it exactly once, so
       // holding all of it would cost nang*nfreq of workspace and buy nothing.  Ray-major
       // so one ray's whole spectrum is built once and read straight through.
-      for (int ifr=0; ifr<nfrq_; ++ifr) { acc1(ifr) = 0.0; acc2(ifr) = 0.0; }
+      for (int ifr=0; ifr<nfrq_; ++ifr) {
+        acc0(ifr) = 0.0; acc1(ifr) = 0.0; acc2(ifr) = 0.0;
+      }
       for (int iang=0; iang<=nang1; ++iang) {
         Real n_0 = n_0_iang(iang);
         Real n0_cm = n0_cm_iang(iang);
@@ -570,6 +578,9 @@ TaskStatus Radiation::MultiFreqRadFluidCouplingNurates(Driver *pdriver, int stag
         }
         // Exactly at rest the ray already sits on the grid, and reading the stored
         // values straight back is what makes v = 0 bit-identical to no frame treatment.
+        // The threshold is absolute rather than a fraction of dln because dlt is either
+        // zero or O(0.1-2) with nothing in between, and because a fluid at rest in
+        // coordinates need not give n0_cm exactly 1 once the metric carries a shift.
         bool shift = (fabs(dlt) > 1.0e-12);
         if (shift) { RemapFillLogs(espec, lspec, 0, 0, nfrq_-1); }
         RemapRay ray = RemapMakeRay(-dlt);
@@ -579,30 +590,48 @@ TaskStatus Radiation::MultiFreqRadFluidCouplingNurates(Driver *pdriver, int stag
           if (shift) {
             RemapStencil sten = RemapRayStencil(ray, 0, nfrq_-1, ifr,
                                                 static_cast<Real>(ifr) - dlt);
-            icm = RemapBinValue(espec, lspec, 0, sten,
-                                  RemapAsymptote::kSpectrum, grid_dln_);
+            icm = RemapBinValue(lspec, 0, sten,
+                                RemapAsymptote::kSpectrum, grid_dln_);
           }
-          Real vncsigma = 1.0/(n0 + dt_sig(ifr)*n0_cm);
-          acc1(ifr) += omega_cm*n0_cm*vncsigma;
-          acc2(ifr) += icm*omega_cm*n0*vncsigma;
+          Real wvnc = omega_cm/(n0 + dt_sig(ifr)*n0_cm);
+          acc0(ifr) += wvnc;
+          acc1(ifr) += wvnc*n0_cm;
+          acc2(ifr) += icm*wvnc*n0;
         }
       }
       for (int ifr=0; ifr<nfrq_; ++ifr) {
         int idx = ifr;
         Real dtcsiga = dt_*sigma_a(idx);
         Real dtcsigs = dt_*sigma_s(idx);
+        Real sum0 = acc0(ifr)/wght_sum;
         Real sum1 = acc1(ifr)/wght_sum;
         Real sum2 = acc2(ifr)/wght_sum;
         // The angular mean of the *new* intensity, which is what makes the update
         // implicit in the scattering term.  sigma_s is the same on every ray at this
         // energy, so this is the unweighted mean and nothing has to be chosen -- which
         // is exactly what the shape-factor closure could not arrange.
-        Real den = 1.0 - sum1*dtcsigs;
-        Real jr = (den > 0.0) ? (sum2 + sum1*dtcsiga*eq_j(idx))/den : 0.0;
-        jr_cm(ifr) = (jr > 0.0) ? jr : 0.0;
-        dt_src(ifr) = dtcsigs*jr_cm(ifr) + dtcsiga*eq_j(idx);
+        //
+        // den is the angular sum of (n0 + dt sigma_a n0_cm)/(n0 + dt sigma_tot n0_cm):
+        // sigma_s cancels out of the numerator, so the loop gain saturates at 1 from
+        // below and the denominator is bounded away from zero by n0*sum0.  Summed in
+        // that form it is manifestly positive and needs no guard.  The algebraically
+        // equal 1 - sum1*dt*sigma_s is a difference of two quantities approaching 1 and
+        // would need one, which is the reason to keep the extra angular sum.
+        Real den = n0*sum0 + dtcsiga*sum1;
+        Real jr = (sum2 + sum1*dtcsiga*eq_j(idx))/den;
+        Real jr_cm = (jr > 0.0) ? jr : 0.0;
+        // The source function: the intensity the update relaxes toward, a convex
+        // combination of the scattering mean and the equilibrium spectrum.  It is the
+        // ratio and not the emission that pass 3 has to interpolate, because the ratio
+        // is the fixed point the update relaxes to, so it is the ratio that the bound in
+        // RemapBinValue should be holding; and as an intensity it takes
+        // RemapAsymptote::kSpectrum exactly rather than loosely.  Where that bound does
+        // not bind the two are the same number -- the log-cubic of a product is the sum
+        // of the log-cubics.
+        Real dts = dt_sig(ifr);
+        src_j(ifr) = (dts > 0.0) ? (dtcsigs*jr_cm + dtcsiga*eq_j(idx))/dts : 0.0;
       }
-      RemapFillLogs(dt_src, ldtsrc, 0, 0, nfrq_-1);
+      RemapFillLogs(src_j, lsrcj, 0, 0, nfrq_-1);
 
       // ---- Pass 3: update the stored lab bins at each ray's own comoving energy ------
       for (int iang=0; iang<=nang1; ++iang) {
@@ -625,6 +654,7 @@ TaskStatus Radiation::MultiFreqRadFluidCouplingNurates(Driver *pdriver, int stag
         Real domega = solid_angles_.d_view(iang);
         Real sfac = 4.0*M_PI*SQR(SQR(n0_cm))/(n0*n_0);
         RemapRay ray3 = RemapMakeRay(dlt);
+        bool excise_ray = excise && (rad_mask_(m,k,j,i) || fabs(n_0) < n_0_floor_);
 
         for (int ifr=0; ifr<nfrq_; ++ifr) {
           int nn = isp*nfrq_*nang_ + ifr*nang_ + iang;
@@ -635,31 +665,27 @@ TaskStatus Radiation::MultiFreqRadFluidCouplingNurates(Driver *pdriver, int stag
           m_old[3] += n_3*i0_old/n_0*domega;
 
           // This ray's bin ifr covers comoving n0_cm*[e_lo, e_hi]; on a log grid that is
-          // the fixed grid's position ifr + dlt.
-          //
-          // The update reads the total extinction and the total source and nothing else,
-          // so those are what the lookup returns: the interpolation lands on the quantity
-          // actually used rather than on ingredients that are then combined.  dt_src
-          // continues as a spectrum -- it is an opacity times an intensity, Boltzmann-cut
-          // above and going as nu^2 * nu^4 below, so the nu^4 floor bounds it correctly
-          // if loosely.
+          // the fixed grid's position ifr + dlt.  The update reads the total extinction
+          // and the intensity it relaxes toward and nothing else, so those are what the
+          // lookup returns: the interpolation lands on the two quantities actually used
+          // rather than on ingredients that are then combined.
           Real dtsig = dt_sig(ifr);
-          Real dtsrc = dt_src(ifr);
+          Real srcj = src_j(ifr);
           if (shift) {
             Real xpos = static_cast<Real>(ifr) + dlt;
             RemapStencil sten = RemapRayStencil(ray3, 0, nfrq_-1, ifr, xpos);
-            dtsig = RemapBinValue(dt_sig, ldtsig, 0, sten,
+            dtsig = RemapBinValue(ldtsig, 0, sten,
                                   RemapAsymptote::kOpacity, grid_dln_);
-            dtsrc = RemapBinValue(dt_src, ldtsrc, 0, sten,
-                                  RemapAsymptote::kSpectrum, grid_dln_);
+            srcj = RemapBinValue(lsrcj, 0, sten,
+                                 RemapAsymptote::kSpectrum, grid_dln_);
           }
 
           Real i_old = sfac*i0_old;
           Real vncsigma = 1.0/(n0 + dtsig*n0_cm);
           // A comoving-isotropic field makes the scattering target the common spectrum,
-          // so dt_src read at this ray's own comoving energy balances dtsig*i_old and the
-          // source vanishes ray by ray, not merely in the angular sum.
-          Real di_cm = ((dtsrc - dtsig*i_old)*n0_cm*vncsigma);
+          // so src_j read at this ray's own comoving energy balances i_old and the source
+          // vanishes ray by ray, not merely in the angular sum.
+          Real di_cm = (dtsig*(srcj - i_old)*n0_cm*vncsigma);
           // Apply the increment to the *stored* value rather than dividing the updated
           // comoving value back.  (sfac*x)/sfac differs from x for ~11% of arguments in
           // IEEE double, so the round trip would perturb every bin by an ulp on every
@@ -684,10 +710,11 @@ TaskStatus Radiation::MultiFreqRadFluidCouplingNurates(Driver *pdriver, int stag
           m_new[2] += n_2*i0_(m,nn,k,j,i)/n_0*domega;
           m_new[3] += n_3*i0_(m,nn,k,j,i)/n_0*domega;
 
-          if (excise) {
-            bool apply_excision = (rad_mask_(m,k,j,i) || fabs(n_0) < n_0_floor_);
-            if (apply_excision) { i0_(m,nn,k,j,i) = 0.0; }
-          }
+          // Zeroed after m_new has been accumulated from it, so an excised cell hands
+          // the fluid only what the source exchanged this step.  Zeroing first would
+          // make m_new vanish and hand the fluid the cell's whole radiation energy and
+          // momentum, every step.
+          if (excise_ray) { i0_(m,nn,k,j,i) = 0.0; }
         }
       }
     }

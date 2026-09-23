@@ -220,7 +220,7 @@ void ProblemGenerator::RadFreqRemap(ParameterInput *pin, const bool restart) {
     Real worst = 0.0;
     for (int f = 0; f < nfreq; ++f) {
       Real x = static_cast<Real>(f);
-      Real got = radiation::RemapBinValue(q, lq, 0,
+      Real got = radiation::RemapBinValue(lq, 0,
                                           radiation::RemapStencilAt(0, nfreq-1, x),
                                           radiation::RemapAsymptote::kOpacity, g.dln);
       worst = fmax(worst, fabs(got - q(f))/q(f));
@@ -245,7 +245,7 @@ void ProblemGenerator::RadFreqRemap(ParameterInput *pin, const bool restart) {
       Real dlt = log(ncm)/g.dln;
       for (int ifr = 0; ifr < nfreq; ++ifr) {
         Real x = static_cast<Real>(ifr) + dlt;
-        Real got = radiation::RemapBinValue(q, lq, 0,
+        Real got = radiation::RemapBinValue(lq, 0,
                                             radiation::RemapStencilAt(0, nfreq-1, x),
                                             radiation::RemapAsymptote::kOpacity, g.dln);
         // The bin the shifted index points at is ncm*[e_lo, e_hi] of bin ifr.
@@ -302,7 +302,7 @@ void ProblemGenerator::RadFreqRemap(ParameterInput *pin, const bool restart) {
         radiation::RemapFillLogs(ray, lray, 0, 0, nfreq-1);
         for (int f = 0; f < nfreq; ++f) {
           Real xun = static_cast<Real>(f) - dlt_a(a);
-          Real un = radiation::RemapBinValue(ray, lray, 0,
+          Real un = radiation::RemapBinValue(lray, 0,
                                              radiation::RemapStencilAt(0, nfreq-1, xun),
                                              radiation::RemapAsymptote::kSpectrum, g.dln);
           // n0 = 1 in flat space with this tetrad; the algebra below mirrors the kernel.
@@ -366,7 +366,7 @@ void ProblemGenerator::RadFreqRemap(ParameterInput *pin, const bool restart) {
           if (own < 1.0e-8*peak) { continue; }
           Real xtg = static_cast<Real>(f) + dlt_a(a);
           Real tgt = radiation::RemapBinValue(
-              jr, ljr, 0, radiation::RemapStencilAt(0, nfreq-1, xtg),
+              ljr, 0, radiation::RemapStencilAt(0, nfreq-1, xtg),
               radiation::RemapAsymptote::kSpectrum, g.dln);
           Real err = fabs(tgt - own)/own;
           if (f >= b_lo && f <= b_hi) {
@@ -421,17 +421,17 @@ void ProblemGenerator::RadFreqRemap(ParameterInput *pin, const bool restart) {
     q(1) = 0.0;
     radiation::RemapFillLogs(q, lq, 0, 0, nfreq-1);
     bool ok = true;
-    // The nu^4 bound below the grid must survive the holes.  A hole in the stencil takes
-    // the lookup off the log-space path, where the fallback is bounded only by the
-    // tabulated range -- which below the grid is the *largest* node, i.e. no decay at
-    // all.  q(1) = 0 above puts a hole inside the bottom stencil deliberately, so this
-    // exercises that path rather than assuming it is unreachable.
+    // The nu^4 bound below the grid must survive the holes.  A hole in the stencil
+    // takes the lookup down to the reduced-order form, which has its own continuation
+    // and so its own chance to get this wrong.  q(1) = 0 above puts a hole inside the
+    // bottom stencil deliberately, so this exercises that path rather than assuming it
+    // is unreachable.
     bool decays = true;
     Real dlt = log(wl*(1.0+vx))/g.dln;
     for (int f = 0; f < nfreq; ++f) {
       for (Real off : {-dlt, dlt}) {
         Real x = static_cast<Real>(f) + off;
-        Real got = radiation::RemapBinValue(q, lq, 0,
+        Real got = radiation::RemapBinValue(lq, 0,
                                             radiation::RemapStencilAt(0, nfreq-1, x),
                                             radiation::RemapAsymptote::kSpectrum, g.dln);
         if (!(got >= 0.0) || !std::isfinite(got)) { ok = false; }
@@ -451,13 +451,74 @@ void ProblemGenerator::RadFreqRemap(ParameterInput *pin, const bool restart) {
               << "below the grid, holes and all, the continuation decays as nu^4"
               << std::endl;
 
+    // Order reduction, against the one case with an exact answer.  A window holding a
+    // dead node drops to the log-linear form on the live nodes around t, and that form
+    // is still exact for a power law however many nodes are missing, as long as two are
+    // left to carry a slope.  Exactness is the property that separates staying inside
+    // the log family from clamping in linear space, where the same lookup is wrong by
+    // whatever the neighbouring decades happen to be.  Every window that contains a dead
+    // node is under test; the rest are the plain cubic and are covered above.
+    Real worst_red = 0.0;
+    int nred = 0;
+    for (Real p : {0.0, 2.0, 3.0}) {
+      for (int dead = 0; dead < nfreq; ++dead) {
+        for (int wide = 0; wide < 2; ++wide) {
+          for (int f = 0; f < nfreq; ++f) {
+            q(f) = PowerLawBin(g.edges[f], g.edges[f+1], p);
+          }
+          q(dead) = 0.0;
+          if (wide && dead+1 < nfreq) { q(dead+1) = 0.0; }
+          radiation::RemapFillLogs(q, lq, 0, 0, nfreq-1);
+          for (Real ncm : {wl*(1.0-vx), 1.3, wl*(1.0+vx)}) {
+            Real dl = log(ncm)/g.dln;
+            for (int ifr = 0; ifr < nfreq; ++ifr) {
+              Real x = static_cast<Real>(ifr) + dl;
+              radiation::RemapStencil sc = radiation::RemapStencilAt(0, nfreq-1, x);
+              bool holed = (dead >= sc.st && dead <= sc.st+3);
+              if (!holed) { continue; }
+              Real got = radiation::RemapBinValue(
+                  lq, 0, sc, radiation::RemapAsymptote::kOpacity, g.dln);
+              Real want = PowerLawBin(ncm*g.edges[ifr], ncm*g.edges[ifr+1], p);
+              worst_red = fmax(worst_red, fabs(got - want)/want);
+              ++nred;
+            }
+          }
+        }
+      }
+    }
+    std::cout << "         reduced-order lookups exercised: " << nred << std::endl;
+    Check("power law: a window with dead nodes is still exact", worst_red, 0.0,
+          tol_exact);
+
+    // Past the last live bin a spectrum may not grow.  The tail is where the zeros
+    // actually are -- measured over a whole snapshot of the 1D shock, interior holes
+    // were 1 in 1536 spectra and every other zero was the high-energy tail past
+    // underflow or the floor -- so this is the reduced path's common case.
+    for (int f = 0; f < nfreq; ++f) {
+      q(f) = (f < nfreq-4) ? FermiBin(g.edges[f], g.edges[f+1], temp, eta) : 0.0;
+    }
+    radiation::RemapFillLogs(q, lq, 0, 0, nfreq-1);
+    Real over = 0.0;
+    const int flive = nfreq-5;
+    for (Real off : {-dlt, dlt}) {
+      for (int f = nfreq-8; f < nfreq; ++f) {
+        Real x = static_cast<Real>(f) + off;
+        if (!(x > static_cast<Real>(flive))) { continue; }
+        Real got = radiation::RemapBinValue(lq, 0,
+                                            radiation::RemapStencilAt(0, nfreq-1, x),
+                                            radiation::RemapAsymptote::kSpectrum, g.dln);
+        over = fmax(over, got/q(flive));
+      }
+    }
+    Check("past the last live bin the spectrum does not grow", over, 0.0, 1.0 + 1.0e-12);
+
     for (int f = 0; f < nfreq; ++f) { q(f) = 0.0; }
     radiation::RemapFillLogs(q, lq, 0, 0, nfreq-1);
     Real acc = 0.0;
     bool finite = true;
     for (int f = 0; f < nfreq; ++f) {
       Real x = static_cast<Real>(f) + dlt;
-      Real got = radiation::RemapBinValue(q, lq, 0,
+      Real got = radiation::RemapBinValue(lq, 0,
                                           radiation::RemapStencilAt(0, nfreq-1, x),
                                           radiation::RemapAsymptote::kSpectrum, g.dln);
       acc += fabs(got);
@@ -538,9 +599,9 @@ void ProblemGenerator::RadFreqRemap(ParameterInput *pin, const bool restart) {
           if (sc.st < 0 || sc.st > nfreq-4) { in_bounds = false; }
           for (auto asym : {radiation::RemapAsymptote::kOpacity,
                             radiation::RemapAsymptote::kSpectrum}) {
-            Real cached = radiation::RemapBinValue(q, lq, 0, sc, asym, g.dln);
+            Real cached = radiation::RemapBinValue(lq, 0, sc, asym, g.dln);
             Real fresh = radiation::RemapBinValue(
-                q, lq, 0, radiation::RemapStencilAt(0, nfreq-1, x), asym, g.dln);
+                lq, 0, radiation::RemapStencilAt(0, nfreq-1, x), asym, g.dln);
             Real ref = fmax(fabs(fresh), 1.0e-300);
             worst = fmax(worst, fabs(cached - fresh)/ref);
           }
