@@ -280,12 +280,13 @@ void NuratesOccupancyAt(const NuratesGroupOccupancy &spec, const Real nu,
 KOKKOS_INLINE_FUNCTION
 void NuratesOccupancy(const NuratesGroupOccupancy &spec,
                       bns_nurates::NuDistributionParams &distr_pars,
+                      bns_nurates::MyEOSParams &eos_pars,
                       const Real nu, bns_nurates::BS_REAL f[total_num_species]) {
   if (spec.f != nullptr) {
     NuratesOccupancyAt(spec, nu, f);
   } else {
     for (int idx = 0; idx < total_num_species; ++idx) {
-      f[idx] = TotalNuF(nu, &distr_pars, idx);
+      f[idx] = TotalNuF(nu, &distr_pars, &eos_pars, idx);
     }
   }
 }
@@ -304,7 +305,8 @@ bns_nurates::MyQuadratureIntegrand RadiationSpectralIntegrand(
   bns_nurates::BS_REAL block_factor[total_num_species];
   bns_nurates::BS_REAL g_nu_bar[total_num_species];
 
-  NuratesOccupancy(spec, grey_op_params.distr_pars, nu_bar, g_nu_bar);
+  NuratesOccupancy(spec, grey_op_params.distr_pars, grey_op_params.eos_pars,
+                   nu_bar, g_nu_bar);
 
   bns_nurates::MyKernelOutput pair_kernels_m1 = {0};
   if (opacity_flags.use_pair) {
@@ -674,7 +676,7 @@ void NuratesEqSpectrumBin(Real e_lo_mev, Real e_hi_mev,
     const Real e = e_lo_mev + de*quad.points[iq];
     const Real wde = quad.w[iq] * de * bns_nurates::kBS_FourPi_hc3 * SQR(e);
     for (int idx = 0; idx < 4; ++idx) {
-      const Real f_eq = TotalNuF(e, &eq_distr_pars, idx);
+      const Real f_eq = TotalNuF(e, &eq_distr_pars, &eq_eos_pars, idx);
       n_eq[idx] += wde * f_eq;
       J_eq[idx] += wde * e * f_eq;
     }
