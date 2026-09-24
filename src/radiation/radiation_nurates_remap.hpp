@@ -388,6 +388,224 @@ Real RemapBinValue(const LT &lq, const int off, const RemapStencil &s,
   return 0.0;
 }
 
+//----------------------------------------------------------------------------------------
+//! \enum RemapRecon
+//! \brief Which profile a conservative remap reconstructs inside each source bin.
+//!
+//! kDonor is piecewise constant, kPlm piecewise linear with a monotonised-central slope,
+//! kPpm the piecewise parabola of Colella & Woodward with their monotonicity constraint,
+//! kExp piecewise exponential with a minmod-limited slope of ln(q).  The reconstruction
+//! sets the accuracy and nothing else: the integral is conserved for any profile
+//! whatsoever, because each source bin hands its two target bins a partition of its own
+//! content.
+//!
+//! On this data only kExp is usable.  A neutrino spectrum on the production grid falls by
+//! up to fifteen orders of magnitude from one bin to the next, so no profile polynomial
+//! in q can represent it: every monotonicity limiter flattens, kPlm and kPpm become
+//! kDonor,
+//! and donor-cell smears the peak into a tail bin many decades below it -- a negligible
+//! absolute error and a catastrophic relative one, which is what the lepton source, whose
+//! bins are weighted by 1/E, is most sensitive to.  ln(q) is the variable that is smooth:
+//! it is *linear* in the bin index for any power law in energy, because the bins are
+//! uniform in ln(nu), so the exponential profile is exact there and its slope is what the
+//! limiter sees.  kPlm and kPpm are kept because they are what tells this story on a
+//! spectrum that a polynomial can represent.
+//!
+//! kMoment is not a reconstruction at all.  A partition into two adjacent bins has one
+//! degree of freedom, the head fraction, and demanding that the map preserve **both** the
+//! energy sum and the number sum uses it up exactly -- so the split is determined rather
+//! than chosen, and no profile enters.  On a geometric grid with ratio r the two targets
+//! sit at energies e and e*r while the source sits at e*r^s, so
+//!
+//!     head + tail/r = E*r^-s   together with   head + tail = E
+//!
+//! gives head/E = (r^-s - r^-1)/(1 - r^-1), a single number per ray, bounded in [0, 1]
+//! and monotone in s, so positivity comes for free.  The consequence worth stating: this
+//! is the *only* two-moment-conserving two-band partition there is, its accuracy is
+//! therefore donor-cell's, and buying accuracy back would mean spreading each source bin
+//! over more than two targets.
+enum class RemapRecon { kDonor, kPlm, kPpm, kExp, kExpC, kMoment };
+
+//----------------------------------------------------------------------------------------
+//! \enum RemapEdge
+//! \brief What a conservative remap does with content whose image leaves the grid.
+//!
+//! kOpen drops it.  A Doppler shift genuinely carries spectrum past nu_min and nu_max, so
+//! this is the physical condition, and the price is that the remap conserves only what
+//! stays on the grid.
+//!
+//! kClosed deposits it in the nearest bin that is on the grid, which is the discrete
+//! no-flux condition at both edges and makes the operator conserve exactly.  Note what
+//! that costs: the bottom of this grid is nu_min, not zero, so no-flux there is false as
+//! physics -- it is the same assumption that makes freq_fluxes unusable on this path --
+//! and the deposited content has no way back out.  Whether that builds a reservoir is a
+//! question about the whole relaxation rather than about one map; rad_freq_remap's
+//! repeated-application check is what measures it.
+enum class RemapEdge { kOpen, kClosed };
+
+//----------------------------------------------------------------------------------------
+//! \fn Real RemapInterfaceValue
+//! \brief The reconstructed value at the interface below bin e, on the four surrounding
+//!        bin averages, clamped into the range of the two bins it separates.
+//!
+//! The clamp is what makes the parabola's endpoints non-negative on a non-negative
+//! spectrum; the unclamped quartic interpolant undershoots badly where neighbouring bins
+//! differ by decades, which on a neutrino spectrum is everywhere.  Outside the grid there
+//! is no information, so the edge bin's own average is used and the outermost profile
+//! degrades to a slope of zero.
+template <class QT>
+KOKKOS_INLINE_FUNCTION
+Real RemapInterfaceValue(const QT &q, const int off, const int nfreq, const int e) {
+  if (e <= 0) { return q(off); }
+  if (e >= nfreq) { return q(off + nfreq - 1); }
+  const Real qm = q(off + e - 1), qp = q(off + e);
+  Real v = 0.5*(qm + qp);
+  if (e >= 2 && e <= nfreq - 2) {
+    v = (7.0*(qm + qp) - (q(off + e - 2) + q(off + e + 1)))/12.0;
+  }
+  return Kokkos::fmin(Kokkos::fmax(v, Kokkos::fmin(qm, qp)), Kokkos::fmax(qm, qp));
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void RemapLimitParabola
+//! \brief Colella & Woodward's monotonicity constraint on a bin's two edge values.
+KOKKOS_INLINE_FUNCTION
+void RemapLimitParabola(const Real qbar, Real &ql, Real &qr) {
+  if ((qr - qbar)*(qbar - ql) <= 0.0) { ql = qbar; qr = qbar; return; }
+  const Real dq = qr - ql;
+  const Real d6 = dq*(qbar - 0.5*(ql + qr));
+  if (d6 > dq*dq/6.0) {
+    ql = 3.0*qbar - 2.0*qr;
+  } else if (d6 < -dq*dq/6.0) {
+    qr = 3.0*qbar - 2.0*ql;
+  }
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn Real RemapProfileHead
+//! \brief Integral of the reconstructed profile over the first fraction a of a bin.
+//!
+//! In Colella & Woodward's parameterisation phi(x) = ql + x*(dq + q6*(1 - x)), for which
+//! the whole-bin integral is the bin average identically -- so the tail is the bin
+//! average minus this, and the partition is exact whatever the coefficients are.
+KOKKOS_INLINE_FUNCTION
+Real RemapProfileHead(const Real ql, const Real dq, const Real q6, const Real a) {
+  return a*(ql + 0.5*a*dq + q6*a*(0.5 - a/3.0));
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void RemapShiftConservative
+//! \brief Rebin a whole spectrum by a rigid shift of delta bins, conserving its integral.
+//!
+//! src is indexed by source bin f, dst by target bin g, and the two index spaces are
+//! related by g = f + delta.  Because the grid is uniform in ln(nu) and n0_cm carries no
+//! frequency dependence, that shift is rigid (see the header of this file), so with
+//! delta = n + s every source bin overlaps exactly two target bins, in the same
+//! proportions 1 - s and s, and the operator is two-banded with ray-constant weights.
+//! Nothing here evaluates a logarithm or an exponential.
+//!
+//! Three properties this is built for, none of which RemapBinValue has:
+//!
+//!   * the integral is conserved exactly -- each source bin's content is partitioned, not
+//!     interpolated -- so an un-shift followed by a re-shift moves no energy between
+//!     comoving groups even though it is not the identity;
+//!   * s = 0 returns src bin for bin, by algebra rather than by a branch, since every
+//!     profile correction is multiplied by the head fraction and the tail vanishes;
+//!   * content whose image leaves [0, nfreq-1] is dropped under RemapEdge::kOpen and
+//!     deposited in the nearest on-grid bin under kClosed, which is the difference
+//!     between conserving what stays on the grid and conserving everything.
+//!
+//! The head is clamped into [0, qbar], which is a partition into two non-negative pieces
+//! whatever the reconstruction did, so the output is non-negative on non-negative input
+//! and the clamp costs conservation nothing.  src and dst must not alias.
+template <class QT, class RT>
+KOKKOS_INLINE_FUNCTION
+void RemapShiftConservative(const QT &src, RT &dst, const int off, const int nfreq,
+                            const Real delta, const Real dln, const RemapRecon recon,
+                            const RemapEdge edge) {
+  for (int g = 0; g < nfreq; ++g) { dst(off + g) = 0.0; }
+
+  const int n = static_cast<int>(Kokkos::floor(delta));
+  const Real s = delta - static_cast<Real>(n);
+  const Real a = 1.0 - s;
+  // Ray-constant, so the two exponentials are paid once per ray and not once per bin.
+  Real hfix = a;
+  if (recon == RemapRecon::kMoment && dln > 1.0e-8) {
+    const Real em = Kokkos::exp(-dln);
+    hfix = (Kokkos::exp(-s*dln) - em)/(1.0 - em);
+  }
+
+  Real qil = RemapInterfaceValue(src, off, nfreq, 0);
+  for (int f = 0; f < nfreq; ++f) {
+    const Real qbar = src(off + f);
+    const Real qir = RemapInterfaceValue(src, off, nfreq, f + 1);
+    const int gl = f + n, gr = f + n + 1;
+
+    Real head = qbar*a;
+    if (recon == RemapRecon::kMoment) {
+      head = qbar*hfix;
+    } else if ((recon == RemapRecon::kExp || recon == RemapRecon::kExpC) &&
+               qbar > 0.0) {
+      // phi = A exp(b xi) has the closed-form head fraction (e^{ab} - 1)/(e^b - 1), whose
+      // A cancels -- so the profile never has to be normalised.  b is the minmod of the
+      // two one-sided slopes of ln(q), which for a power law are equal and exact, making
+      // the whole remap exact on a power law as well as conservative.
+      const Real qm = (f > 0) ? src(off + f - 1) : 0.0;
+      const Real qp = (f < nfreq - 1) ? src(off + f + 1) : 0.0;
+      Real b = 0.0;
+      if (qm > 0.0 && qp > 0.0) {
+        const Real bm = Kokkos::log(qbar/qm), bp = Kokkos::log(qp/qbar);
+        if (recon == RemapRecon::kExpC) {
+          b = 0.5*(bm + bp);
+        } else if (bm*bp > 0.0) {
+          b = Kokkos::copysign(Kokkos::fmin(Kokkos::fabs(bm), Kokkos::fabs(bp)), bm);
+        }
+      }
+      Real hfrac;
+      if (Kokkos::fabs(b) < 1.0e-6) {
+        hfrac = a;
+      } else if (b > 0.0) {
+        // Scaled by e^{-b} so a steeply rising bin cannot overflow the exponential.
+        const Real eb = Kokkos::exp(-b);
+        hfrac = (Kokkos::exp(-s*b) - eb)/(1.0 - eb);
+      } else {
+        const Real eb = Kokkos::exp(b);
+        hfrac = (Kokkos::exp(a*b) - 1.0)/(eb - 1.0);
+      }
+      head = qbar*Kokkos::fmin(Kokkos::fmax(hfrac, 0.0), 1.0);
+    } else if (recon != RemapRecon::kDonor && qbar > 0.0) {
+      Real ql = qbar, qr = qbar;
+      if (recon == RemapRecon::kPpm) {
+        ql = qil; qr = qir;
+        RemapLimitParabola(qbar, ql, qr);
+      } else {
+        // Monotonised central slope, zero at either end of the grid where one of the
+        // one-sided differences does not exist.
+        const Real dm = (f > 0) ? (qbar - src(off + f - 1)) : 0.0;
+        const Real dp = (f < nfreq - 1) ? (src(off + f + 1) - qbar) : 0.0;
+        Real m = 0.0;
+        if (dm*dp > 0.0) {
+          const Real lim = 2.0*Kokkos::fmin(Kokkos::fabs(dm), Kokkos::fabs(dp));
+          m = Kokkos::copysign(Kokkos::fmin(0.5*Kokkos::fabs(dm + dp), lim), dm);
+        }
+        ql = qbar - 0.5*m; qr = qbar + 0.5*m;
+      }
+      const Real q6 = 6.0*(qbar - 0.5*(ql + qr));
+      head = RemapProfileHead(ql, qr - ql, q6, a);
+      head = Kokkos::fmin(Kokkos::fmax(head, 0.0), qbar);
+    }
+
+    if (edge == RemapEdge::kClosed) {
+      dst(off + Kokkos::min(Kokkos::max(gl, 0), nfreq - 1)) += head;
+      dst(off + Kokkos::min(Kokkos::max(gr, 0), nfreq - 1)) += qbar - head;
+    } else {
+      if (gl >= 0 && gl < nfreq) { dst(off + gl) += head; }
+      if (gr >= 0 && gr < nfreq) { dst(off + gr) += qbar - head; }
+    }
+    qil = qir;
+  }
+}
+
 }  // namespace radiation
 
 #endif  // RADIATION_RADIATION_NURATES_REMAP_HPP_

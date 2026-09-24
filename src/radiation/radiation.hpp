@@ -17,6 +17,7 @@
 #include "tasklist/task_list.hpp"
 #include "bvals/bvals.hpp"
 #include "config.hpp"
+#include "radiation_nurates_remap.hpp"
 #if ENABLE_NURATES
 #include "radiation_nurates.hpp"
 #endif
@@ -117,6 +118,12 @@ class Radiation {
 #if ENABLE_NURATES
   NuratesParams nurates_params;
   bool nurates_debug_opacity = false;
+  // Which operator moves a spectrum between a ray's comoving bins and the fixed grid.
+  // False is the log-space cubic of RemapBinValue; true selects one of the conservative
+  // two-band partitions, which nurates_remap_recon then names.  Set by
+  // <radiation>/remap_recon; see radiation_nurates_remap.hpp.
+  bool nurates_remap_conserv = false;
+  RemapRecon nurates_remap_recon = RemapRecon::kMoment;
   Real nurates_baryon_mass = 1.0;    // baryon mass in code units (for Ye update)
   // code energy density -> EOS energy density (MeV/fm^3).  Dividing by a neutrino
   // energy in MeV then turns a code-unit radiation energy density into fm^-3.

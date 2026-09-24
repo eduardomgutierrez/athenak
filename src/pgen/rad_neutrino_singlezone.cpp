@@ -116,6 +116,14 @@ void SingleZoneImpl(Mesh *pmesh, ParameterInput *pin, const bool restart) {
   // erad/nfreq per bin, which is isotropic in the lab-bin sense but does not
   // correspond to any single comoving spectrum once the fluid moves.
   Real spec_temp = pin->GetOrAddReal("problem", "spec_temp", 0.0);
+  // Spectral temperature of slot 1 (anti-electron) relative to the rest.  At 1 every
+  // species carries an identical seed, and then the lepton number nu_e - anu_e is exactly
+  // conserved whatever the frequency treatment does to each species, because the same
+  // error appears in both and cancels in the difference.  Away from 1 the two electron
+  // flavours have different spectral shapes, which is what lets a homogeneous test see a
+  // lepton-number error at all.  Each species is separately comoving-isotropic either
+  // way, so the exact answer is still that nothing happens.
+  Real spec_ratio = pin->GetOrAddReal("problem", "spec_temp_ratio", 1.0);
   // Chiral imbalance seed and a uniform seed field, for the chiral unit tests.
   // Both default to zero, so the plain equilibration test is unaffected.
   Real y5 = pin->GetOrAddReal("problem", "Y_5", 0.0);
@@ -191,9 +199,8 @@ void SingleZoneImpl(Mesh *pmesh, ParameterInput *pin, const bool restart) {
   // [0, inf), while the grid holds [nu_min, nu_max].  With the geometric neutrino grid
   // there is no [0, nu_min] bin to collect the low tail, so choose nu_min well below
   // the spectrum -- the deficit, and its variation across the ray fan, is a floor under
-  // any residual this seed can be used to measure.
-  const Real spec_norm = (spec_temp > 0.0) ?
-                         erad/(6.0*SQR(SQR(spec_temp))) : 0.0;
+  // any residual this seed can be used to measure.  The normalisation itself is formed
+  // per species, since each may carry its own spectral temperature.
 #else
   // problem/spec_temp needs FreqBinEdgesMeV, which only exists with nurates.
   if (spec_temp > 0.0) {
@@ -231,6 +238,9 @@ void SingleZoneImpl(Mesh *pmesh, ParameterInput *pin, const bool restart) {
               // nspecies = 4.  A merged slot holds twice the states, so it takes twice
               // the energy and the two species counts start from the same total.
               const Real mult = ((nspecies == 3) && (isp == 2)) ? 2.0 : 1.0;
+              const Real t_sp = (isp == 1) ? spec_temp*spec_ratio : spec_temp;
+              const Real norm_sp = (spec_temp > 0.0)
+                                       ? erad/(6.0*SQR(SQR(t_sp))) : 0.0;
               for (int ifr = 0; ifr < nfreq; ++ifr) {
                 for (int n = 0; n < nang; ++n) {
                   Real un_t = u_tet[1]*nh_c.d_view(n,1) +
@@ -249,9 +259,9 @@ void SingleZoneImpl(Mesh *pmesh, ParameterInput *pin, const bool restart) {
                     Real e_lo = 0.0, e_hi = 0.0;
                     radiation::FreqBinEdgesMeV(freq_grid, ifr, nfreq, freq_scale,
                                                e_lo, e_hi);
-                    intensity_cm = spec_norm*
-                        (PlanckLikeIntegral(n0_f*e_hi, spec_temp) -
-                         PlanckLikeIntegral(n0_f*e_lo, spec_temp));
+                    intensity_cm = norm_sp*
+                        (PlanckLikeIntegral(n0_f*e_hi, t_sp) -
+                         PlanckLikeIntegral(n0_f*e_lo, t_sp));
                   }
 #endif
                   i0(m, nn, k, j, i) =

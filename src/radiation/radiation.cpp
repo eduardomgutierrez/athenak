@@ -514,6 +514,25 @@ Radiation::Radiation(MeshBlockPack *ppack, ParameterInput *pin) :
   if (use_nurates) {
     nurates_debug_opacity =
         pin->GetOrAddBoolean("bns_nurates","debug_opacity",false);
+    // "cubic" is the log-space interpolation the solver is built around.  The rest are
+    // conservative partitions: they preserve the energy sum a map is given, and "moment"
+    // preserves the number sum with it, at the cost of a donor-cell profile.
+    std::string rrec = pin->GetOrAddString("radiation","remap_recon","cubic");
+    nurates_remap_conserv = (rrec.compare("cubic") != 0);
+    if (rrec.compare("moment") == 0) {
+      nurates_remap_recon = RemapRecon::kMoment;
+    } else if (rrec.compare("donor") == 0) {
+      nurates_remap_recon = RemapRecon::kDonor;
+    } else if (rrec.compare("exp") == 0) {
+      nurates_remap_recon = RemapRecon::kExpC;
+    } else if (rrec.compare("ppm") == 0) {
+      nurates_remap_recon = RemapRecon::kPpm;
+    } else if (rrec.compare("cubic") != 0) {
+      std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+                << std::endl << "<radiation>/remap_recon must be one of "
+                << "cubic, moment, donor, exp, ppm" << std::endl;
+      std::exit(EXIT_FAILURE);
+    }
 
     // reaction flags
     nurates_params.use_abs_em          = pin->GetOrAddBoolean("bns_nurates","use_abs_em",true);
