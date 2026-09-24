@@ -520,20 +520,20 @@ Radiation::Radiation(MeshBlockPack *ppack, ParameterInput *pin) :
     nurates_params.use_pair            = pin->GetOrAddBoolean("bns_nurates","use_pair",true);
     nurates_params.use_brem            = pin->GetOrAddBoolean("bns_nurates","use_brem",true);
     nurates_params.use_iso             = pin->GetOrAddBoolean("bns_nurates","use_iso",true);
-    // Defaults below are kept identical to the M1 parser in radiation_m1.cpp on
-    // purpose.  They used to differ -- these six correction flags defaulted false
-    // here and true there -- so an input that named only a few keys silently gave
-    // the two solvers different microphysics, with nothing in the output to say
-    // so.  Any change here must be mirrored in radiation_m1.cpp.
+    // Every default below is identical to the M1 parser in radiation_m1.cpp, and has
+    // to stay that way: an input naming only some of these keys must not give the two
+    // solvers different microphysics, because nothing in the output would say so.  Any
+    // change here must be mirrored there.  Keys only one solver reads are the exception
+    // and are parsed outside this block.
     nurates_params.use_inelastic_scatt = pin->GetOrAddBoolean("bns_nurates","use_inelastic_scatt",true);
     // correction flags
     nurates_params.use_WM_ab           = pin->GetOrAddBoolean("bns_nurates","use_WM_ab",true);
     nurates_params.use_WM_sc           = pin->GetOrAddBoolean("bns_nurates","use_WM_sc",true);
     nurates_params.use_dU              = pin->GetOrAddBoolean("bns_nurates","use_dU",true);
-    nurates_params.use_dm_eff          = pin->GetOrAddBoolean("bns_nurates","use_dm_eff",true);
+    nurates_params.use_dm_eff          = pin->GetOrAddBoolean("bns_nurates","use_dm_eff",false);
     nurates_params.use_NN_medium_corr  = pin->GetOrAddBoolean("bns_nurates","use_NN_medium_corr",true);
     nurates_params.neglect_blocking    = pin->GetOrAddBoolean("bns_nurates","neglect_blocking",false);
-    nurates_params.use_decay           = pin->GetOrAddBoolean("bns_nurates","use_decay",false);
+    nurates_params.use_decay           = pin->GetOrAddBoolean("bns_nurates","use_decay",true);
     nurates_params.use_BRT_brem        = pin->GetOrAddBoolean("bns_nurates","use_BRT_brem",false);
     nurates_params.use_equilibrium_distribution =
         pin->GetOrAddBoolean("bns_nurates","use_equilibrium_distribution",true);
