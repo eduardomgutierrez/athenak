@@ -446,8 +446,6 @@ TaskStatus Radiation::MultiFreqRadFluidCouplingNurates(Driver *pdriver, int stag
   // holds.  The constructor has already refused a non-log grid, nfreq < 4 and nu_min <=
   // 0.
   Real grid_dln_ = log(grid_nu_max/grid_nu_min)/static_cast<Real>(nfrq_-1);
-  const bool conserv_ = nurates_remap_conserv;
-  const RemapRecon remap_recon_ = nurates_remap_recon;
 
   // Flat par_for, one thread per cell: the body is serial over the whole cell and owns
   // it outright.  par_for_outer would be wrong here -- it requests Kokkos::AUTO team
@@ -584,31 +582,16 @@ TaskStatus Radiation::MultiFreqRadFluidCouplingNurates(Driver *pdriver, int stag
         // zero or O(0.1-2) with nothing in between, and because a fluid at rest in
         // coordinates need not give n0_cm exactly 1 once the metric carries a shift.
         bool shift = (fabs(dlt) > 1.0e-12);
-        // The conservative operator acts on a whole spectrum at once and needs no
-        // logarithms, so lspec is free on that path and carries the un-shifted spectrum
-        // instead.  Keeping the workspace the same size either way is what lets the two
-        // be compared in one build with one allocation.
-        if (shift) {
-          if (conserv_) {
-            RemapShiftConservative(espec, lspec, 0, nfrq_, dlt, grid_dln_,
-                                   remap_recon_, RemapEdge::kOpen);
-          } else {
-            RemapFillLogs(espec, lspec, 0, 0, nfrq_-1);
-          }
-        }
+        if (shift) { RemapFillLogs(espec, lspec, 0, 0, nfrq_-1); }
         RemapRay ray = RemapMakeRay(-dlt);
         Real omega_cm = solid_angles_.d_view(iang)/SQR(n0_cm);
         for (int ifr=0; ifr<nfrq_; ++ifr) {
           Real icm = espec(ifr);
           if (shift) {
-            if (conserv_) {
-              icm = lspec(ifr);
-            } else {
             RemapStencil sten = RemapRayStencil(ray, 0, nfrq_-1, ifr,
                                                 static_cast<Real>(ifr) - dlt);
             icm = RemapBinValue(lspec, 0, sten,
                                 RemapAsymptote::kSpectrum, grid_dln_);
-            }
           }
           Real wvnc = omega_cm/(n0 + dt_sig(ifr)*n0_cm);
           acc0(ifr) += wvnc;
@@ -648,7 +631,7 @@ TaskStatus Radiation::MultiFreqRadFluidCouplingNurates(Driver *pdriver, int stag
         Real dts = dt_sig(ifr);
         src_j(ifr) = (dts > 0.0) ? (dtcsigs*jr_cm + dtcsiga*eq_j(idx))/dts : 0.0;
       }
-      if (!conserv_) { RemapFillLogs(src_j, lsrcj, 0, 0, nfrq_-1); }
+      RemapFillLogs(src_j, lsrcj, 0, 0, nfrq_-1);
 
       // ---- Pass 3: update the stored lab bins at each ray's own comoving energy ------
       for (int iang=0; iang<=nang1; ++iang) {
@@ -672,13 +655,6 @@ TaskStatus Radiation::MultiFreqRadFluidCouplingNurates(Driver *pdriver, int stag
         Real sfac = 4.0*M_PI*SQR(SQR(n0_cm))/(n0*n_0);
         RemapRay ray3 = RemapMakeRay(dlt);
         bool excise_ray = excise && (rad_mask_(m,k,j,i) || fabs(n_0) < n_0_floor_);
-        // src_j is an intensity, so the conservative path rebins the whole spectrum onto
-        // this ray's bins once; lsrcj is free there and holds the result.  dt_sig is an
-        // opacity and is not extensive, so it keeps the log-space lookup either way.
-        if (shift && conserv_) {
-          RemapShiftConservative(src_j, lsrcj, 0, nfrq_, -dlt, grid_dln_,
-                                 remap_recon_, RemapEdge::kOpen);
-        }
 
         for (int ifr=0; ifr<nfrq_; ++ifr) {
           int nn = isp*nfrq_*nang_ + ifr*nang_ + iang;
@@ -700,9 +676,8 @@ TaskStatus Radiation::MultiFreqRadFluidCouplingNurates(Driver *pdriver, int stag
             RemapStencil sten = RemapRayStencil(ray3, 0, nfrq_-1, ifr, xpos);
             dtsig = RemapBinValue(ldtsig, 0, sten,
                                   RemapAsymptote::kOpacity, grid_dln_);
-            srcj = conserv_ ? lsrcj(ifr)
-                            : RemapBinValue(lsrcj, 0, sten,
-                                            RemapAsymptote::kSpectrum, grid_dln_);
+            srcj = RemapBinValue(lsrcj, 0, sten,
+                                 RemapAsymptote::kSpectrum, grid_dln_);
           }
 
           Real i_old = sfac*i0_old;
