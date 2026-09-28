@@ -282,17 +282,23 @@ RemapStencil RemapRayStencil(const RemapRay &r, const int flo, const int fhi,
 //!
 //! Three invariants that are easy to "simplify" away:
 //!
-//!   * **Between two live nodes, bound against those two nodes, never the window.**  w0
-//!     and w3 are negative for the 1 < t < 2 a walked ray lands in, so a node far below
-//!     its neighbours enters the sum as a large *positive* contribution, and a bound
-//!     scaled to the window's range would grow with the very excursion it must catch.
-//!     kRemapOvershoot is a constant for the same reason.
+//!   * **Clamp against the two nodes the point falls between, not the range of all
+//!     four.**  A walked ray always lands at 1 < t < 2, between the middle pair, and
+//!     there the two outer weights are negative (w0 = w3 = -1/16 at t = 1.5).  So an
+//!     outer node far *below* its neighbours adds a large *positive* amount to the
+//!     interpolated logarithm: put three nodes at ln q = 0 and the fourth at -100, an
+//!     underflowed tail bin, and the cubic returns q = 5e2 where the truth is 1.  That
+//!     same node stretches the four-node range to 100 e-folds, so a tolerance taken from
+//!     that range widens by exactly the excursion it is supposed to catch.  The
+//!     bracketing pair suffers from neither effect, which is why the bound is built from
+//!     it, and why kRemapOvershoot is a fixed number of e-folds rather than a fraction of
+//!     anything.
 //!   * **A bin-integrated intensity is capped below by nu^4.**  I_nu = nu^3 f with f a
-//!     bounded occupation, so the intensity goes as nu^3; the log grid's bin width is
-//!     proportional to nu, which puts the integrated form one power higher.  The cap
-//!     forces decay rather than merely forbidding growth, which is what is needed where
-//!     the whole grid sits on a falling tail and the measured edge slope points the
-//!     wrong way.
+//!     bounded occupation, so the intensity itself goes as nu^3; the bin width is
+//!     proportional to nu on a log grid, which puts the integrated form one power higher.
+//!     The cap has to force decay, not merely forbid growth: where the whole grid sits on
+//!     a falling tail the edge slope is steeply negative, and continuing it below the
+//!     grid would send the spectrum *up* without limit as nu -> 0, when it must vanish.
 //!   * **Opacities are not capped at all**: they keep growing as E^2 with no cutoff, so
 //!     their measured edge slope is continued as it stands.  RemapAsymptote is where
 //!     that choice is made.
@@ -323,14 +329,8 @@ Real RemapBinValue(const LT &lq, const int off, const RemapStencil &s,
     lval = s.w0*lq(a) + s.w1*lq(a+1) + s.w2*lq(a+2) + s.w3*lq(a+3);
   }
   if (lo >= 0 && hi >= 0) {
-    // Between two live nodes.  The cubic leaves their interval only by the curvature it
-    // carries -- kRemapOvershoot e-folds, measured.  The bound has to be those two nodes
-    // rather than the window, because w0 and w3 are NEGATIVE for the 1 < t < 2 that a ray
-    // window always lands in: a node far BELOW its neighbours enters lval as a large
-    // POSITIVE contribution, so a window-scaled bound grows with exactly the excursion it
-    // is meant to catch.  A neutrino spectrum spanning 69 e-folds across the grid, with
-    // tail bins underflowing and a charged-current threshold putting a cliff in the
-    // middle, supplies such nodes as a matter of course.
+    // Between two live nodes.  llo and lhi are the bracketing pair and the bound is built
+    // from them alone -- not from the range of all four, for the reason set out above.
     const Real llo = lq(a+lo), lhi = lq(a+hi);
     if (!full) {
       return (hi > lo) ? Kokkos::exp(llo + (t - static_cast<Real>(lo))*(lhi - llo)
@@ -342,16 +342,15 @@ Real RemapBinValue(const LT &lq, const int off, const RemapStencil &s,
                      Kokkos::fmax(llo, lhi) + kRemapOvershoot));
   }
   if (hi >= 0) {
-    // Below every live node.  kOpacity continues the measured edge slope: exact for E^p,
-    // and where sigma_a has a threshold that slope is steep, so it continues toward zero.
+    // Below every live node.  kOpacity continues the measured edge slope, which is exact
+    // for any E^p.
     const Real lref = lq(a+hi);
     const Real slope = (hi2 >= 0) ? (lq(a+hi2) - lref)/static_cast<Real>(hi2 - hi) : 0.0;
     const Real chord = lref + (t - static_cast<Real>(hi))*slope;
     if (asym == RemapAsymptote::kOpacity) { return Kokkos::exp(chord); }
-    // The nu^4 line is a cap, not a replacement: a spectrum with a sharper low-energy
-    // cutoff than a saturating occupation falls faster than nu^4 well before reaching the
-    // limit, and that curvature is real information the cubic carries.  Take whichever
-    // decays fastest.
+    // The nu^4 line is a cap, not a replacement: a spectrum that cuts off more sharply
+    // than a saturating occupation is already falling faster, and that curvature is real
+    // information the cubic carries.  Take whichever decays fastest.
     Real lval_out = Kokkos::fmin(chord, lref + (t - static_cast<Real>(hi))*(4.0*dln));
     return Kokkos::exp(full ? Kokkos::fmin(lval, lval_out) : lval_out);
   }
