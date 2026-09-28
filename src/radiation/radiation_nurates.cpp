@@ -395,6 +395,10 @@ TaskStatus Radiation::CalcOpacityNurates_(Driver *pdrive, int stage) {
   auto &f_f_       = nurates_f_freq;
   const bool evolved_spec_ =
       multi_freq && !nurates_params.use_equilibrium_distribution;
+  // Whether the cell needs its spectrum un-shifted onto the fixed comoving grid.  Two
+  // independent consumers want it -- the occupancy reconstruction and the predictor's
+  // opacity weights -- and either can be on with the other off.
+  const bool remap_spec_ = multi_freq && (evolved_spec_ || peq_on_);
   // Element strides of the species and frequency axes, so the device side can hand the
   // integrand a flat view of one cell's spectrum.
   const int f_sp_stride = evolved_spec_ ? static_cast<int>(nurates_f_freq.stride_1()) : 0;
@@ -403,8 +407,8 @@ TaskStatus Radiation::CalcOpacityNurates_(Driver *pdrive, int stage) {
   // constructor has already refused a non-log grid, nfreq < 4 and nu_min <= 0, so this is
   // one number for the whole grid wherever evolved_spec_ is set.
   auto &work_ = nurates_mf_work;
-  const int wstride = evolved_spec_ ? static_cast<int>(nurates_mf_work.stride(1)) : 0;
-  const Real grid_dln_ = evolved_spec_
+  const int wstride = remap_spec_ ? static_cast<int>(nurates_mf_work.stride(1)) : 0;
+  const Real grid_dln_ = remap_spec_
       ? log(grid_nu_max/grid_nu_min)/static_cast<Real>(nfreq - 1) : 1.0;
   auto &i0_ = i0;
   auto &freq_grid_ = freq_grid;
@@ -514,113 +518,113 @@ TaskStatus Radiation::CalcOpacityNurates_(Driver *pdrive, int stage) {
         // Per-ray geometry for the occupancy remap below.  None of it depends on species
         // or on frequency, so it is built once for the cell; dlt is the rigid
         // displacement in bin index that ray's Doppler factor induces on a log grid.
-        WorkSlice n_0_iang{}, n0_cm_iang{}, dlt_iang{}, espec{}, lspec{}, jcm{};
-        if (evolved_spec_) {
-          Real *wbase = &work_(m, 0, k, j, i);
-          int woff = 0;
-          n_0_iang   = MakeWorkSlice(wbase, wstride, woff, nang_);
-          n0_cm_iang = MakeWorkSlice(wbase, wstride, woff, nang_);
-          dlt_iang   = MakeWorkSlice(wbase, wstride, woff, nang_);
-          espec      = MakeWorkSlice(wbase, wstride, woff, nfreq_);
-          lspec      = MakeWorkSlice(wbase, wstride, woff, nfreq_);
-          jcm        = MakeWorkSlice(wbase, wstride, woff, nfreq_);
-          assert(woff <= NURATES_MF_WORK_SIZE(nfreq_, nang_));
-          for (int iang = 0; iang <= nang1; ++iang) {
-            Real n_0 = tc(m,0,0,k,j,i)*nh_c_.d_view(iang,0) +
-                       tc(m,1,0,k,j,i)*nh_c_.d_view(iang,1) +
-                       tc(m,2,0,k,j,i)*nh_c_.d_view(iang,2) +
-                       tc(m,3,0,k,j,i)*nh_c_.d_view(iang,3);
-            Real n0_cm = (u_tet[0]*nh_c_.d_view(iang,0) -
-                          u_tet[1]*nh_c_.d_view(iang,1) -
-                          u_tet[2]*nh_c_.d_view(iang,2) -
-                          u_tet[3]*nh_c_.d_view(iang,3));
-            // n0_cm = W - u.nhat >= 1/(W + |u|), strictly positive for a subluminal
-            // fluid and a future-directed null ray, so the logarithm is unguarded here
-            // as it is in MultiFreqRadFluidCouplingNurates.
-            n_0_iang(iang)   = n_0;
-            n0_cm_iang(iang) = n0_cm;
-            dlt_iang(iang)   = log(n0_cm)/grid_dln_;
-          }
+        Real *wbase = &work_(m, 0, k, j, i);
+        int woff = 0;
+        WorkSlice n_0_iang   = MakeWorkSlice(wbase, wstride, woff, nang_);
+        WorkSlice n0_cm_iang = MakeWorkSlice(wbase, wstride, woff, nang_);
+        WorkSlice dlt_iang   = MakeWorkSlice(wbase, wstride, woff, nang_);
+        WorkSlice espec      = MakeWorkSlice(wbase, wstride, woff, nfreq_);
+        WorkSlice lspec      = MakeWorkSlice(wbase, wstride, woff, nfreq_);
+        WorkSlice jcm        = MakeWorkSlice(wbase, wstride, woff, nfreq_);
+        assert(woff <= NURATES_MF_WORK_SIZE(nfreq_, nang_));
+        for (int iang = 0; iang <= nang1; ++iang) {
+          Real n_0 = tc(m,0,0,k,j,i)*nh_c_.d_view(iang,0) +
+                     tc(m,1,0,k,j,i)*nh_c_.d_view(iang,1) +
+                     tc(m,2,0,k,j,i)*nh_c_.d_view(iang,2) +
+                     tc(m,3,0,k,j,i)*nh_c_.d_view(iang,3);
+          Real n0_cm = (u_tet[0]*nh_c_.d_view(iang,0) -
+                        u_tet[1]*nh_c_.d_view(iang,1) -
+                        u_tet[2]*nh_c_.d_view(iang,2) -
+                        u_tet[3]*nh_c_.d_view(iang,3));
+          // n0_cm = W - u.nhat >= 1/(W + |u|), strictly positive for a subluminal
+          // fluid and a future-directed null ray, so the logarithm is unguarded here
+          // as it is in MultiFreqRadFluidCouplingNurates.
+          n_0_iang(iang)   = n_0;
+          n0_cm_iang(iang) = n0_cm;
+          dlt_iang(iang)   = log(n0_cm)/grid_dln_;
         }
         for (int isp = 0; isp < nspecies_; ++isp) {
           int sp_off = isp*nfreq_*nang_;
+          // Species totals.  Both are frame-correct whatever the bins are indexed by:
+          // the energy is an angular integral of the comoving intensity, and each ray's
+          // contribution to the number is divided by the comoving energy n0_cm*e_mid
+          // that ray's own bin sits at.  Only the per-bin split below needs the grid.
           for (int ifr = 0; ifr < nfreq_; ++ifr) {
             Real e_lo = 0.0, e_hi = 0.0;
             FreqBinEdgesMeV(freq_grid_, ifr, nfreq_, freq_scale_, e_lo, e_hi);
             Real e_mid = FreqBinMidMeV(e_lo, e_hi, freq_scale_);
-            Real jf_bin = 0.0;
-            Real nf_bin = 0.0;
             for (int iang = 0; iang <= nang1; ++iang) {
               int n = sp_off + ifr*nang_ + iang;
-              Real n_0 = tc(m,0,0,k,j,i)*nh_c_.d_view(iang,0) +
-                         tc(m,1,0,k,j,i)*nh_c_.d_view(iang,1) +
-                         tc(m,2,0,k,j,i)*nh_c_.d_view(iang,2) +
-                         tc(m,3,0,k,j,i)*nh_c_.d_view(iang,3);
-              Real n0_cm = (u_tet[0]*nh_c_.d_view(iang,0) -
-                            u_tet[1]*nh_c_.d_view(iang,1) -
-                            u_tet[2]*nh_c_.d_view(iang,2) -
-                            u_tet[3]*nh_c_.d_view(iang,3));
+              Real n0_cm = n0_cm_iang(iang);
               Real omega_cm = solid_angles_.d_view(iang)/SQR(n0_cm);
-              Real intensity_cm = 4.0*M_PI*(i0_(m,n,k,j,i)/(n0*n_0))*SQR(SQR(n0_cm));
+              Real intensity_cm =
+                  4.0*M_PI*(i0_(m,n,k,j,i)/(n0*n_0_iang(iang)))*SQR(SQR(n0_cm));
               nudens_1[isp] += intensity_cm*omega_cm;
               nudens_0[isp] += intensity_cm*omega_cm/fmax(n0_cm*e_mid, 1.0e-100);
-              jf_bin += intensity_cm*omega_cm;
-              nf_bin += intensity_cm*omega_cm/fmax(n0_cm*e_mid, 1.0e-100);
             }
-            jf_f_(m, isp, ifr, k, j, i) = jf_bin;
-            nf_f_(m, isp, ifr, k, j, i) = nf_bin;
           }
           nudens_1[isp] /= wght_sum;
           nudens_0[isp] /= wght_sum;
           nudens_0[isp] *= code_edens_to_eos;
 
-          if (evolved_spec_) {
-            // The occupancy the pair and bremsstrahlung partner integrals block against,
-            // on the fixed comoving grid bns_nurates is tabulated on.  i0_ is binned in
-            // the lab frame, so ray a's bin ifr holds the comoving interval
-            // n0_cm(a)*[e_lo, e_hi] and has to be un-shifted onto the grid before the
-            // angular average means anything -- the same rigid translation
-            // MultiFreqRadFluidCouplingNurates applies, see radiation_nurates_remap.hpp.
-            //
-            // The remapped quantity is the bin-integrated comoving intensity, not the
-            // occupancy: f is a Lorentz invariant, so the n0_cm^4 in sfac cancels against
-            // the stretch of the comoving bin it covers, and carrying both through a
-            // kSpectrum continuation whose asymptotics are stated for an intensity is
-            // what keeps the extrapolation off the ends of the grid physical.
-            for (int ifr = 0; ifr < nfreq_; ++ifr) { jcm(ifr) = 0.0; }
-            for (int iang = 0; iang <= nang1; ++iang) {
-              Real n0_cm = n0_cm_iang(iang);
-              Real dlt = dlt_iang(iang);
-              Real sfac = 4.0*M_PI*SQR(SQR(n0_cm))/(n0*n_0_iang(iang));
-              for (int ifr = 0; ifr < nfreq_; ++ifr) {
-                espec(ifr) = sfac*i0_(m, sp_off + ifr*nang_ + iang, k, j, i);
-              }
-              // At rest the ray already sits on the grid, so the stored values are read
-              // back exactly rather than through the interpolant.
-              bool shift = (fabs(dlt) > 1.0e-12);
-              if (shift) { RemapFillLogs(espec, lspec, 0, 0, nfreq_-1); }
-              RemapRay ray = RemapMakeRay(-dlt);
-              Real omega_cm = solid_angles_.d_view(iang)/SQR(n0_cm);
-              for (int ifr = 0; ifr < nfreq_; ++ifr) {
-                Real icm = espec(ifr);
-                if (shift) {
-                  RemapStencil sten = RemapRayStencil(ray, 0, nfreq_-1, ifr,
-                                                      static_cast<Real>(ifr) - dlt);
-                  icm = RemapBinValue(lspec, 0, sten,
-                                      RemapAsymptote::kSpectrum, grid_dln_);
-                }
-                jcm(ifr) += icm*omega_cm;
-              }
-            }
+          // The spectrum on the fixed comoving grid bns_nurates is tabulated on.  i0_ is
+          // binned in the lab frame, so ray a's bin ifr holds the comoving interval
+          // n0_cm(a)*[e_lo, e_hi] and has to be un-shifted onto the grid before the
+          // angular average means anything -- the same rigid translation
+          // MultiFreqRadFluidCouplingNurates applies, see radiation_nurates_remap.hpp.
+          //
+          // The remapped quantity is the bin-integrated comoving intensity, not the
+          // occupancy: f is a Lorentz invariant, so the n0_cm^4 in sfac cancels against
+          // the stretch of the comoving bin it covers, and carrying both through a
+          // kSpectrum continuation whose asymptotics are stated for an intensity is
+          // what keeps the extrapolation off the ends of the grid physical.
+          for (int ifr = 0; ifr < nfreq_; ++ifr) { jcm(ifr) = 0.0; }
+          for (int iang = 0; iang <= nang1; ++iang) {
+            Real n0_cm = n0_cm_iang(iang);
+            Real dlt = dlt_iang(iang);
+            Real sfac = 4.0*M_PI*SQR(SQR(n0_cm))/(n0*n_0_iang(iang));
             for (int ifr = 0; ifr < nfreq_; ++ifr) {
-              Real e_lo = 0.0, e_hi = 0.0;
-              FreqBinEdgesMeV(freq_grid_, ifr, nfreq_, freq_scale_, e_lo, e_hi);
-              // J = int (4pi/(hc)^3) nu^3 f dnu with f flat across the bin.  It has to
-              // come from the energy and not from a number density: J/e_mid paired with
-              // the nu^2 integral biases f high -- 1.5% on a [10, 2000] MeV nfreq = 24
-              // grid, 7.7% at nfreq = 12.  f is per STATE, so the heavy slot divides by
-              // its multiplicity: two states per slot at nspecies = 4, four at
-              // nspecies = 3 (see NuratesMergeHeavy).  The clamp keeps 1 - f, which
+              espec(ifr) = sfac*i0_(m, sp_off + ifr*nang_ + iang, k, j, i);
+            }
+            // At rest the ray already sits on the grid, so the stored values are read
+            // back exactly rather than through the interpolant.
+            bool shift = (fabs(dlt) > 1.0e-12);
+            if (shift) { RemapFillLogs(espec, lspec, 0, 0, nfreq_-1); }
+            RemapRay ray = RemapMakeRay(-dlt);
+            Real omega_cm = solid_angles_.d_view(iang)/SQR(n0_cm);
+            for (int ifr = 0; ifr < nfreq_; ++ifr) {
+              Real icm = espec(ifr);
+              if (shift) {
+                RemapStencil sten = RemapRayStencil(ray, 0, nfreq_-1, ifr,
+                                                    static_cast<Real>(ifr) - dlt);
+                icm = RemapBinValue(lspec, 0, sten,
+                                    RemapAsymptote::kSpectrum, grid_dln_);
+              }
+              jcm(ifr) += icm*omega_cm;
+            }
+          }
+          for (int ifr = 0; ifr < nfreq_; ++ifr) {
+            Real e_lo = 0.0, e_hi = 0.0;
+            FreqBinEdgesMeV(freq_grid_, ifr, nfreq_, freq_scale_, e_lo, e_hi);
+            Real e_mid = FreqBinMidMeV(e_lo, e_hi, freq_scale_);
+            // Energy and number per COMOVING bin.  The opacities are tabulated on this
+            // grid, so anything that weights them by the field must be indexed by it:
+            // a lab-binned weight would pair kappa at one comoving energy against the
+            // energy at another, off by the Doppler shift.  After the un-shift bin ifr
+            // sits at e_mid by construction, so the number follows from the energy
+            // without a second per-ray division.
+            jf_f_(m, isp, ifr, k, j, i) = jcm(ifr);
+            nf_f_(m, isp, ifr, k, j, i) =
+                (e_mid > 0.0) ? jcm(ifr)/e_mid : 0.0;
+
+            if (evolved_spec_) {
+              // The occupancy the pair and bremsstrahlung partner integrals block
+              // against.  J = int (4pi/(hc)^3) nu^3 f dnu with f flat across the bin.
+              // It has to come from the energy and not from a number density: J/e_mid
+              // paired with the nu^2 integral biases f high -- 1.5% on a [10, 2000] MeV
+              // nfreq = 24 grid, 7.7% at nfreq = 12.  f is per STATE, so the heavy slot
+              // divides by its multiplicity: two states per slot at nspecies = 4, four
+              // at nspecies = 3 (see NuratesMergeHeavy).  The clamp keeps 1 - f, which
               // multiplies the pair and bremsstrahlung emissivities, in [0, 1].
               Real inv_mult = NuratesInvMultiplicity(nspecies_, isp);
               Real j_bin = jcm(ifr)/wght_sum*unit_ene_dens_;
@@ -778,18 +782,16 @@ TaskStatus Radiation::CalcOpacityNurates_(Driver *pdrive, int stage) {
       // to bin, so the means run over the bins weighted by the per-bin energy and
       // number densities -- the spectral generalisation of the grey averages above.
       // The electron-flavour means are kept PER SPECIES, since each species now carries
-      // its own weight; only the heavy pairs are pooled.  Each species' denominator is
-      // its own frequency-integrated density: the per-bin sums below add up to
-      // nudens_1[isp] and nudens_0[isp] exactly, by construction.
-      // The per-bin angular sum is fused into the opacity loop rather than stored: one
-      // extra pass over the angles, and no workspace, against a loop already dominated
-      // by the bns_nurates kernel integrals.
+      // its own weight; only the heavy pairs are pooled.  Numerator and denominator are
+      // accumulated from the same per-bin weights, so each result is a mean of the
+      // opacities whatever fraction of the spectrum the un-shift left on the grid.
       Real J_x = 0.0;
       for (int isp = 2; isp < nspecies_; ++isp) { J_x += nudens_1[isp]; }
       Real kJ_e[2] = {0.0, 0.0}, kN_e[2] = {0.0, 0.0};
+      Real sJ_e[2] = {0.0, 0.0}, sN_e[2] = {0.0, 0.0};
       Real ka1_e[2] = {0.0, 0.0}, ka0_e[2] = {0.0, 0.0};
       int nka_e[2] = {0, 0};
-      Real kJ_x = 0.0, ka_x = 0.0;
+      Real kJ_x = 0.0, ka_x = 0.0, sJ_x = 0.0;
       int nka_x = 0;
 
       NuratesGroupOccupancy nu_spec = {};
@@ -857,11 +859,14 @@ TaskStatus Radiation::CalcOpacityNurates_(Driver *pdrive, int stage) {
             if (isp < 2) {
               kJ_e[isp] += ka1*J_f;
               kN_e[isp] += ka0*N_f;
+              sJ_e[isp] += J_f;
+              sN_e[isp] += N_f;
               ka1_e[isp] += ka1;
               ka0_e[isp] += ka0;
               ++nka_e[isp];
             } else {
               kJ_x += ka1*J_f;
+              sJ_x += J_f;
               ka_x += ka1;
               ++nka_x;
             }
@@ -873,15 +878,15 @@ TaskStatus Radiation::CalcOpacityNurates_(Driver *pdrive, int stage) {
         Real kap_1[2] = {0.0, 0.0};
         Real kap_0[2] = {0.0, 0.0};
         for (int isp = 0; isp < 2; ++isp) {
-          kap_1[isp] = (nudens_1[isp] > 0.0)
-                       ? kJ_e[isp]/nudens_1[isp]
+          kap_1[isp] = (sJ_e[isp] > 0.0)
+                       ? kJ_e[isp]/sJ_e[isp]
                        : ((nka_e[isp] > 0) ? ka1_e[isp]/nka_e[isp] : 0.0);
-          kap_0[isp] = (nudens_0[isp] > 0.0)
-                       ? kN_e[isp]/nudens_0[isp]
+          kap_0[isp] = (sN_e[isp] > 0.0)
+                       ? kN_e[isp]/sN_e[isp]
                        : ((nka_e[isp] > 0) ? ka0_e[isp]/nka_e[isp] : 0.0);
         }
-        Real kbar_1x = (J_x > 0.0) ? kJ_x/J_x
-                                   : ((nka_x > 0) ? ka_x/nka_x : 0.0);
+        Real kbar_1x = (sJ_x > 0.0) ? kJ_x/sJ_x
+                                    : ((nka_x > 0) ? ka_x/nka_x : 0.0);
 
         const Real J_nu[2] = {nudens_1[0], nudens_1[1]};
         const Real N_nu[2] = {nudens_0[0], nudens_0[1]};
