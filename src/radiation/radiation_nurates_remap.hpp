@@ -80,11 +80,10 @@ constexpr Real kRemapLogSentinel = -1.0e30;
 constexpr Real kRemapLogLive = 0.1*kRemapLogSentinel;
 
 //! How far outside the two nodes it interpolates between the cubic may land, in e-folds.
-//! Measured over 2.2e5 evaluations of the single-zone relaxation: the interpolation
-//! leaves that interval by 0.058 e-folds at the median and 0.565 at the worst, all of it
-//! real curvature where the spectrum turns over, so this keeps the interpolation intact.
-//! It must stay a constant.  A bound scaled to the window instead is no bound at all on
-//! this data -- see RemapBinValue.
+//! One is comfortably above what real curvature asks for where a spectrum turns over
+//! (measured: 0.06 at the median, 0.57 at the worst), so the bound does not cut into the
+//! interpolation.  It must stay a *constant*; a bound scaled to the window is no bound at
+//! all, for the reason given in RemapBinValue.
 constexpr Real kRemapOvershoot = 1.0;
 
 //! Per-cell workspace, as a count of bin-sized and ray-sized vectors.  **Two** kernels
@@ -167,11 +166,12 @@ void RemapFillLogs(const QT &q, LT &lq, const int off, const int flo, const int 
 //!              measured from the two edge nodes, which is exact for any E^p.
 //!
 //!   kSpectrum  bin-integrated intensities: the stored spectrum, the equilibrium spectrum
-//!              eta/sigma_a, and the scattering target.  I_nu = nu^3 f with f a bounded
-//!              occupation, so I_nu ~ nu^3 as nu -> 0 and the *bin* integral goes as nu^4
-//!              on a log grid; at the top the occupation is Boltzmann and the spectrum
-//!              cuts off exponentially.  Note the extra power: eta is integrated over the
-//!              bin while kappa is sampled at its midpoint.
+//!              eta/sigma_a, and the scattering target.  The *intensity* goes as nu^3 at
+//!              low energy -- I_nu = nu^3 f with f a bounded occupation -- but what this
+//!              operator carries is the bin integral, and dE = I_nu dnu with dnu
+//!              proportional to nu on a log grid, so E ~ nu^4.  The exponent here is the
+//!              bin integral's, one higher than the intensity's.  At the top the
+//!              occupation is Boltzmann and the spectrum cuts off exponentially.
 //!
 //! Applying one rule to both would be wrong by exp(E/T) on the opacities.
 enum class RemapAsymptote { kOpacity, kSpectrum };
@@ -267,62 +267,41 @@ RemapStencil RemapRayStencil(const RemapRay &r, const int flo, const int fhi,
 
 //----------------------------------------------------------------------------------------
 //! \fn Real RemapBinValue
-//! \brief Per-bin quantity on a prepared four-point window, by Lagrange on ln(q).
+//! \brief Per-bin quantity at a real-valued bin index, by Lagrange on ln(q).
 //!
-//! Exact for a power law in energy, for point-sampled quantities (sigma_a, sigma_s) and
-//! bin-integrated ones (the equilibrium spectrum, the mean intensity) alike -- the latter
-//! pick up the n0_cm^(p+1) stretch of the bin width on their own, so the caller applies
-//! no Jacobian.  lq holds log(q), or the sentinel where q is not positive; the raw values
-//! are never needed here, which is what keeps the two spaces from disagreeing.
+//! Exact for a power law in energy, for point-sampled and bin-integrated quantities
+//! alike: the grid is uniform in ln(nu), so the bin width stretches with the bin and the
+//! integrated form carries its own extra power -- the caller applies no Jacobian.  lq
+//! holds log(q), or kRemapLogSentinel where q is not positive.  dln is the bin width in
+//! ln(nu), since the asymptotic slopes are per unit ln(nu) and this works in bin index.
 //!
-//! The window is slid to stay inside [flo, fhi] rather than dropping to two-point near
-//! the ends: a centred window with a linear fallback is wrong by -18% on the peak bin and
-//! a factor two above it, because the equilibrium intensity turns over two bins below the
-//! top of the grid.  RemapStencilAt and RemapRayStencil build the window.
+//! lo and hi are the live nodes bracketing t, lo2 and hi2 the next ones out.  The cubic
+//! joins in only where all four are live, so a window straddling the edge of the live
+//! spectrum degrades cubic -> log-linear -> asymptote -> zero without leaving log space.
+//! Outside the grid the bare cubic is useless: |w| reaches 26 a couple of bins out.
 //!
-//! Outside the grid the cubic alone is useless -- |w| reaches 26 for the 2.3 bins the
-//! shock grid asks for, and it overshoots a Fermi-Dirac tail by many decades -- so the
-//! continuation is bounded, and what bounds it depends on the quantity: see
-//! RemapAsymptote.  dln is the grid's bin width in ln(nu), needed because the asymptotic
-//! slopes are stated per unit ln(nu) while this function works in bin index.
+//! Three invariants that are easy to "simplify" away:
 //!
-//! ## One operator, at whatever order the live nodes support
+//!   * **Between two live nodes, bound against those two nodes, never the window.**  w0
+//!     and w3 are negative for the 1 < t < 2 a walked ray lands in, so a node far below
+//!     its neighbours enters the sum as a large *positive* contribution, and a bound
+//!     scaled to the window's range would grow with the very excursion it must catch.
+//!     kRemapOvershoot is a constant for the same reason.
+//!   * **A bin-integrated intensity is capped below by nu^4.**  I_nu = nu^3 f with f a
+//!     bounded occupation, so the intensity goes as nu^3; the log grid's bin width is
+//!     proportional to nu, which puts the integrated form one power higher.  The cap
+//!     forces decay rather than merely forbidding growth, which is what is needed where
+//!     the whole grid sits on a falling tail and the measured edge slope points the
+//!     wrong way.
+//!   * **Opacities are not capped at all**: they keep growing as E^2 with no cutoff, so
+//!     their measured edge slope is continued as it stands.  RemapAsymptote is where
+//!     that choice is made.
 //!
-//! lo and hi are the live nodes bracketing t, lo2 and hi2 the next ones out.  Three
-//! positions follow -- between two live nodes, below them all, above them all -- and the
-//! cubic joins in only where all four nodes are live, so a window that straddles the edge
-//! of the live spectrum degrades cubic -> linear -> asymptote -> zero without leaving log
-//! space.  That matters because a dead node is not corrupt data: measured over a whole
-//! snapshot of the 1D shock, interior holes were 1 in 1536 spectra and every other zero
-//! was the high-energy tail past underflow or the floor.  Such a window is straddling a
-//! boundary of the same kind as the edge of the tabulated grid, and gets the same
-//! treatment, with the error staying relative to the local value rather than absolute
-//! against the window's largest node.
-//!
-//! The low-energy bound is the physics, not a numerical guard.  A bin-integrated
-//! intensity decays at least as fast as nu^4 going down -- I_nu = nu^3 f with f a bounded
-//! occupation increasing as nu falls, so d ln I/d ln nu <= 3 with equality attained as
-//! nu -> 0, and the log bin width adds the fourth power.  Capping there forces decay
-//! rather than merely forbidding growth, and it costs nothing: the p = 0 spectral
-//! diffusion test is unchanged to seven digits by it.  Continuing the *measured* slope
-//! alone points the wrong way on the shock's cold upstream, where the whole grid sits on
-//! a falling tail, and reaches Sx = 1e187 with NANS_IN_CONS within a few cycles.
-//!
-//! Above the grid the opacities keep growing as E^2 with no cutoff at all -- the
-//! beta-process exponentials cancel identically against kappa = eta exp((E-mu)/T),
-//! leaving Bruenn's E^2 phase space -- so their measured slope is continued uncapped,
-//! and must not be capped the way a spectrum is.  The intensities do cut off, and a
-//! Boltzmann tail was tried for them: ln q ~ 4 y - nu/T gives a cutoff scale readable
-//! straight off the edge slope, nu_edge/T = 4 - s/dln, with no EOS lookup.  It is the
-//! right asymptotics for a thermal neutrino spectrum and it is *not* used, because
-//! measurement did not support it: it doubled the error of the p = 0 spectral diffusion
-//! test (2.480e-2 -> 5.106e-2), the one case here with an exact solution, while changing
-//! the scattering-isotropy residual by 0.4% and the production shock not at all.
-//! Imposing exp(-nu/T) steepening beyond what the edge slope already shows is an
-//! extrapolation the data does not carry, and it over-decays any tail that is not
-//! Boltzmann.  So above the grid a spectrum gets the same shape as below minus the
-//! physical floor, which has no counterpart there: the cubic where it decays faster, the
-//! chord as the power-law-exact bound, and no growth past the edge node.
+//! Above the grid a spectrum gets the same treatment minus the floor, which has no
+//! counterpart there: the cubic where it decays faster, the chord as the power-law-exact
+//! bound, and no growth past the edge node.  A Boltzmann cutoff was tried there and
+//! rejected on measurement; that and the rest of the edge study are in
+//! notes/multifreq-comoving-solve.md section 6.4.
 template <class LT>
 KOKKOS_INLINE_FUNCTION
 Real RemapBinValue(const LT &lq, const int off, const RemapStencil &s,
