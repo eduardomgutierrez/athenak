@@ -1,0 +1,84 @@
+# Free-streaming gravitational redshift of a multifrequency spectrum.
+#
+# A spectrum Gaussian in ln E (peak problem/e_peak, width problem/sigma_ln) is injected on
+# the outgoing rays at x = 3M and streams out along the x axis of Schwarzschild (M = 1).
+# No matter coupling.  The radiation tetrad's time leg is the Kerr-Schild normal observer,
+# for whom a radial ray's energy scales as sqrt(1+2M/r)/(1-2M/r).
+#
+# Build:  cmake -B build-fr -D Athena_ENABLE_NURATES=ON -D PROBLEM=rad_freq_redshift
+# Photon path (default below) or neutrino path:
+#         radiation/radiation_type=neutrino radiation/use_nurates=true
+#         (with freq_fluxes = true the neutrino path needs <radiation> to accept frequency
+#          advection with nurates, which it currently refuses; freq_fluxes = false runs)
+# Frequency advection on/off: radiation/freq_fluxes=true|false
+
+<comment>
+problem = free-streaming gravitational redshift
+
+<job>
+basename = redshift
+
+<time>
+evolution  = dynamic
+integrator = rk2
+cfl_number = 0.5
+nlim       = -1
+tlim       = 120.0
+
+<mesh>
+nghost = 2
+nx1    = 320
+x1min  = 3.0
+x1max  = 43.0
+ix1_bc = inflow
+ox1_bc = outflow
+
+nx2    = 1
+x2min  = -0.5
+x2max  = 0.5
+ix2_bc = periodic
+ox2_bc = periodic
+
+nx3    = 1
+x3min  = -0.5
+x3max  = 0.5
+ix3_bc = periodic
+ox3_bc = periodic
+
+<meshblock>
+nx1 = 320
+nx2 = 1
+nx3 = 1
+
+<coord>
+general_rel = true
+minkowski   = false
+a           = 0.0
+excise      = false
+
+<radiation>
+nlevel         = 4
+radiation_type = photon
+nspecies       = 1
+use_nurates    = false
+nurates_toy_scattering = 0.0   # neutrino path: transport only, no library opacities
+affect_fluid   = false
+multi_freq     = true
+nfreq          = 24
+nu_min         = 0.1
+nu_max         = 100.0
+freq_scale     = log
+freq_fluxes    = true
+
+<bns_nurates>
+use_inelastic_scatt = false    # nurates refuses it; overrides cannot add this block
+
+<problem>
+e_peak    = 3.0
+sigma_ln  = 0.3
+diag_file = redshift_ray.txt
+
+<output1>
+file_type = tab
+variable  = rad_coord
+dt        = 20.0
