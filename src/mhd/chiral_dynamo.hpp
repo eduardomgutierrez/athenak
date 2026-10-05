@@ -154,8 +154,9 @@ Real AnomalySource(const Real xi, const Real bsq, const Real alpha_em,
 //! \fn Real chiral::ImplicitY5Update
 //! \brief backward-Euler update of U = D*Y5 under the Gamma_m sink and E.B source
 //!
-//! Solves A U_new + B cbrt(U_new) = U_old, with A = 1 + dt*alpha*Gamma_m and
-//! B >= 0 the anomaly coefficient (the E.B source is -B cbrt(U)/dt, since
+//! Solves A U_new + B cbrt(U_new) = U_old, with A = 1 + dt*alpha*Gamma_m/W (Gamma_m
+//! is a rate in proper time and U = sqrt(gamma)*W*n5*mb) and B >= 0 the anomaly
+//! coefficient (the E.B source is -B cbrt(U)/dt, since
 //! xi is proportional to -cbrt(Y5)).  The source has an infinite derivative at
 //! U = 0, so any explicit treatment oscillates there for every B > 0.
 //! With u = cbrt(U_new) the left side, A u^3 + B u, is odd and strictly

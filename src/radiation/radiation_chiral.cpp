@@ -164,7 +164,8 @@ TaskStatus Radiation::ChiralSources_(Driver *pdriver, int stage) {
     }
 #endif
     u0_(m, IYF + 1, k, j, i) = chiral::ImplicitY5Update(
-        u0_(m, IYF + 1, k, j, i), 1.0 + dt_ * alpha * Gamma_m, B_eb);
+        u0_(m, IYF + 1, k, j, i),
+        1.0 + dt_ * alpha * Gamma_m * Kokkos::sqrt(iW2), B_eb);
   });
 
   return TaskStatus::complete;

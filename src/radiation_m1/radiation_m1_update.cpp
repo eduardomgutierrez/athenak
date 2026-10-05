@@ -752,7 +752,8 @@ TaskStatus RadiationM1::TimeUpdate_(Driver *d, int stage) {
                       chiral::XiCoeff(chiral::kAlphaEM)/Kokkos::cbrt(DYe),
                       bsq, chiral::kAlphaEM, hbar_) : 0.0;
             umhd0_(m, IYF + 1, k, j, i) = chiral::ImplicitY5Update(
-                umhd0_(m, IYF + 1, k, j, i), 1.0 + beta_dt_ * alpha * Gamma_m, B_eb);
+                umhd0_(m, IYF + 1, k, j, i),
+                1.0 + beta_dt_ * alpha * Gamma_m * Kokkos::sqrt(iW2), B_eb);
           });
     }
   }
