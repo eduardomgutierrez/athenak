@@ -14,7 +14,7 @@
 //! rather than being duplicated per solver:
 //!
 //!   Xi()            dynamo coefficient xi(Y5, Ye)
-//!   OhmsLawEMF()     the 3+1 electric field E^i that follows from e^mu = xi b^mu
+//!   OhmsLawEMF()     the 3+1 electric field E_i that follows from e^mu = xi b^mu
 //!   GammaM()         chirality-flip rate, in code units
 //!   AnomalySource()  the E.B chiral anomaly source for dn5/dt
 //!
@@ -72,24 +72,40 @@ Real Xi(const Real Y5, const Real Ye, const Real alpha_em) {
 //! \fn void chiral::OhmsLawEMF
 //! \brief 3+1 electric field from the dynamo Ohm's law e^mu = xi b^mu
 //!
-//! Inputs are the Valencia three-velocity v^i = alpha u^i / W - beta^i, the
-//! cell-centred magnetic field b^i, and 1/W.  In the Valencia formulation
-//! v^2 = 1 - 1/W^2, so the Lorentz factor enters only through iW.
+//! Inputs are the Valencia three-velocity v^i (W v^i is what the DynGR solver
+//! stores in IVX..IVZ), the densitized field sqrt(gamma) B^i, 1/W, and the
+//! spatial metric gamma_ij with 1/sqrt(gamma).  Returns the covariant Eulerian
+//! electric field E_i.  v^2 = gamma_ij v^i v^j = 1 - 1/W^2, so the Lorentz factor
+//! enters only through iW.
 //!
-//! xi -> 0 recovers the ideal-MHD EMF, E = -v x b.
+//! The expression is the flat-space closed form of scripts/ohms_law_dynamo.py
+//! written with gamma_ij and eps_ijk = sqrt(gamma) [ijk]; it holds in any metric
+//! because it is a 3-tensor identity in the Eulerian observer's frame.
+//!
+//! xi -> 0 recovers the ideal-MHD EMF, E = -v x B.
 KOKKOS_INLINE_FUNCTION
 void OhmsLawEMF(const Real xi, const Real iW,
                 const Real v1, const Real v2, const Real v3,
                 const Real b1, const Real b2, const Real b3,
+                const Real gxx, const Real gxy, const Real gxz,
+                const Real gyy, const Real gyz, const Real gzz,
+                const Real isqrtg,
                 Real &e1, Real &e2, Real &e3) {
+  const Real v_1 = gxx*v1 + gxy*v2 + gxz*v3;
+  const Real v_2 = gxy*v1 + gyy*v2 + gyz*v3;
+  const Real v_3 = gxz*v1 + gyz*v2 + gzz*v3;
+  const Real B_1 = (gxx*b1 + gxy*b2 + gxz*b3)*isqrtg;
+  const Real B_2 = (gxy*b1 + gyy*b2 + gyz*b3)*isqrtg;
+  const Real B_3 = (gxz*b1 + gyz*b2 + gzz*b3)*isqrtg;
+
   const Real v2sq  = 1.0 - SQR(iW);
   const Real xi2   = SQR(xi);
   const Real D     = 1.0/(1.0 + xi2*v2sq);
-  const Real vdotB = v1*b1 + v2*b2 + v3*b3;
+  const Real vdotB = (v_1*b1 + v_2*b2 + v_3*b3)*isqrtg;
 
-  e1 = D*(-(1+xi2)*(v2*b3 - v3*b2) + xi*(1-v2sq)*b1 + xi*(xi2+1)*vdotB*v1);
-  e2 = D*(-(1+xi2)*(v3*b1 - v1*b3) + xi*(1-v2sq)*b2 + xi*(xi2+1)*vdotB*v2);
-  e3 = D*(-(1+xi2)*(v1*b2 - v2*b1) + xi*(1-v2sq)*b3 + xi*(xi2+1)*vdotB*v3);
+  e1 = D*(-(1+xi2)*(v2*b3 - v3*b2) + xi*(1-v2sq)*B_1 + xi*(xi2+1)*vdotB*v_1);
+  e2 = D*(-(1+xi2)*(v3*b1 - v1*b3) + xi*(1-v2sq)*B_2 + xi*(xi2+1)*vdotB*v_2);
+  e3 = D*(-(1+xi2)*(v1*b2 - v2*b1) + xi*(1-v2sq)*B_3 + xi*(xi2+1)*vdotB*v_3);
 }
 
 //----------------------------------------------------------------------------------------
@@ -100,16 +116,22 @@ void OhmsLawEMF(const Real xi, const Real iW,
 //! fluxes; a non-ideal contribution is then added to the edge field on top of
 //! it, as Resistivity::AddEMFConstantResist does with eta*J.  This returns exactly that
 //! contribution, so the ideal EMF is never recomputed and never double counted.
+//! Arguments and result are as for OhmsLawEMF.
 //!
-//! At v = 0 this reduces to e^i = xi b^i.
+//! At v = 0 this reduces to E_i = xi B_i.
 KOKKOS_INLINE_FUNCTION
 void ChiralEMF(const Real xi, const Real iW,
                const Real v1, const Real v2, const Real v3,
                const Real b1, const Real b2, const Real b3,
+               const Real gxx, const Real gxy, const Real gxz,
+               const Real gyy, const Real gyz, const Real gzz,
+               const Real isqrtg,
                Real &e1, Real &e2, Real &e3) {
   Real e1_id, e2_id, e3_id;
-  OhmsLawEMF(0.0, iW, v1, v2, v3, b1, b2, b3, e1_id, e2_id, e3_id);
-  OhmsLawEMF(xi, iW, v1, v2, v3, b1, b2, b3, e1, e2, e3);
+  OhmsLawEMF(0.0, iW, v1, v2, v3, b1, b2, b3, gxx, gxy, gxz, gyy, gyz, gzz, isqrtg,
+             e1_id, e2_id, e3_id);
+  OhmsLawEMF(xi, iW, v1, v2, v3, b1, b2, b3, gxx, gxy, gxz, gyy, gyz, gzz, isqrtg,
+             e1, e2, e3);
   e1 -= e1_id;
   e2 -= e2_id;
   e3 -= e3_id;

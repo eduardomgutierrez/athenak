@@ -15,6 +15,7 @@
 #include "mhd.hpp"
 
 #include "mhd/chiral_dynamo.hpp"
+#include "coordinates/adm.hpp"
 #include "coordinates/coordinates.hpp"
 #include "coordinates/cartesian_ks.hpp"
 #include "coordinates/cell_locations.hpp"
@@ -26,6 +27,9 @@ namespace {
 //! \fn void CellChiralEMF
 //! \brief the non-ideal chiral EMF at the centre of cell (m,k,j,i)
 //!
+//! Returns alpha E_i, the chiral part of the edge field; the shift term belongs
+//! to the ideal EMF and is not repeated here.
+//!
 //! Templated on the view types so the ADM struct does not have to be named in a
 //! device-function signature.  Evaluated on the fly rather than cached, so no
 //! extra cell-centred arrays are needed; it is a handful of flops and a cbrt.
@@ -35,23 +39,30 @@ KOKKOS_INLINE_FUNCTION
 void CellChiralEMF(const WView &w0_, const BView &bcc_, const AView &adm,
                    const int m, const int k, const int j, const int i,
                    Real &e1, Real &e2, Real &e3) {
+  const Real gxx = adm.g_dd(m,0,0,k,j,i);
+  const Real gxy = adm.g_dd(m,0,1,k,j,i);
+  const Real gxz = adm.g_dd(m,0,2,k,j,i);
+  const Real gyy = adm.g_dd(m,1,1,k,j,i);
+  const Real gyz = adm.g_dd(m,1,2,k,j,i);
+  const Real gzz = adm.g_dd(m,2,2,k,j,i);
+  const Real isqrtg = 1.0/sqrt(adm::SpatialDet(gxx, gxy, gxz, gyy, gyz, gzz));
+
   const Real ux = w0_(m,IVX,k,j,i);
   const Real uy = w0_(m,IVY,k,j,i);
   const Real uz = w0_(m,IVZ,k,j,i);
-  const Real iW = 1.0/sqrt(1.0
-              + adm.g_dd(m,0,0,k,j,i)*ux*ux + 2.0*adm.g_dd(m,0,1,k,j,i)*ux*uy
-              + 2.0*adm.g_dd(m,0,2,k,j,i)*ux*uz + adm.g_dd(m,1,1,k,j,i)*uy*uy
-              + 2.0*adm.g_dd(m,1,2,k,j,i)*uy*uz + adm.g_dd(m,2,2,k,j,i)*uz*uz);
-  const Real alpha = adm.alpha(m,k,j,i);
-  const Real v1 = alpha*ux*iW - adm.beta_u(m,0,k,j,i);
-  const Real v2 = alpha*uy*iW - adm.beta_u(m,1,k,j,i);
-  const Real v3 = alpha*uz*iW - adm.beta_u(m,2,k,j,i);
+  const Real iW = 1.0/sqrt(1.0 + gxx*ux*ux + 2.0*gxy*ux*uy + 2.0*gxz*ux*uz
+                           + gyy*uy*uy + 2.0*gyz*uy*uz + gzz*uz*uz);
 
   const Real xi = chiral::Xi(w0_(m,IYF+1,k,j,i), w0_(m,IYF,k,j,i),
                              chiral::kAlphaEM);
 
-  chiral::ChiralEMF(xi, iW, v1, v2, v3, bcc_(m,IBX,k,j,i), bcc_(m,IBY,k,j,i),
-                    bcc_(m,IBZ,k,j,i), e1, e2, e3);
+  chiral::ChiralEMF(xi, iW, ux*iW, uy*iW, uz*iW,
+                    bcc_(m,IBX,k,j,i), bcc_(m,IBY,k,j,i), bcc_(m,IBZ,k,j,i),
+                    gxx, gxy, gxz, gyy, gyz, gzz, isqrtg, e1, e2, e3);
+  const Real alpha = adm.alpha(m,k,j,i);
+  e1 *= alpha;
+  e2 *= alpha;
+  e3 *= alpha;
 }
 }  // namespace
 
