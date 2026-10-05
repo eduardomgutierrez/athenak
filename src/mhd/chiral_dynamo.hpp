@@ -43,6 +43,9 @@ constexpr Real kElectronMassMeV = 0.510999;
 //! Reduced Planck constant, MeV s
 constexpr Real kHbarMeVs = 6.582119569e-22;
 
+//! Reduced Planck constant, erg s
+constexpr Real kHbarErgS = 1.054571817e-27;
+
 //----------------------------------------------------------------------------------------
 //! \fn Real chiral::XiCoeff
 //! \brief prefactor of the dynamo coefficient, -(4/pi) alpha^2 ln(1/alpha)
@@ -134,12 +137,54 @@ Real GammaM(const Real mu_e_MeV, const Real code_time_s, const Real alpha_em) {
 
 //----------------------------------------------------------------------------------------
 //! \fn Real chiral::AnomalySource
-//! \brief E.B chiral anomaly source, dn5/dt = (2 alpha / pi) xi b^2
+//! \brief E.B chiral anomaly source, dn5/dt = (2 alpha / pi) xi b^2 / hbar
 //!
-//! \param bsq  fluid-frame b^2 = (B^2 + (W v.B)^2)/W^2
+//! Heaviside-Lorentz fields, as b is in the code.  xi < 0 for Y5 > 0, so the
+//! source drains n5 into the field.
+//!
+//! \param bsq        fluid-frame b^2 = (B^2 + (W v.B)^2)/W^2
+//! \param hbar_code  reduced Planck constant in code units, see HbarCode()
 KOKKOS_INLINE_FUNCTION
-Real AnomalySource(const Real xi, const Real bsq, const Real alpha_em) {
-  return (2.0*alpha_em/M_PI) * xi * bsq;
+Real AnomalySource(const Real xi, const Real bsq, const Real alpha_em,
+                   const Real hbar_code) {
+  return (2.0*alpha_em/M_PI) * xi * bsq / hbar_code;
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn Real chiral::ImplicitY5Update
+//! \brief backward-Euler update of U = D*Y5 under the Gamma_m sink and E.B source
+//!
+//! Solves A U_new + B cbrt(U_new) = U_old, with A = 1 + dt*alpha*Gamma_m and
+//! B >= 0 the anomaly coefficient (the E.B source is -B cbrt(U)/dt, since
+//! xi is proportional to -cbrt(Y5)).  The source has an infinite derivative at
+//! U = 0, so any explicit treatment oscillates there for every B > 0.
+//! With u = cbrt(U_new) the left side, A u^3 + B u, is odd and strictly
+//! increasing, so the root is unique; min(cbrt(U/A), U/B) bounds it from above
+//! and Newton from there decreases monotonically onto it.  B = 0 returns U/A.
+KOKKOS_INLINE_FUNCTION
+Real ImplicitY5Update(const Real U_old, const Real A, const Real B) {
+  if (B <= 0.0 || U_old == 0.0) {
+    return U_old/A;
+  }
+  const Real Ua = Kokkos::fabs(U_old);
+  Real u = Kokkos::fmin(Kokkos::cbrt(Ua/A), Ua/B);
+  for (int it = 0; it < 64; ++it) {
+    const Real du = (A*u*u*u + B*u - Ua)/(3.0*A*u*u + B);
+    u -= du;
+    if (Kokkos::fabs(du) <= 1.0e-14*u) break;
+  }
+  return Kokkos::copysign(u*u*u, U_old);
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn Real chiral::HbarCode
+//! \brief reduced Planck constant in code units
+//!
+//! \param code_energy_per_erg  UnitSystem::energy
+//! \param code_time_per_s      UnitSystem::time
+KOKKOS_INLINE_FUNCTION
+Real HbarCode(const Real code_energy_per_erg, const Real code_time_per_s) {
+  return kHbarErgS * code_energy_per_erg * code_time_per_s;
 }
 
 }  // namespace chiral

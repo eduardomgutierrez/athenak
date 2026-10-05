@@ -693,6 +693,10 @@ TaskStatus RadiationM1::TimeUpdate_(Driver *d, int stage) {
               ->eos.ps.GetEOSMutable();
       const Real mb_                           = eos.GetBaryonMass();
       const Primitive::UnitSystem code_units_ = eos.GetCodeUnitSystem();
+      const Real hbar_ = chiral::HbarCode(code_units_.energy, code_units_.time);
+      // AnomalySource is per code volume; mb_ expects EOS number density
+      const Real n_eos_per_code_ =
+          code_units_.volume * eos.GetEOSUnitSystem().numberDensity;
       const Real beta_dt_                      = beta_dt;
       auto &bcc0_ = pmy_pack->pmhd->bcc0;
       par_for(
@@ -710,7 +714,7 @@ TaskStatus RadiationM1::TimeUpdate_(Driver *d, int stage) {
             const Real Gamma_m =
                 chiral::GammaM(mu_e, code_units_.time, chiral::kAlphaEM);
 
-            // E·B chiral anomaly source: dn5/dt = (2*alpha_em/pi) * xi * b^2
+            // E·B chiral anomaly source: dn5/dt = (2*alpha_em/pi) * xi * b^2 / hbar
             const Real g11 = adm.g_dd(m,0,0,k,j,i), g12 = adm.g_dd(m,0,1,k,j,i);
             const Real g13 = adm.g_dd(m,0,2,k,j,i), g22 = adm.g_dd(m,1,1,k,j,i);
             const Real g23 = adm.g_dd(m,1,2,k,j,i), g33 = adm.g_dd(m,2,2,k,j,i);
@@ -740,16 +744,15 @@ TaskStatus RadiationM1::TimeUpdate_(Driver *d, int stage) {
             const Real Bv  = Bd1*ux + Bd2*uy + Bd3*uz;         // W g_ij B^i v^j
             const Real bsq = (Bsq + Bv*Bv)*iW2;                // fluid-frame b^2
 
-            const Real xi = chiral::Xi(w0_(m, IYF+1, k, j, i),
-                                       w0_(m, IYF, k, j, i), chiral::kAlphaEM);
-
-            // E·B explicit source; Gamma_m implicit damping — one combined step
-            const Real eb_src =
-                - beta_dt_ * alpha * sqrtgam * mb_
-                * chiral::AnomalySource(xi, bsq, chiral::kAlphaEM);
-            umhd0_(m, IYF + 1, k, j, i) =
-                (umhd0_(m, IYF + 1, k, j, i) + eb_src)
-                / (1.0 + beta_dt_ * alpha * Gamma_m);
+            // E.B source as -B_eb*cbrt(U)/dt, U = D*Y5, from xi = XiCoeff*cbrt(U/(D*Ye))
+            const Real DYe = umhd0_(m, IDN, k, j, i) * w0_(m, IYF, k, j, i);
+            const Real B_eb = (DYe > 0.0) ?
+                - beta_dt_ * alpha * sqrtgam * mb_ * n_eos_per_code_
+                * chiral::AnomalySource(
+                      chiral::XiCoeff(chiral::kAlphaEM)/Kokkos::cbrt(DYe),
+                      bsq, chiral::kAlphaEM, hbar_) : 0.0;
+            umhd0_(m, IYF + 1, k, j, i) = chiral::ImplicitY5Update(
+                umhd0_(m, IYF + 1, k, j, i), 1.0 + beta_dt_ * alpha * Gamma_m, B_eb);
           });
     }
   }

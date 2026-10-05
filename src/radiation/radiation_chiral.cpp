@@ -63,9 +63,8 @@ TaskStatus Radiation::ChiralSources(Driver *pdriver, int stage) {
 //! \fn TaskStatus Radiation::ChiralSources_<EOSPolicy, ErrorPolicy>
 //! \brief Apply the E.B anomaly source and the Gamma_m sink to u0_(IYF+1).
 //!
-//! E.B explicit, Gamma_m implicit, in one combined step,
-//! U <- (U + eb_src)/(1 + beta_dt*alpha*Gamma_m), unconditionally stable for any
-//! Gamma_m > 0.  Applied every RK stage with the stage-weighted timestep, as
+//! Both are taken implicitly in one backward-Euler step, see
+//! chiral::ImplicitY5Update.  Applied every RK stage with the stage-weighted timestep, as
 //! Rad_Coupl is; like Rad_Coupl it is first order in the source whatever
 //! <time>/integrator is set to.
 
@@ -84,6 +83,10 @@ TaskStatus Radiation::ChiralSources_(Driver *pdriver, int stage) {
           ->eos.ps.GetEOSMutable();
   const Real mb_ = eos.GetBaryonMass();
   const Primitive::UnitSystem code_units_ = eos.GetCodeUnitSystem();
+  const Real hbar_ = chiral::HbarCode(code_units_.energy, code_units_.time);
+  // AnomalySource is per code volume; mb_ expects EOS number density
+  const Real n_eos_per_code_ =
+      code_units_.volume * eos.GetEOSUnitSystem().numberDensity;
 
   auto &adm = pmy_pack->padm->adm;
   auto &w0_ = pmy_pack->pmhd->w0;
@@ -145,23 +148,23 @@ TaskStatus Radiation::ChiralSources_(Driver *pdriver, int stage) {
     const Real Bv  = Bd1*ux + Bd2*uy + Bd3*uz;         // W g_ij B^i v^j
     const Real bsq = (Bsq + Bv*Bv)*iW2;                // fluid-frame b^2
 
-    const Real xi = chiral::Xi(w0_(m, IYF+1, k, j, i),
-                               w0_(m, IYF, k, j, i), chiral::kAlphaEM);
-
-    const Real eb_src = - dt_ * alpha * sqrtgam * mb_
-                        * chiral::AnomalySource(xi, bsq, chiral::kAlphaEM);
+    // E.B source as -B_eb*cbrt(U)/dt, U = D*Y5, from xi = XiCoeff*cbrt(U/(D*Ye))
+    const Real DYe = u0_(m, IDN, k, j, i) * w0_(m, IYF, k, j, i);
+    const Real B_eb = (DYe > 0.0) ?
+        - dt_ * alpha * sqrtgam * mb_ * n_eos_per_code_
+        * chiral::AnomalySource(chiral::XiCoeff(chiral::kAlphaEM)/Kokkos::cbrt(DYe),
+                                bsq, chiral::kAlphaEM, hbar_) : 0.0;
 
 #ifdef CHIRAL_DEBUG
     if (m == 0 && k == ks && j == js && i == is) {
-      Kokkos::printf("[chiralEB] Y5=%.17e Ye=%.17e xi=%.17e bsq=%.17e "
-                     "mb=%.17e sqrtgam=%.17e alpha=%.17e eb_src=%.17e "
-                     "U_before=%.17e\n",
-                     w0_(m,IYF+1,k,j,i), w0_(m,IYF,k,j,i), xi, bsq, mb_,
-                     sqrtgam, alpha, eb_src, u0_(m,IYF+1,k,j,i));
+      Kokkos::printf("[chiralEB] Y5=%.17e Ye=%.17e bsq=%.17e mb=%.17e sqrtgam=%.17e "
+                     "alpha=%.17e B_eb=%.17e U_before=%.17e\n",
+                     w0_(m,IYF+1,k,j,i), w0_(m,IYF,k,j,i), bsq, mb_,
+                     sqrtgam, alpha, B_eb, u0_(m,IYF+1,k,j,i));
     }
 #endif
-    u0_(m, IYF + 1, k, j, i) =
-        (u0_(m, IYF + 1, k, j, i) + eb_src) / (1.0 + dt_ * alpha * Gamma_m);
+    u0_(m, IYF + 1, k, j, i) = chiral::ImplicitY5Update(
+        u0_(m, IYF + 1, k, j, i), 1.0 + dt_ * alpha * Gamma_m, B_eb);
   });
 
   return TaskStatus::complete;
