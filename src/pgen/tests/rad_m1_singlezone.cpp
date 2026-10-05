@@ -128,20 +128,26 @@ void ProblemGenerator::RadiationM1SingleZoneTest_(ParameterInput *pin,
   Real nb = rho / mb;
   Real w_lorentz = 1. / Kokkos::sqrt(1. - vx * vx - vy * vy - vz * vz);
   
-  // initialize ADM variables
-  adm::ADM::ADM_vars &adm = pmbp->padm->adm;
-  par_for(
-      "pgen_metric_initialize", DevExeSpace(), 0, nmb1, 0, (n3 - 1), 0, (n2 - 1), 0,
-      (n1 - 1), KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
-        for (int a = 0; a < 3; ++a)
-          for (int b = a; b < 3; ++b) {
-            adm.g_dd(m, a, b, k, j, i) = (a == b ? 1. : 0.);
-          }
+  // initialize ADM variables: flat by default.  problem/adm_from_coord takes the analytic
+  // metric of <coord> instead (Kerr-Schild, or flat with minkowski = true), so the zone can
+  // sit in the same curved background as the multifrequency single-zone pgen.
+  if (pin->GetOrAddBoolean("problem", "adm_from_coord", false)) {
+    pmbp->padm->SetADMVariables(pmbp);
+  } else {
+    adm::ADM::ADM_vars &adm = pmbp->padm->adm;
+    par_for(
+        "pgen_metric_initialize", DevExeSpace(), 0, nmb1, 0, (n3 - 1), 0, (n2 - 1), 0,
+        (n1 - 1), KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
+          for (int a = 0; a < 3; ++a)
+            for (int b = a; b < 3; ++b) {
+              adm.g_dd(m, a, b, k, j, i) = (a == b ? 1. : 0.);
+            }
 
-        adm.psi4(m, k, j, i) = 1.;  // adm.psi4
+          adm.psi4(m, k, j, i) = 1.;  // adm.psi4
 
-        adm.alpha(m, k, j, i) = 1.;
-      });
+          adm.alpha(m, k, j, i) = 1.;
+        });
+  }
 
   // set primitive variables
   par_for(
