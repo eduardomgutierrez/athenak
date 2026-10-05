@@ -449,16 +449,24 @@ TaskStatus Radiation::CalculateFluxes(Driver *pdriver, int stage) {
           if (inu_r_plm > 0) inu_r = inu_r_plm;
         } // endif ((order_freq_fluxes == 2) && (ifr < nfreq1))
 
-        // direction
-        Real nnu_f = -nu_f * nnu_coeff_(m,iang,k,j,i);
+        // The shift is a uniform velocity in ln(nu), d ln(nu)/dt ~ -nnu_coeff, so the
+        // upwind state is the donor's content per unit ln(nu).  Taking nu_f times the
+        // per-nu bin average instead biases the shift by dlnnu/(e^dlnnu - 1) on a log
+        // grid.  Bin 0 of the photon grid, [0, nu_min], and the top-face tail keep the
+        // per-nu form.
+        Real vln = -nnu_coeff_(m,iang,k,j,i);
+        Real state_l = (nu_fm1 > 0.0) ? i0_(m,nfm1,k,j,i)/(n0*n_0)/log(nu_f/nu_fm1)
+                                      : nu_f*inu_l;
+        Real state_r = nu_f*inu_r;
+        if (ifr < nfreq1) {
+          Real &nu_fp1 = nu_tet(ifr+1);
+          state_r = i0_(m,nf,k,j,i)/(n0*n_0)/log(nu_fp1/nu_f);
+        }
+        Real flx_f = ((vln > 0.0) ? state_l : state_r)*vln*n_0;  // n^nu n_t I
 
-        // upwind flux
-        Real flx_f = (nnu_f > 0) ? inu_l : inu_r;
-        flx_f *= nnu_f*n_0; // n^nu n_t I
-
-        // divergence
-        divfa_(m,nfm1,k,j,i) += -flx_f;
-        divfa_(m,nf,k,j,i)   +=  flx_f;
+        // divergence: flx_f leaves bin ifr-1 through its top face and enters bin ifr
+        divfa_(m,nfm1,k,j,i) +=  flx_f;
+        divfa_(m,nf,k,j,i)   += -flx_f;
 
       } // endfor 1 <= ifr <= nfreq-1
 
