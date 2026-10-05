@@ -23,6 +23,11 @@
 //! which also verifies the ideal-MHD (xi -> 0) and comoving (v -> 0) limits.
 //! Re-run that script if the algebra here is touched.
 //!
+//! The chiral EMF enters only the induction equation, as a perturbation of ideal
+//! GRMHD.  The fluxes and C2P assume e^mu = 0, so the stress-energy is wrong
+//! at O(xi) (exact: (1+xi^2) times the ideal form, with b^mu from B and E); a
+//! consistent treatment needs a beyond-ideal-MHD formulation.
+//!
 //! Current users: mhd_corner_e.cpp (2D and 3D EMF) and
 //! radiation_m1_update.cpp (Gamma_m + E.B kernel).
 
