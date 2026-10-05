@@ -325,7 +325,7 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::QueueDynGRMHDTasks() {
 
     // Chiral Gamma_m sink and E.B anomaly source for Y5.  Queued unconditionally
     // so that MHD_RestU's optional dependency on it always resolves; the task
-    // itself is a no-op unless backreact_chiral and chiral_gamma_m are set.
+    // itself is a no-op unless backreact_chiral is set.
     pnr->QueueTask(&radiation::Radiation::ChiralSources, prad, Rad_Chiral,
             "Rad_Chiral", Task_Run, {Rad_Coupl});
 

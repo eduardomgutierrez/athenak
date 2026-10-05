@@ -158,7 +158,7 @@ class Radiation {
   // the per-bin number moment and rejects anything but 'moment'.
   int ye_source_model;
   bool backreact_chiral;    // source the chiral imbalance Y5 from the weak reactions
-  bool chiral_gamma_m;      // apply the chirality-flip sink and the E.B anomaly source
+  bool chiral_gamma_m;      // apply the chirality-flip sink (E.B is always applied)
   Real arad;                // radiation constant
   Real kappa_a;             // constant Rosseland mean absorption coefficient
   Real kappa_s;             // constant scattering coefficient

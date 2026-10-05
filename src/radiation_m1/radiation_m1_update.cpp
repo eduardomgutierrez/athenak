@@ -686,7 +686,7 @@ TaskStatus RadiationM1::TimeUpdate_(Driver *d, int stage) {
   // this entire block at compile time for the pure-radiation instantiation.
   if constexpr (IsMHD) {
     if (params_.backreact && stage == 2 && params_.backreact_chiral &&
-        params_.chiral_gamma_m && nspecies > 1) {
+        nspecies > 1) {
       auto &eos =
           static_cast<dyngr::DynGRMHDPS<EOSPolicy, ErrorPolicy> *>(
               pmy_pack->pdyngr)
@@ -698,6 +698,7 @@ TaskStatus RadiationM1::TimeUpdate_(Driver *d, int stage) {
       const Real n_eos_per_code_ =
           code_units_.volume * eos.GetEOSUnitSystem().numberDensity;
       const Real beta_dt_                      = beta_dt;
+      const bool gamma_m_on_                   = params_.chiral_gamma_m;
       auto &bcc0_ = pmy_pack->pmhd->bcc0;
       par_for(
           "chiral_gamma_m", DevExeSpace(), 0, nmb1, ks, ke, js, je, is, ie,
@@ -711,8 +712,8 @@ TaskStatus RadiationM1::TimeUpdate_(Driver *d, int stage) {
             const Real mu_q  = eos.GetChargeChemicalPotential(nb, T, &Y);
             const Real mu_le = eos.GetElectronLeptonChemicalPotential(nb, T, &Y);
             const Real mu_e  = mu_le - mu_q; // MeV (code chemical potential units)
-            const Real Gamma_m =
-                chiral::GammaM(mu_e, code_units_.time, chiral::kAlphaEM);
+            const Real Gamma_m = gamma_m_on_ ?
+                chiral::GammaM(mu_e, code_units_.time, chiral::kAlphaEM) : 0.0;
 
             // E·B chiral anomaly source: dn5/dt = (2*alpha_em/pi) * xi * b^2 / hbar
             const Real g11 = adm.g_dd(m,0,0,k,j,i), g12 = adm.g_dd(m,0,1,k,j,i);

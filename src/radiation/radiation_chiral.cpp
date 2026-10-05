@@ -31,7 +31,7 @@ namespace radiation {
 //! \brief Entry point; dispatches on the EOS type like CalcOpacityNurates does.
 
 TaskStatus Radiation::ChiralSources(Driver *pdriver, int stage) {
-  if (!backreact_chiral || !chiral_gamma_m) {
+  if (!backreact_chiral) {
     return TaskStatus::complete;
   }
 
@@ -95,6 +95,7 @@ TaskStatus Radiation::ChiralSources_(Driver *pdriver, int stage) {
 
   // stage-weighted timestep, as in radiation_source_nurates.cpp
   const Real dt_ = (pdriver->beta[stage-1])*(pmy_pack->pmesh->dt);
+  const bool gamma_m_on_ = chiral_gamma_m;
 
   par_for("rad_chiral_sources", DevExeSpace(), 0, nmb1, ks, ke, js, je, is, ie,
   KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
@@ -108,8 +109,8 @@ TaskStatus Radiation::ChiralSources_(Driver *pdriver, int stage) {
     const Real mu_le = eos.GetElectronLeptonChemicalPotential(nb, T, &Y);
     const Real mu_e  = mu_le - mu_q;  // MeV
 
-    const Real Gamma_m =
-        chiral::GammaM(mu_e, code_units_.time, chiral::kAlphaEM);
+    const Real Gamma_m = gamma_m_on_ ?
+        chiral::GammaM(mu_e, code_units_.time, chiral::kAlphaEM) : 0.0;
 
 #ifdef CHIRAL_DEBUG
     if (m == 0 && k == ks && j == js && i == is) {

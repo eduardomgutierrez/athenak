@@ -349,19 +349,9 @@ Radiation::Radiation(MeshBlockPack *ppack, ParameterInput *pin) :
       }
       // evolve_ye is NOT required: the URCA source for Y5 rides along with the
       // Ye update and so is inactive without it, but the Gamma_m sink and the
-      // E.B anomaly source are independent.  Running with evolve_ye = false and
-      // chiral_gamma_m = true isolates them, which is how the chiral unit tests
-      // in runs/chiral_check*.athinput work.  Only the combination that does
-      // nothing at all is worth complaining about.
-      if (!evolve_ye && !chiral_gamma_m) {
-        std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
-                  << std::endl
-                  << "radiation/backreact_chiral has no effect with "
-                  << "evolve_ye = false and chiral_gamma_m = false: the URCA "
-                  << "source needs evolve_ye and the Gamma_m / E.B sources need "
-                  << "chiral_gamma_m." << std::endl;
-        std::exit(EXIT_FAILURE);
-      }
+      // E.B anomaly source are independent.  Running with evolve_ye = false
+      // isolates them, which is how the chiral unit tests in
+      // runs/chiral_check*.athinput work.
     }
 
   // multi-frequency radiation

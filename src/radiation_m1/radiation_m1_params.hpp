@@ -66,7 +66,7 @@ struct RadiationM1Params {
   bool backreact;
   bool backreact_tmunu;
   bool backreact_chiral; // backreact on the chiral charge density
-  bool chiral_gamma_m;  // apply Gamma_m chirality-flip rate (requires backreact_chiral)
+  bool chiral_gamma_m;  // apply Gamma_m chirality-flip rate (E.B is always applied)
   
   int nspecies;              // number of neutrino species
   Real closure_epsilon;      // precision with which to find closure
