@@ -136,6 +136,34 @@ void SingleZoneImpl(Mesh *pmesh, ParameterInput *pin, const bool restart) {
   Real mb = eos.GetBaryonMass();
   Real nb = rho/mb;
 
+  std::cout << "### rad_neutrino_singlezone: mb_code = " << mb
+            << " code_edens_to_eos = "
+            << eos.GetCodeUnitSystem().EnergyDensityConversion(eos.GetEOSUnitSystem())
+            << std::endl;
+
+  // Analytic target: the trapped weak equilibrium with the initial total energy density and
+  // lepton fraction.  It is comoving, so it does not depend on the boost.  Only meaningful
+  // when the zone starts without neutrinos.
+  if (erad == 0.0) {
+    DvceArray1D<Real> eq("singlezone_trapped_eq", 3);
+    Kokkos::parallel_for("singlezone_trapped_eq", Kokkos::RangePolicy<>(DevExeSpace(), 0, 1),
+    KOKKOS_LAMBDA(const int) {
+      Real Y[MAX_SPECIES] = {0.0}, Yl[MAX_SPECIES] = {0.0};
+      Real Y_eq[MAX_SPECIES] = {0.0}, Y_guess[MAX_SPECIES] = {0.0};
+      Y[0] = ye;  Yl[0] = ye;  Y_guess[0] = ye;
+      Real T_eq = 0.0;
+      bool ok = eos.GetBetaEquilibriumTrapped(nb, eos.GetEnergy(nb, temp, Y), Yl, T_eq, Y_eq,
+                                              temp, Y_guess);
+      eq(0) = ok ? 1.0 : 0.0;
+      eq(1) = T_eq;
+      eq(2) = Y_eq[0];
+    });
+    auto eq_h = Kokkos::create_mirror_view_and_copy(HostMemSpace(), eq);
+    std::cout << "### rad_neutrino_singlezone: trapped equilibrium "
+              << (eq_h(0) > 0.5 ? "" : "(solver FAILED) ") << "T_eq = " << eq_h(1)
+              << " MeV, Ye_eq = " << eq_h(2) << std::endl;
+  }
+
   auto &w0 = pmbp->pmhd->w0;
   auto &b0 = pmbp->pmhd->b0;
   auto &bcc0 = pmbp->pmhd->bcc0;
