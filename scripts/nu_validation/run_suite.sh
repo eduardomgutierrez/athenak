@@ -8,7 +8,7 @@
 #   eq_curved   the same at rest at r = 20/10/6/4 M of a Schwarzschild black hole
 #   freestream  hot wall radiating into vacuum (flat; against the analytic 1 - x/ct)
 #   diffusion   spectrum diffusing through a moving scattering medium
-#   redshift    free-streaming gravitational redshift (frequency fluxes, curved; photon path)
+#   redshift    free-streaming gravitational redshift (frequency fluxes, curved; neutrino path)
 #   lepton      lepton-number budget of the Ye source (flat, at rest and boosted)
 #
 # Usage:  scripts/nu_validation/run_suite.sh TABLE [OUTDIR]
@@ -127,13 +127,14 @@ run diffusion/mf $BI $OUT/inputs/mf_diffusion.athinput radiation/nfreq=24 &
 run diffusion/m1 $NONU $TESTS/rad_m1_diffusiontest.athinput problem/fluid_velocity=0.3 \
     time/tlim=1.0 mesh/nx1=128 &
 
-# ---- 6. free-streaming gravitational redshift (photon path) ----------------------------
-# The frequency fluxes are shared by both paths.  <radiation> refuses them together with
-# nurates, so the neutrino variant (radiation/radiation_type=neutrino
-# radiation/use_nurates=true) waits until that is allowed.
+# ---- 6. free-streaming gravitational redshift (neutrino path) --------------------------
+# nu_min sits a decade below the injected spectrum: first-order frequency advection
+# broadens it as it shifts, and what reaches nu_min leaves the grid, which would bias the
+# measured mean energy of what remains.
 run redshift/mf $FR $TESTS/rad_freq_redshift.athinput mesh/x1max=23.0 mesh/nx1=80 \
-    meshblock/nx1=80 time/tlim=40.0 radiation/freq_fluxes=true radiation/nu_min=0.3 \
-    radiation/nu_max=30.0 radiation/nlevel=3 radiation/nfreq=24 &
+    meshblock/nx1=80 time/tlim=40.0 radiation/freq_fluxes=true radiation/nu_min=0.03 \
+    radiation/nu_max=30.0 radiation/nlevel=3 radiation/nfreq=36 \
+    radiation/radiation_type=neutrino radiation/use_nurates=true &
 
 # ---- 7. lepton-number budget of the Ye source ------------------------------------------
 # Uniform periodic zone, so there is no transport: the electron number the matter gains
