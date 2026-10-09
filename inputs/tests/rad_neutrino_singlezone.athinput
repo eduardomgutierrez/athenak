@@ -1,0 +1,136 @@
+# Neutrino single zone: matter emits into an empty multifrequency field and relaxes to
+# weak (beta) equilibrium with trapped neutrinos.
+#
+# The multifrequency counterpart of inputs/tests/rad_m1_singlezone.athinput: the same
+# matter state and the same bns_nurates switches, so the two solvers can be overlaid.
+#
+# Build:  cmake -B build-sz -D Athena_ENABLE_NURATES=ON -D PROBLEM=rad_neutrino_singlezone
+# Table:  pass it on the command line,  mhd/table=/path/to/SFHo.athtab
+#         (tst/inputs/tables/SFHo_reduced.athtab works, at reduced accuracy: it has no
+#          Y_p/Y_n, so nucleon fractions fall back to free n-p-e matter)
+# Units:  DynGRMHD geometric-solar code units, rho 1 -> 6.176e17 g/cc, t 1 -> 4.925e-6 s.
+#         T and the frequency grid are in MeV.
+# NDAF midplane instead of the defaults below:
+#         problem/rho=1.619e-7 problem/temp=5.0 problem/Y_e=0.3
+#         radiation/nu_min=0.5 radiation/nu_max=300.0      (rho 1.619e-7 -> 1.0e11 g/cc)
+#
+# Keep '=' out of <comment> values: the binary output header stores every parameter as one
+# key = value line, and vis/python/bin_convert.py cannot parse a value containing '='.
+
+<comment>
+problem = neutrino single zone
+
+<job>
+basename = nu_singlezone
+
+<time>
+evolution  = dynamic
+integrator = rk2
+cfl_number = 0.2         # relaxation tests: never below 0.01
+nlim       = -1
+tlim       = 10.0
+
+<mesh>
+nghost = 2
+nx1    = 5
+x1min  = -2.5
+x1max  = 2.5
+ix1_bc = periodic
+ox1_bc = periodic
+
+nx2    = 1
+x2min  = -0.5
+x2max  = 0.5
+ix2_bc = periodic
+ox2_bc = periodic
+
+nx3    = 1
+x3min  = -0.5
+x3max  = 0.5
+ix3_bc = periodic
+ox3_bc = periodic
+
+<meshblock>
+nx1 = 5
+nx2 = 1
+nx3 = 1
+
+<adm>
+# required: the pgen and the nurates coupling read the ADM variables
+
+<coord>
+# Flat space has to be requested explicitly.  There is no mass parameter: without
+# minkowski = true the analytic metric the radiation module uses is Kerr-Schild with M = 1,
+# which puts this box inside the horizon (and the middle cell at r = 0).
+minkowski   = true
+
+<mhd>
+eos         = ideal
+gamma       = 2.0
+nscalars    = 1
+dyn_eos     = compose
+table       = SFHo.athtab   # override on the command line; see <comment>
+dyn_error   = reset_floor
+reconstruct = dc
+rsolver     = hlle
+dfloor      = 1.0e-16
+dthreshold  = 1.02
+dyn_scratch = 1
+fofc        = false
+enforce_maximum = false
+
+<radiation>
+nlevel         = 2
+radiation_type = neutrino
+nspecies       = 4          # nu_e, anti-nu_e, nu_x, anti-nu_x (3 merges the heavy leptons)
+use_nurates    = true
+affect_fluid   = true
+evolve_ye      = true
+multi_freq     = true
+nfreq          = 24         # bins <= x1.4 wide over 1-3000 MeV; 12 is too coarse once boosted
+nu_min         = 1.0        # MeV; keep well below the spectrum (no [0, nu_min] bin)
+nu_max         = 3000.0     # MeV; keep well above 20 T (the top bin is not a tail catch-all)
+freq_scale     = log        # required with nurates
+freq_fluxes    = false      # required with nurates
+
+<bns_nurates>
+# The same switches as inputs/tests/rad_m1_singlezone.athinput, all set explicitly so the two
+# solvers are guaranteed to run the same microphysics.  use_inelastic_scatt must be false:
+# the multifrequency solver refuses it.
+use_inelastic_scatt = false
+use_WM_ab           = false
+use_WM_sc           = false
+use_NN_medium_corr  = false
+use_dU              = false
+use_dm_eff          = false
+use_decay           = false
+use_equilibrium_distribution = true
+use_partial_equilibrium = true   # the (T*, Ye*) predictor; set false to compare
+
+<problem>
+rho  = 1.619e-5   # code units (= 1.0e13 g/cc)
+temp = 50.0       # MeV
+Y_e  = 0.1
+vx   = 0.0        # a boost tests the frame handling: Ye(t; v) should equal Ye(t/W; 0)
+vy   = 0.0
+vz   = 0.0
+erad = 0.0        # start with no neutrinos
+
+<output1>
+file_type = hst
+dcycle    = 1
+
+<output2>
+file_type = tab
+variable  = mhd_w       # with DynGRMHD this includes the EOS temperature (MeV)
+dcycle    = 10
+
+<output3>
+file_type = tab
+variable  = rad_fluid
+dcycle    = 10
+
+<output4>
+file_type = bin         # per-group data is 6D; the tab writer drops it
+variable  = radnu_fluid
+dcycle    = 100
