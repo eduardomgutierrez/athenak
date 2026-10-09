@@ -19,12 +19,42 @@
 #include "geodesic-grid/geodesic_grid.hpp"
 #include "radiation.hpp"
 #include "radiation_multi_freq.hpp"
+#include "radiation_nurates_remap.hpp"
 #include "reconstruct/plm.hpp"
 #include "reconstruct/ppm.hpp"
 #include "reconstruct/wenoz.hpp"
 #include "reconstruct/teno.hpp"
 
 namespace radiation {
+
+//----------------------------------------------------------------------------------------
+//! \struct FreqEdgeLogWindow
+//! \brief The four log bin contents one RemapBinValue window reads, indexed from the
+//!        window's first node: a ray's logs filled locally, with no workspace.
+struct FreqEdgeLogWindow {
+  Real v[4];
+  KOKKOS_INLINE_FUNCTION Real operator()(const int f) const { return v[f]; }
+};
+
+//----------------------------------------------------------------------------------------
+//! \fn Real FreqEdgeGhost
+//! \brief Content per unit ln(nu) of the ghost bin at real-valued index xpos (-1 or
+//!        nfreq) on the neutrino grid, extrapolated from the ray's own bins exactly as
+//!        the Doppler remap continues a spectrum past either end of the grid.
+KOKKOS_INLINE_FUNCTION
+Real FreqEdgeGhost(const DvceArray5D<Real> &i0, const int m, const int k, const int j,
+                   const int i, const int sp_off, const int iang, const int nang,
+                   const int nfreq, const Real inv_n0n_0, const Real xpos,
+                   const Real dln) {
+  RemapStencil s = RemapStencilAt(0, nfreq-1, xpos);
+  FreqEdgeLogWindow lw;
+  for (int w=0; w<4; ++w) {
+    Real q = i0(m, sp_off + getFreqAngIndex(s.st+w, iang, nang), k, j, i)*inv_n0n_0;
+    lw.v[w] = (q > 0.0) ? Kokkos::log(q) : kRemapLogSentinel;  // as RemapFillLogs
+  }
+  return RemapBinValue(lw, -s.st, s, RemapAsymptote::kSpectrum, dln)/dln;
+}
+
 //----------------------------------------------------------------------------------------
 //! \fn  void Radiation::CalculateFluxes
 //! \brief Compute radiation fluxes
@@ -301,6 +331,16 @@ TaskStatus Radiation::CalculateFluxes(Driver *pdriver, int stage) {
     // neutrinos, whose grid is in MeV.
     Real nu_to_code_ = nu_grid_to_code;
 
+    // The nurates neutrino grid is geometric over every bin, the top one included, so it
+    // has a real face at nu_min and a finite top bin [nu_max, nu_max*e^dln] whose content
+    // is known.  Both edge faces are then open, and the content outside the grid is
+    // extrapolated as the Doppler remap does (see the edge block below).
+    const bool nu_grid_ = use_nurates;
+    const Real dln_ = nu_grid_ ? log(grid_nu_max/grid_nu_min)/static_cast<Real>(nfreq1)
+                               : 0.0;
+
+    // Only order 0 is reachable.  PLM is also restricted to the photon grid, since its
+    // limiter reads the blackbody tail inu_e, which the neutrino grid does not build.
     int order_freq_fluxes = 0;
     int nsp_ang1 = nsp*nang - 1;
     if (!angular_fluxes) Kokkos::deep_copy(divfa_, 0);
@@ -368,19 +408,23 @@ TaskStatus Radiation::CalculateFluxes(Driver *pdriver, int stage) {
       Real n_0 = tetcov_c_(m,0,0,k,j,i)*nh_c_.d_view(iang,0) + tetcov_c_(m,1,0,k,j,i)*nh_c_.d_view(iang,1)
                + tetcov_c_(m,2,0,k,j,i)*nh_c_.d_view(iang,2) + tetcov_c_(m,3,0,k,j,i)*nh_c_.d_view(iang,3);
 
-      // estimate inu at nu_tet[nfreq-1] assuming blackbody tail
       int sp_off = isp*nfrq*nang;  // species offset into combined index
-      Real &nu_e = nu_tet(nfreq1);
-      Real nu_e_code = nu_e*nu_to_code_;
-      int ne = sp_off + getFreqAngIndex(nfreq1, iang, nang);
-      Real ir_cm_star_e = SQR(SQR(n0_cm))*i0_(m,ne,k,j,i)/(n0*n_0);
-      Real teff = GetEffTemperature(ir_cm_star_e, n0_cm*nu_e_code, arad_);
-      // BBSpectrum is per unit code frequency; the extra factor puts inu_e on the
-      // same per-unit-nu_tet footing as the inu_* built from i0_/(nu_f-nu_fm1)
-      Real inu_e = fmax(BBSpectrum(n0_cm*nu_e_code, teff, arad_)/(4*M_PI)
-                        /SQR(SQR(n0_cm)), 0.0)*nu_to_code_;
 
-      // note: flux through nu_tet[0] is simply 0
+      // photon grid: estimate inu at nu_tet[nfreq-1] assuming blackbody tail
+      Real inu_e = 0.0;
+      if (!nu_grid_) {
+        Real &nu_e = nu_tet(nfreq1);
+        Real nu_e_code = nu_e*nu_to_code_;
+        int ne = sp_off + getFreqAngIndex(nfreq1, iang, nang);
+        Real ir_cm_star_e = SQR(SQR(n0_cm))*i0_(m,ne,k,j,i)/(n0*n_0);
+        Real teff = GetEffTemperature(ir_cm_star_e, n0_cm*nu_e_code, arad_);
+        // BBSpectrum is per unit code frequency; the extra factor puts inu_e on the
+        // same per-unit-nu_tet footing as the inu_* built from i0_/(nu_f-nu_fm1)
+        inu_e = fmax(BBSpectrum(n0_cm*nu_e_code, teff, arad_)/(4*M_PI)
+                     /SQR(SQR(n0_cm)), 0.0)*nu_to_code_;
+      }
+
+      // photon grid: flux through nu_tet[0] = 0 is simply 0
       // compute flux at frequency faces from ifr=1 to ifr=nfreq-1
       for (int ifr=1; ifr <= nfreq1; ++ifr) {
         Real &nu_fm1 = nu_tet(ifr-1);
@@ -403,7 +447,8 @@ TaskStatus Radiation::CalculateFluxes(Driver *pdriver, int stage) {
         } // endif (ifr < nfreq1)
 
         // second-order upwind (PLM, optional)
-        if ((order_freq_fluxes == 2) && (ifr < nfreq1)) { // 1 <= ifr <= nfreq-2
+        if ((order_freq_fluxes == 2) && !nu_grid_ && (ifr < nfreq1)) {
+          // 1 <= ifr <= nfreq-2, photon grid only
           Real &nu_fp1 = nu_tet(ifr+1);
           Real inu_fp1h = i0_(m,nf,k,j,i)/(n0*n_0)/(nu_fp1-nu_f);
           Real nu_fp1h = (nu_fp1 + nu_f) / 2;
@@ -452,8 +497,9 @@ TaskStatus Radiation::CalculateFluxes(Driver *pdriver, int stage) {
         // The shift is a uniform velocity in ln(nu), d ln(nu)/dt ~ -nnu_coeff, so the
         // upwind state is the donor's content per unit ln(nu).  Taking nu_f times the
         // per-nu bin average instead biases the shift by dlnnu/(e^dlnnu - 1) on a log
-        // grid.  Bin 0 of the photon grid, [0, nu_min], and the top-face tail keep the
-        // per-nu form.
+        // grid.  Bin 0 of the photon grid, [0, nu_min], and the photon top-face tail
+        // keep the per-nu form.  The neutrino top bin is finite, so its own content
+        // per unit ln(nu) is the right state there.
         Real vln = -nnu_coeff_(m,iang,k,j,i);
         Real state_l = (nu_fm1 > 0.0) ? i0_(m,nfm1,k,j,i)/(n0*n_0)/log(nu_f/nu_fm1)
                                       : nu_f*inu_l;
@@ -461,6 +507,8 @@ TaskStatus Radiation::CalculateFluxes(Driver *pdriver, int stage) {
         if (ifr < nfreq1) {
           Real &nu_fp1 = nu_tet(ifr+1);
           state_r = i0_(m,nf,k,j,i)/(n0*n_0)/log(nu_fp1/nu_f);
+        } else if (nu_grid_) {
+          state_r = i0_(m,nf,k,j,i)/(n0*n_0)/dln_;
         }
         Real flx_f = ((vln > 0.0) ? state_l : state_r)*vln*n_0;  // n^nu n_t I
 
@@ -469,6 +517,31 @@ TaskStatus Radiation::CalculateFluxes(Driver *pdriver, int stage) {
         divfa_(m,nf,k,j,i)   += -flx_f;
 
       } // endfor 1 <= ifr <= nfreq-1
+
+      // Neutrino grid: the two edge faces, nu_min and the top of the top bin, upwinded
+      // like the interior.  Outflow takes the edge bin's content per unit ln(nu); inflow
+      // takes a ghost bin extrapolated as RemapAsymptote::kSpectrum.  Below nu_min that
+      // is capped by nu^4: I_nu = nu^3 f with f a bounded (Pauli-blocked) occupation,
+      // taken not to grow below the grid, and a bin integral on a log grid is one power
+      // higher.  Above the top it may not grow past the top bin.  No photon blackbody
+      // enters either edge.
+      if (nu_grid_) {
+        Real vln = -nnu_coeff_(m,iang,k,j,i);
+        Real inv_n0n_0 = 1.0/(n0*n_0);
+        int nb = sp_off + getFreqAngIndex(0, iang, nang);
+        int nt = sp_off + getFreqAngIndex(nfreq1, iang, nang);
+        Real state_b = (vln > 0.0)
+            ? FreqEdgeGhost(i0_, m, k, j, i, sp_off, iang, nang, nfrq, inv_n0n_0,
+                            -1.0, dln_)
+            : i0_(m,nb,k,j,i)*inv_n0n_0/dln_;
+        Real state_t = (vln > 0.0)
+            ? i0_(m,nt,k,j,i)*inv_n0n_0/dln_
+            : FreqEdgeGhost(i0_, m, k, j, i, sp_off, iang, nang, nfrq, inv_n0n_0,
+                            static_cast<Real>(nfrq), dln_);
+        // signs as in the loop: the nu_min face is bin 0's bottom, the other the top's top
+        divfa_(m,nb,k,j,i) += -state_b*vln*n_0;
+        divfa_(m,nt,k,j,i) +=  state_t*vln*n_0;
+      }
 
     }); // end par_for
 

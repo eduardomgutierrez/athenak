@@ -216,19 +216,9 @@ Radiation::Radiation(MeshBlockPack *ppack, ParameterInput *pin) :
     // flag for frequency fluxes
     freq_fluxes = pin->GetOrAddBoolean("radiation","freq_fluxes",true);
 #if ENABLE_NURATES
-    // Frequency advection was written for the photon grid, whose edges are nu = 0 and an
-    // open top bin.  On the neutrino grid it still closes the bottom face at nu_min and
-    // the top face of the (finite) top bin, and takes the right state at the last
-    // interior face from a photon Planck tail.  The default here is true, so a run that
-    // simply omits the key gets that; say so.
-    if (use_nurates && freq_fluxes && global_variable::my_rank == 0) {
-      std::cout << "### WARNING in " << __FILE__ << " at line " << __LINE__
-                << std::endl
-                << "<radiation>/freq_fluxes with use_nurates: the neutrino grid's edges "
-                << "are not yet treated" << std::endl
-                << "(closed at nu_min and at the top of the top bin, photon Planck tail "
-                << "at the last interior face)" << std::endl;
-    }
+    // With use_nurates the frequency-flux kernel treats the neutrino grid's two edge
+    // faces itself (open, nu^4-capped extrapolation below nu_min, no growth above the
+    // finite top bin); see the edge block in Radiation::CalculateFluxes.
 #endif
   } // endif (multi_freq)
 
