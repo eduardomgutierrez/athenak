@@ -28,3 +28,6 @@ Lorene
 src/bns_nurates/
 
 # python cache
+
+# local run directories and figures (ndaf-multifreq)
+/runs/
