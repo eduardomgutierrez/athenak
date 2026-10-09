@@ -216,18 +216,18 @@ Radiation::Radiation(MeshBlockPack *ppack, ParameterInput *pin) :
     // flag for frequency fluxes
     freq_fluxes = pin->GetOrAddBoolean("radiation","freq_fluxes",true);
 #if ENABLE_NURATES
-    // Frequency advection closes the bottom of the grid by assuming no flux through
-    // freq_grid(0) -- exact for photons, where that edge is nu = 0, but on the neutrino
-    // grid it is nu_min, so the assumption turns the lowest bin into a reservoir.  The
-    // default here is true, so a run that simply omits the key would get that silently.
-    if (use_nurates && freq_fluxes) {
-      std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+    // Frequency advection was written for the photon grid, whose edges are nu = 0 and an
+    // open top bin.  On the neutrino grid it still closes the bottom face at nu_min and
+    // the top face of the (finite) top bin, and takes the right state at the last
+    // interior face from a photon Planck tail.  The default here is true, so a run that
+    // simply omits the key gets that; say so.
+    if (use_nurates && freq_fluxes && global_variable::my_rank == 0) {
+      std::cout << "### WARNING in " << __FILE__ << " at line " << __LINE__
                 << std::endl
-                << "use_nurates with multi_freq requires <radiation>/freq_fluxes = false:"
-                << std::endl
-                << "the nu = 0 boundary it assumes does not exist on a neutrino grid"
-                << std::endl;
-      std::exit(EXIT_FAILURE);
+                << "<radiation>/freq_fluxes with use_nurates: the neutrino grid's edges "
+                << "are not yet treated" << std::endl
+                << "(closed at nu_min and at the top of the top bin, photon Planck tail "
+                << "at the last interior face)" << std::endl;
     }
 #endif
   } // endif (multi_freq)
