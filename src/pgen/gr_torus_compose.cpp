@@ -48,6 +48,9 @@
 #include "radiation/radiation.hpp"
 #include "dyn_grmhd/dyn_grmhd.hpp"
 #include "utils/tr_table.hpp"
+#if ENABLE_NURATES
+#include "radiation/radiation_nurates.hpp"
+#endif
 
 #include <Kokkos_Random.hpp>
 
@@ -642,6 +645,205 @@ static void SyncTorusUnitsWithEOS(ParameterInput *pin, MeshBlockPack *pmbp) {
 }
 void TorusFluxes(HistoryData *pdata, Mesh *pm);
 
+#if ENABLE_NURATES
+//----------------------------------------------------------------------------------------
+//! \fn bool InTorus
+//! \brief The in_torus test of SetupTorus (FM 3.6, tilt included) on its own, for the
+//! neutrino seed.  It has to select exactly the cells SetupTorus fills with torus
+//! material, so keep the two in step.
+
+KOKKOS_INLINE_FUNCTION
+static bool InTorus(const torus_pgen &trs, Real x1v, Real x2v, Real x3v) {
+  Real r, theta, phi;
+  GetBoyerLindquistCoordinates(trs, x1v, x2v, x3v, &r, &theta, &phi);
+  Real sin_vartheta;
+  if (trs.psi != 0.0) {
+    Real x = sin(theta)*cos(phi);
+    Real y = sin(theta)*sin(phi);
+    Real z = cos(theta);
+    Real varx = trs.cos_psi*x - trs.sin_psi*z;
+    sin_vartheta = sqrt(SQR(varx) + SQR(y));
+  } else {
+    sin_vartheta = fabs(sin(theta));
+  }
+  if (r < trs.r_edge) return false;
+  return (LogHAux(trs, r, sin_vartheta) - trs.log_HAux_edge >= 0.0);
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void SeedTorusNeutrinosImpl
+//! \brief Fill the torus with neutrinos in equilibrium with the matter: per species, a
+//! Fermi-Dirac spectrum at the cell's temperature and beta-equilibrium chemical
+//! potential (mu_nue = mu_e + mu_p - mu_n, mu_nuebar = -mu_nue, mu_x = 0), isotropic in
+//! the fluid frame.  The matter is left as constructed; the atmosphere stays empty, and
+//! so does any torus cell colder than tmin: the torus is built at a fixed Ye, so its cold
+//! outer layers are far from beta equilibrium, and an equilibrium spectrum there is a
+//! degenerate antineutrino sea far larger than the matter can hold.
+//!
+//! The seed is the spectrum the source term relaxes to.  T and the chemical potentials
+//! come from the same EOS calls on the same primitives as CalcOpacityNurates, and each
+//! bin is NuratesEqSpectrumBin, the integral the predictor's Kirchhoff law pairs with
+//! kappa.  Ray a's lab bin [e_lo, e_hi] holds the comoving interval n0_cm*[e_lo, e_hi]
+//! (n0_cm = -u.n), so it gets that interval's equilibrium energy density J, stored as
+//! i0 = J/sfac with the source term's sfac = 4 pi n0_cm^4/(n^0 n_0).  The heavy-flavour
+//! fold for nspecies = 3 is NuratesEqSpectrumBin's own.
+
+template <class EOSPolicy, class ErrorPolicy>
+static void SeedTorusNeutrinosImpl(MeshBlockPack *pmbp, const torus_pgen &torus,
+                                   const Real tmin) {
+  auto &eos = static_cast<dyngr::DynGRMHDPS<EOSPolicy, ErrorPolicy> *>(pmbp->pdyngr)
+                  ->eos.ps.GetEOSMutable();
+  const Real mb = eos.GetBaryonMass();
+  auto code_units = eos.GetCodeUnitSystem();
+  auto eos_units = eos.GetEOSUnitSystem();
+  auto nurates_units = radiation::MakeNuratesUnitSystem();
+  const Real unit_num_dens = eos_units.NumberDensityConversion(nurates_units);
+  const Real unit_ene_dens = code_units.EnergyDensityConversion(nurates_units);
+
+  auto *prad = pmbp->prad;
+  const radiation::NuratesParams params = prad->nurates_params;
+  const int nang = prad->prgeo->nangles;
+  const int nfreq = prad->nfreq;
+  const int nspecies = prad->nspecies;
+  const int freq_scale = prad->flag_fscale;
+  auto freq_grid = prad->freq_grid;
+  auto nh_c = prad->nh_c;
+  auto tet_c = prad->tet_c;
+  auto tetcov_c = prad->tetcov_c;
+  auto norm_to_tet = prad->norm_to_tet;
+  auto i0 = prad->i0;
+  auto w0 = (pmbp->pmhd != nullptr) ? pmbp->pmhd->w0 : pmbp->phydro->w0;
+
+  auto &indcs = pmbp->pmesh->mb_indcs;
+  const int is = indcs.is, js = indcs.js, ks = indcs.ks;
+  const int nx1 = indcs.nx1, nx2 = indcs.nx2, nx3 = indcs.nx3;
+  const int nkji = nx3*nx2*nx1;
+  const int nji = nx2*nx1;
+  const int nmkji = pmbp->nmb_thispack*nkji;
+  auto &size = pmbp->pmb->mb_size;
+  const bool flat = pmbp->pcoord->coord_data.is_minkowski;
+  const Real spin = pmbp->pcoord->coord_data.bh_spin;
+  const torus_pgen trs = torus;
+
+  // Cells seeded, left empty below tmin, and left empty because the EOS lookup failed
+  Real nseed = 0.0, ncold = 0.0, nfail = 0.0;
+  Kokkos::parallel_reduce("pgen_torus_nu_seed",
+      Kokkos::RangePolicy<>(DevExeSpace(), 0, nmkji),
+  KOKKOS_LAMBDA(const int &idx, Real &l_nseed, Real &l_ncold, Real &l_nfail) {
+    int m = idx/nkji;
+    int k = (idx - m*nkji)/nji;
+    int j = (idx - m*nkji - k*nji)/nx1;
+    int i = (idx - m*nkji - k*nji - j*nx1) + is;
+    k += ks;
+    j += js;
+
+    Real &x1min = size.d_view(m).x1min;
+    Real &x1max = size.d_view(m).x1max;
+    Real &x2min = size.d_view(m).x2min;
+    Real &x2max = size.d_view(m).x2max;
+    Real &x3min = size.d_view(m).x3min;
+    Real &x3max = size.d_view(m).x3max;
+    Real x1v = CellCenterX(i-is, nx1, x1min, x1max);
+    Real x2v = CellCenterX(j-js, nx2, x2min, x2max);
+    Real x3v = CellCenterX(k-ks, nx3, x3min, x3max);
+    if (!InTorus(trs, x1v, x2v, x3v)) return;
+
+    // The matter state, exactly as CalcOpacityNurates reads it
+    Real rho = w0(m,IDN,k,j,i);
+    Real nb = rho/mb;
+    Real Ye = w0(m,IYF,k,j,i);
+    Real T = eos.GetTemperatureFromP(nb, w0(m,IPR,k,j,i), &Ye);
+    Real mu_b  = eos.GetBaryonChemicalPotential(nb, T, &Ye);
+    Real mu_q  = eos.GetChargeChemicalPotential(nb, T, &Ye);
+    Real mu_le = eos.GetElectronLeptonChemicalPotential(nb, T, &Ye);
+    Real mu_n = mu_b;
+    Real mu_p = mu_b + mu_q;
+    Real mu_e = mu_le - mu_q;
+    if (!(Kokkos::isfinite(T) && T > 0.0 && Kokkos::isfinite(mu_n) &&
+          Kokkos::isfinite(mu_p) && Kokkos::isfinite(mu_e))) {
+      l_nfail += 1.0;  // leave the cell empty
+      return;
+    }
+    if (T < tmin) {
+      l_ncold += 1.0;  // leave the cell empty
+      return;
+    }
+
+    // Fluid velocity in the tetrad frame, as the source term builds it
+    Real glower[4][4], gupper[4][4];
+    ComputeMetricAndInverse(x1v, x2v, x3v, flat, spin, glower, gupper);
+    Real uu1 = w0(m,IVX,k,j,i);
+    Real uu2 = w0(m,IVY,k,j,i);
+    Real uu3 = w0(m,IVZ,k,j,i);
+    Real q = glower[1][1]*uu1*uu1 + 2.0*glower[1][2]*uu1*uu2 + 2.0*glower[1][3]*uu1*uu3
+           + glower[2][2]*uu2*uu2 + 2.0*glower[2][3]*uu2*uu3 + glower[3][3]*uu3*uu3;
+    Real uu0 = sqrt(1.0 + q);
+    Real u_tet[4];
+    for (int d=0; d<4; ++d) {
+      u_tet[d] = (norm_to_tet(m,d,0,k,j,i)*uu0 + norm_to_tet(m,d,1,k,j,i)*uu1 +
+                  norm_to_tet(m,d,2,k,j,i)*uu2 + norm_to_tet(m,d,3,k,j,i)*uu3);
+    }
+    Real n0 = tet_c(m,0,0,k,j,i);
+
+    for (int n=0; n<nang; ++n) {
+      Real n_0 = 0.0;
+      for (int d=0; d<4; ++d) { n_0 += tetcov_c(m,d,0,k,j,i)*nh_c.d_view(n,d); }
+      Real n0_cm = (u_tet[0]*nh_c.d_view(n,0) - u_tet[1]*nh_c.d_view(n,1) -
+                    u_tet[2]*nh_c.d_view(n,2) - u_tet[3]*nh_c.d_view(n,3));
+      Real sfac = 4.0*M_PI*SQR(SQR(n0_cm))/(n0*n_0);
+      for (int ifr=0; ifr<nfreq; ++ifr) {
+        Real e_lo = 0.0, e_hi = 0.0;
+        radiation::FreqBinEdgesMeV(freq_grid, ifr, nfreq, freq_scale, e_lo, e_hi);
+        Real n_eq[4], J_eq[4];
+        radiation::NuratesEqSpectrumBin(n0_cm*e_lo, n0_cm*e_hi, T, mu_n, mu_p, mu_e,
+                                        params.quadrature, unit_num_dens,
+                                        unit_ene_dens, n_eq, J_eq, params);
+        for (int isp=0; isp<nspecies; ++isp) {
+          i0(m, (isp*nfreq + ifr)*nang + n, k, j, i) = J_eq[isp]/sfac;
+        }
+      }
+    }
+    l_nseed += 1.0;
+  }, Kokkos::Sum<Real>(nseed), Kokkos::Sum<Real>(ncold), Kokkos::Sum<Real>(nfail));
+
+#if MPI_PARALLEL_ENABLED
+  Real sums[3] = {nseed, ncold, nfail};
+  MPI_Allreduce(MPI_IN_PLACE, sums, 3, MPI_ATHENA_REAL, MPI_SUM, MPI_COMM_WORLD);
+  nseed = sums[0];
+  ncold = sums[1];
+  nfail = sums[2];
+#endif
+  if (global_variable::my_rank == 0) {
+    std::cout << "Neutrino seed: Fermi-Dirac in " << static_cast<long>(nseed)
+              << " torus cells; empty: " << static_cast<long>(ncold) << " below T = "
+              << tmin << " MeV, " << static_cast<long>(nfail) << " EOS lookup failures"
+              << std::endl;
+  }
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void SeedTorusNeutrinos
+//! \brief Dispatch SeedTorusNeutrinosImpl on the CompOSE EOS the run evolves with.
+
+static void SeedTorusNeutrinos(MeshBlockPack *pmbp, const torus_pgen &torus,
+                               const Real tmin) {
+  using NQTPolicy = Primitive::EOSCompOSE<Primitive::NQTLogs>;
+  using LogPolicy = Primitive::EOSCompOSE<Primitive::NormalLogs>;
+  if (dynamic_cast<dyngr::DynGRMHDPS<NQTPolicy, Primitive::ResetFloor> *>(pmbp->pdyngr)
+      != nullptr) {
+    SeedTorusNeutrinosImpl<NQTPolicy, Primitive::ResetFloor>(pmbp, torus, tmin);
+  } else if (dynamic_cast<dyngr::DynGRMHDPS<LogPolicy, Primitive::ResetFloor> *>(
+                 pmbp->pdyngr) != nullptr) {
+    SeedTorusNeutrinosImpl<LogPolicy, Primitive::ResetFloor>(pmbp, torus, tmin);
+  } else {
+    std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
+              << "The torus neutrino seed needs DynGRMHD with a CompOSE EOS and "
+              << "reset_floor errors" << std::endl;
+    exit(EXIT_FAILURE);
+  }
+}
+#endif  // ENABLE_NURATES
+
 template<class TorusEOS>
 void SetupTorus(ParameterInput* pin, Mesh* pmy_mesh_, torus_pgen& torus) {
   MeshBlockPack* pmbp = pmy_mesh_->pmb_pack;
@@ -696,7 +898,8 @@ void SetupTorus(ParameterInput* pin, Mesh* pmy_mesh_, torus_pgen& torus) {
   DvceArray6D<Real> norm_to_tet_, tet_c_, tetcov_c_;
   DvceArray5D<Real> i0_;
   // Photons get the original blackbody seed (and radiation pressure in the equilibrium);
-  // neutrinos start empty.
+  // neutrinos get a Fermi-Dirac seed in the torus only (SeedTorusNeutrinos), added on
+  // top of the matter.
   bool photon_rad_ = false;
   if (is_radiation_enabled) {
     nangles_ = pmbp->prad->prgeo->nangles;
@@ -880,7 +1083,7 @@ void SetupTorus(ParameterInput* pin, Mesh* pmy_mesh_, torus_pgen& torus) {
     }
 
     // Set coordinate frame intensity: a blackbody at the gas temperature for photons,
-    // zero for neutrinos
+    // zero for neutrinos (SeedTorusNeutrinos fills the torus cells below)
     if (photon_rad_) {
       Real q = glower[1][1]*uu1*uu1 + 2.0*glower[1][2]*uu1*uu2 + 2.0*glower[1][3]*uu1*uu3
              + glower[2][2]*uu2*uu2 + 2.0*glower[2][3]*uu2*uu3
@@ -926,6 +1129,19 @@ void SetupTorus(ParameterInput* pin, Mesh* pmy_mesh_, torus_pgen& torus) {
     if (photon_rad_) ptot += urad/3.0;
     max_ptot = fmax(ptot, max_ptot);
   }, Kokkos::Max<Real>(ptotmax));
+
+  // Neutrinos: a comoving-isotropic Fermi-Dirac seed in the torus cells with
+  // T >= problem/nu_seed_tmin (MeV), in equilibrium with the matter just set; the rest
+  // stays empty.  problem/nu_seed = false starts the whole domain empty instead.
+#if ENABLE_NURATES
+  if constexpr (use_ye) {
+    if (is_radiation_enabled && !photon_rad_ &&
+        pin->GetOrAddBoolean("problem", "nu_seed", true)) {
+      SeedTorusNeutrinos(pmbp, torus,
+                         pin->GetOrAddReal("problem", "nu_seed_tmin", 1.0));
+    }
+  }
+#endif
 
   // initialize ADM variables -----------------------------------------
   if (pmbp->padm != nullptr) {
