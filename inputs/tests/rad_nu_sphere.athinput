@@ -1,0 +1,117 @@
+# AthenaK input: homogeneous neutrino-emitting sphere at NDAF conditions, flat space,
+# frozen matter, multifrequency Boltzmann transport with bns_nurates rates.
+# Pgen src/pgen/rad_nu_sphere.cpp.  With absorption and emission only and the predictor off,
+# every bin has an exact steady luminosity, which the pgen writes to sphere_analytic.txt
+# (Smit et al. 1997; Abdikamalov et al. 2012).
+#
+# Build:  cmake -B build-sph -D Athena_ENABLE_NURATES=ON -D PROBLEM=rad_nu_sphere [+ CUDA]
+# Run:    athena -i inputs/tests/rad_nu_sphere.athinput mhd/table=<SFHo.athtable>
+# Units:  default code units (G = c = Msun = 1): length 1.477 km, rho 6.177e17 g/cc.
+#         The sphere: rho = 1e11 g/cc, T = 4 MeV, Ye = 0.2, R = 8 (11.8 km).
+
+<comment>
+problem = homogeneous NDAF neutrino sphere
+
+<job>
+basename = nu_sphere
+
+<mesh>
+nghost = 2
+nx1    = 40
+x1min  = -16.0
+x1max  = 16.0
+ix1_bc = outflow
+ox1_bc = outflow
+
+nx2    = 40
+x2min  = -16.0
+x2max  = 16.0
+ix2_bc = outflow
+ox2_bc = outflow
+
+nx3    = 40
+x3min  = -16.0
+x3max  = 16.0
+ix3_bc = outflow
+ox3_bc = outflow
+
+<meshblock>
+nx1 = 40              # one meshblock: vis/python/radnu_read.py reads only that layout
+nx2 = 40
+nx3 = 40
+
+<time>
+evolution  = dynamic
+integrator = rk2
+cfl_number = 0.4
+nlim       = -1
+tlim       = 150.0
+ndiag      = 50
+
+<adm>
+
+<coord>
+minkowski  = true
+
+<mhd>
+eos         = ideal
+gamma       = 2.0
+nscalars    = 1
+dyn_eos     = compose
+table       = SFHo.athtab   # override on the command line
+dyn_error   = reset_floor
+reconstruct = dc
+rsolver     = hlle
+dfloor      = 1.0e-20
+dthreshold  = 1.02
+dyn_scratch = 1
+fofc        = false
+enforce_maximum = false
+fixed       = true          # frozen matter: the sphere is a steady source
+
+<radiation>
+nlevel         = 1          # 12 angles; 2 gives 42
+radiation_type = neutrino
+nspecies       = 3
+use_nurates    = true
+affect_fluid   = true
+evolve_ye      = true
+multi_freq     = true
+nfreq          = 12         # static matter: no Doppler, so the nfreq >= 24 rule does not apply
+nu_min         = 1.0
+nu_max         = 100.0
+freq_scale     = log
+freq_fluxes    = false
+
+<bns_nurates>
+use_abs_em          = true
+use_iso             = false   # no scattering
+use_pair            = false
+use_brem            = false
+use_inelastic_scatt = false
+use_WM_ab           = false
+use_WM_sc           = false
+use_NN_medium_corr  = false
+use_dU              = false
+use_dm_eff          = false
+use_decay           = false
+use_equilibrium_distribution = true
+use_partial_equilibrium = false   # constant eta and kappa per bin: the analytic case
+
+<problem>
+radius   = 8.0
+rho_in   = 1.619e-7     # 1e11 g/cc
+temp_in  = 4.0          # MeV
+ye_in    = 0.2
+rho_out  = 1.619e-12    # 1e6 g/cc
+temp_out = 0.1          # MeV (table floor)
+
+<output1>
+file_type = bin
+variable  = radnu_coord
+dt        = 10.0
+
+<output2>
+file_type = bin
+variable  = rad_coord
+dt        = 10.0
