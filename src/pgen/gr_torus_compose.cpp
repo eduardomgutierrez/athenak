@@ -33,6 +33,7 @@
 #include <vector>
 
 #include "athena.hpp"
+#include "globals.hpp"
 #include "parameter_input.hpp"
 #include "mesh/mesh.hpp"
 #include "coordinates/adm.hpp"
@@ -51,16 +52,6 @@
 #include <Kokkos_Random.hpp>
 
 // prototypes for functions used internally to this pgen
-
-// Unit conversion constants (defined once, used globally)
-namespace {
-constexpr Real G_cgs = 6.67e-8;       // gravitational constant in CGS
-constexpr Real c_cgs = 2.998e10;      // speed of light in CGS
-constexpr Real M_sun = 1.988e33;      // solar mass in grams
-constexpr Real M_u = M_sun;
-constexpr Real L_u = G_cgs * M_u / (c_cgs * c_cgs);  // length unit
-constexpr Real rho_u = M_u / (L_u * L_u * L_u);      // density unit: geometric -> CGS
-}
 
 // Useful container for physical parameters of torus
 struct torus_pgen {
@@ -90,6 +81,7 @@ struct torus_pgen {
   Real eos_log_rho_min;                       // minimum log(rho) in EOS table
 
   Real M_Msun;                                // mass unit in solar masses, for EOS table unit conversion
+  Real rho_code_to_cgs;                       // code density -> g/cm^3 for mass unit M_Msun
   Real W_edge;
 
   // Parameters for analytic s(rho) function: s = s_0 - s_bar * arctan(rho/rho_0_s) for small rho
@@ -279,7 +271,6 @@ class TabulatedEOS {
   explicit TabulatedEOS(ParameterInput* pin) {
     fname = pin->GetString("problem", "table");
     Real M_Msun = pin->GetOrAddReal("problem", "M_Msun", 1.0);
-    std::cout << "Converting table to geometric units with M_Msun = " << M_Msun << std::endl;
 
     Primitive::UnitSystem unit_geo = Primitive::MakeGeometricMass(M_Msun);
     Primitive::UnitSystem unit_nuc = Primitive::MakeNuclear();
@@ -394,11 +385,6 @@ class TabulatedEOS {
     //   }
     // }
 
-    std::cout << "Loaded table " << fname << std::endl
-              << "  rho = [" << exp(lrho_min) << ", " << exp(lrho_max) << "]" << std::endl
-              << "  T = [" << exp(lt_min) << ", " << exp(lt_max) << "]" << std::endl
-              << "  Yq = [" << yq_min << ", " << yq_max << "]" << std::endl;
-    
     // Sync the views to the GPU
     m_log_rho.template modify<HostMemSpace>();
     m_log_p.template modify<HostMemSpace>();
@@ -599,6 +585,61 @@ class TabulatedEOS {
 
 // Prototypes for user-defined BCs and history functions
 void NoInflowTorus(Mesh *pm);
+
+//----------------------------------------------------------------------------------------
+//! \fn SyncTorusUnitsWithEOS
+//! \brief The torus is built from the pgen's own copy of the table (problem/table,
+//! converted with problem/M_Msun), but evolved by the DynGRMHD EOS (mhd/table in the
+//! units set by mhd/units). Default the problem parameters to the EOS ones, and stop if
+//! they were set to something else: a mismatched mass unit rescales every density by M^2.
+
+static void SyncTorusUnitsWithEOS(ParameterInput *pin, MeshBlockPack *pmbp) {
+  Primitive::UnitSystem code_units{};
+  bool found_code_units = false;
+  auto *pnqt = dynamic_cast<dyngr::DynGRMHDPS<Primitive::EOSCompOSE<Primitive::NQTLogs>,
+                                              Primitive::ResetFloor> *>(pmbp->pdyngr);
+  if (pnqt != nullptr) {
+    code_units = pnqt->eos.ps.GetEOSMutable().GetCodeUnitSystem();
+    found_code_units = true;
+  }
+  auto *plog = dynamic_cast<dyngr::DynGRMHDPS<Primitive::EOSCompOSE<Primitive::NormalLogs>,
+                                              Primitive::ResetFloor> *>(pmbp->pdyngr);
+  if (plog != nullptr) {
+    code_units = plog->eos.ps.GetEOSMutable().GetCodeUnitSystem();
+    found_code_units = true;
+  }
+  if (!found_code_units || code_units.G != 1.0 || code_units.c != 1.0) {
+    std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
+              << "Tabulated torus needs a CompOSE EOS in geometric code units "
+              << "(mhd/units = geometric_solar or geometric_mass)" << std::endl;
+    exit(EXIT_FAILURE);
+  }
+
+  // Code mass unit in solar masses
+  Real M_eos = 1.0/Primitive::MakeGeometricSolar().MassConversion(code_units);
+  if (pin->DoesParameterExist("problem", "M_Msun")) {
+    Real M_in = pin->GetReal("problem", "M_Msun");
+    if (fabs(M_in - M_eos) > 1.0e-6*M_eos) {
+      std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+                << std::endl << "problem/M_Msun = " << M_in << " but the EOS code mass "
+                << "unit is " << M_eos << " Msun. Set mhd/units = geometric_mass and "
+                << "mhd/M_Msun to the black-hole mass, or drop problem/M_Msun."
+                << std::endl;
+      exit(EXIT_FAILURE);
+    }
+  } else {
+    pin->SetReal("problem", "M_Msun", M_eos);
+  }
+
+  std::string eos_table = pin->GetString("mhd", "table");
+  if (!pin->DoesParameterExist("problem", "table")) {
+    pin->SetString("problem", "table", eos_table);
+  } else if (pin->GetString("problem", "table") != eos_table &&
+             global_variable::my_rank == 0) {
+    std::cout << "WARNING: problem/table differs from mhd/table; the torus is built "
+              << "from a different table than the one it is evolved with" << std::endl;
+  }
+}
 void TorusFluxes(HistoryData *pdata, Mesh *pm);
 
 template<class TorusEOS>
@@ -648,12 +689,15 @@ void SetupTorus(ParameterInput* pin, Mesh* pmy_mesh_, torus_pgen& torus) {
   const bool is_radiation_enabled = (pmbp->prad != nullptr);
   bool use_dyngr = (pmbp->pdyngr != nullptr);
   // Extract radiation parameters if enabled
-  int nangles_;
-  int nfreq_;
-  int nrad_;
+  int nangles_ = 0;
+  int nfreq_ = 1;
+  int nrad_ = 0;
   DualArray2D<Real> nh_c_;
   DvceArray6D<Real> norm_to_tet_, tet_c_, tetcov_c_;
   DvceArray5D<Real> i0_;
+  // Photons get the original blackbody seed (and radiation pressure in the equilibrium);
+  // neutrinos start empty.
+  bool photon_rad_ = false;
   if (is_radiation_enabled) {
     nangles_ = pmbp->prad->prgeo->nangles;
     nfreq_ = pmbp->prad->nfreq;
@@ -663,6 +707,7 @@ void SetupTorus(ParameterInput* pin, Mesh* pmy_mesh_, torus_pgen& torus) {
     tet_c_ = pmbp->prad->tet_c;
     tetcov_c_ = pmbp->prad->tetcov_c;
     i0_ = pmbp->prad->i0;
+    photon_rad_ = !pmbp->prad->use_nurates;
   }
 
   auto &size = pmbp->pmb->mb_size;
@@ -683,8 +728,6 @@ void SetupTorus(ParameterInput* pin, Mesh* pmy_mesh_, torus_pgen& torus) {
     eos_policy = pmbp->pdyngr->eos_policy;
   }
 
-  std::cout << "rho_peak = " << trs.rho_peak << std::endl;
-  std::cout << "h_peak = " << exp(trs.log_h_peak) << std::endl;
   Kokkos::parallel_reduce("pgen_torus1", Kokkos::RangePolicy<>(DevExeSpace(), 0, nmkji),
   KOKKOS_LAMBDA(const int &idx, Real &max_ptot) {
     // compute m,k,j,i indices of thread and call function
@@ -774,7 +817,6 @@ void SetupTorus(ParameterInput* pin, Mesh* pmy_mesh_, torus_pgen& torus) {
     Real uu2 = 0.0;
     Real uu3 = 0.0;
     Real urad = 0.0;
-
     Real perturbation = 0.0;
     Real ye = 0.5;
     // Overwrite primitives inside torus
@@ -785,16 +827,15 @@ void SetupTorus(ParameterInput* pin, Mesh* pmy_mesh_, torus_pgen& torus) {
       rand_pool64.free_state(rand_gen);        // free state for use by other threads
 
       // Calculate thermodynamic variables
-
       if (eos_policy == DynGRMHD_EOS::eos_ideal) {
         Real ptot_over_rho = gm1/trs.gamma_adi * (exp(log_h) - 1.0);
         rho = pow(ptot_over_rho, 1.0/gm1) / trs.rho_peak;
         Real temp = ptot_over_rho;
-        if (is_radiation_enabled) temp = CalculateT(trs, rho, ptot_over_rho);
+        if (photon_rad_) temp = CalculateT(trs, rho, ptot_over_rho);
         pgas = temp * rho;
 
-        // Calculate radiation variables (if radiation enabled)
-        if (is_radiation_enabled) urad = trs.arad * SQR(SQR(temp));
+        // Calculate radiation variables (photon radiation only)
+        if (photon_rad_) urad = trs.arad * SQR(SQR(temp));
       } else if (eos_policy == DynGRMHD_EOS::eos_compose) {
         rho = GetRhoFromW(trs, log_h);
         pgas = GetPressureFromRho(trs, rho);
@@ -838,8 +879,9 @@ void SetupTorus(ParameterInput* pin, Mesh* pmy_mesh_, torus_pgen& torus) {
       w0_(m,nvars_local,k,j,i) = ye;
     }
 
-    // Set coordinate frame intensity (if radiation enabled)
-    if (is_radiation_enabled) {
+    // Set coordinate frame intensity: a blackbody at the gas temperature for photons,
+    // zero for neutrinos
+    if (photon_rad_) {
       Real q = glower[1][1]*uu1*uu1 + 2.0*glower[1][2]*uu1*uu2 + 2.0*glower[1][3]*uu1*uu3
              + glower[2][2]*uu2*uu2 + 2.0*glower[2][3]*uu2*uu3
              + glower[3][3]*uu3*uu3;
@@ -868,6 +910,10 @@ void SetupTorus(ParameterInput* pin, Mesh* pmy_mesh_, torus_pgen& torus) {
         for (int d=0; d<4; ++d) {  n_0 += tetcov_c_(m,d,0,k,j,i)*nh_c_.d_view(n,d);  }
         i0_(m,nn,k,j,i) = n0*n_0*(urad_freq/(4.0*M_PI))/SQR(SQR(n0_f));
       }
+    } else if (is_radiation_enabled) {
+      for (int nn=0; nn<nrad_; ++nn) {
+        i0_(m,nn,k,j,i) = 0.0;
+      }
     }
 
     // Compute total pressure (equal to gas pressure in non-radiating runs)
@@ -877,7 +923,7 @@ void SetupTorus(ParameterInput* pin, Mesh* pmy_mesh_, torus_pgen& torus) {
     } else {
       ptot = w0_(m,IPR,k,j,i);
     }
-    if (is_radiation_enabled) ptot += urad/3.0;
+    if (photon_rad_) ptot += urad/3.0;
     max_ptot = fmax(ptot, max_ptot);
   }, Kokkos::Max<Real>(ptotmax));
 
@@ -887,6 +933,7 @@ void SetupTorus(ParameterInput* pin, Mesh* pmy_mesh_, torus_pgen& torus) {
   }
 
   // Compute torus mass and max rho, T, p -----------------------------
+  // max_rho also normalizes the vector potential for the tabulated EOS (see below).
   Real torus_mass = 0.0;
   Real max_rho = 0.0;
   Real max_T = 0.0;
@@ -895,6 +942,7 @@ void SetupTorus(ParameterInput* pin, Mesh* pmy_mesh_, torus_pgen& torus) {
   Real bh_spin_ = coord.bh_spin;
   bool use_dyngr_ = use_dyngr;
   Real gm1_ = gm1;
+  const bool use_tab_eos_ = use_ye;  // plain capture: CUDA lambdas reject constexpr-if
   Kokkos::parallel_reduce("torus_mass",
       Kokkos::RangePolicy<>(DevExeSpace(), 0, nmkji),
   KOKKOS_LAMBDA(const int &idx, Real& mass_sum,
@@ -925,11 +973,10 @@ void SetupTorus(ParameterInput* pin, Mesh* pmy_mesh_, torus_pgen& torus) {
     ComputeMetricAndInverse(x1v, x2v, x3v, is_minkowski_, bh_spin_,
                             glower, gupper);
     
-    // Compute sqrt(gamma) = sqrt(det(3-metric))
-    // For Cartesian KS: sqrt(-g) / alpha = sqrt(gamma), and det(g_4d) = -1
-    Real sqrt_gamma = std::sqrt(adm::SpatialDet(adm.g_dd(m,0,0,k,j,i), adm.g_dd(m,0,1,k,j,i),
-                                      adm.g_dd(m,0,2,k,j,i), adm.g_dd(m,1,1,k,j,i),
-                                      adm.g_dd(m,1,2,k,j,i), adm.g_dd(m,2,2,k,j,i)));
+    // Compute sqrt(gamma) = sqrt(det(3-metric)) from the analytic metric, which does
+    // not need the ADM arrays (absent without DynGR).
+    Real sqrt_gamma = std::sqrt(adm::SpatialDet(glower[1][1], glower[1][2], glower[1][3],
+                                                glower[2][2], glower[2][3], glower[3][3]));
     
     Real rho = w0_(m,IDN,k,j,i);
     Real p;
@@ -938,7 +985,10 @@ void SetupTorus(ParameterInput* pin, Mesh* pmy_mesh_, torus_pgen& torus) {
     } else {
       p = w0_(m,IPR,k,j,i);
     }
-    Real T = GetTemperatureFromRho(trs, rho);
+    Real T = 0.0;  // the temperature table only exists for the tabulated EOS
+    if (use_tab_eos_) {
+      T = GetTemperatureFromRho(trs, rho);
+    }
 
     mass_sum += rho * sqrt_gamma * dV;
     lmax_rho = fmax(rho, lmax_rho);
@@ -957,10 +1007,12 @@ void SetupTorus(ParameterInput* pin, Mesh* pmy_mesh_, torus_pgen& torus) {
   max_T   = global_max[1];
   max_p   = global_max[2];
 #endif
-  std::cout << "Torus mass [M_sun] = " << torus_mass * trs.M_Msun << std::endl;
-  std::cout << "Max rho    = " << max_rho << std::endl;
-  std::cout << "Max T      = " << max_T << std::endl;
-  std::cout << "Max p      = " << max_p << std::endl;
+  if (global_variable::my_rank == 0) {
+    std::cout << "Torus mass [M_sun] = " << torus_mass * trs.M_Msun << std::endl;
+    std::cout << "Max rho    = " << max_rho << std::endl;
+    std::cout << "Max T      = " << max_T << std::endl;
+    std::cout << "Max p      = " << max_p << std::endl;
+  }
 
   // initialize magnetic fields ---------------------------------------
 
@@ -1399,7 +1451,13 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   torus.prograde = pin->GetOrAddBoolean("problem","prograde",true);
   torus.fm_torus = pin->GetOrAddBoolean("problem", "fm_torus", false);
   torus.chakrabarti_torus = pin->GetOrAddBoolean("problem", "chakrabarti_torus", false);
+  if (pmbp->pdyngr != nullptr &&
+      pmbp->pdyngr->eos_policy == DynGRMHD_EOS::eos_compose) {
+    SyncTorusUnitsWithEOS(pin, pmbp);
+  }
   torus.M_Msun = pin->GetOrAddReal("problem", "M_Msun", 1.0);
+  torus.rho_code_to_cgs =
+      Primitive::MakeGeometricMass(torus.M_Msun).MassDensityConversion(Primitive::MakeCGS());
 
   // Parameters for analytic s(rho) function
   // s(rho) = s_0_param - s_bar * arctan(rho/rho_0_s) for rho <= rho_star
@@ -2095,7 +2153,7 @@ Real GetTemperatureFromRho(struct torus_pgen torus, Real rho) {
 // Ye = Ye_0_param - Ye_bar * arctan(rho_cgs / rho_0_Ye)
 KOKKOS_INLINE_FUNCTION
 Real GetYe(struct torus_pgen pgen, Real rho) {
-  Real rho_cgs = rho * rho_u / SQR(pgen.M_Msun);
+  Real rho_cgs = rho * pgen.rho_code_to_cgs;
   return pgen.Ye_0_param - pgen.Ye_bar * atan(rho_cgs / pgen.rho_0_Ye);
 }
 
@@ -2105,7 +2163,7 @@ Real GetYe(struct torus_pgen pgen, Real rho) {
 // s = s_transition - s_bar * log(rho_cgs / rho_star) / var for rho_cgs > rho_star
 KOKKOS_INLINE_FUNCTION
 Real GetEntropy(struct torus_pgen pgen, Real rho) {
-  Real rho_cgs = rho * rho_u / SQR(pgen.M_Msun);
+  Real rho_cgs = rho * pgen.rho_code_to_cgs;
 
   Real s_1 = pgen.s_0_param - pgen.s_bar * atan(rho_cgs / pgen.rho_0_s);
   if (rho_cgs <= pgen.rho_star) {
@@ -2120,70 +2178,37 @@ Real GetEntropy(struct torus_pgen pgen, Real rho) {
 
 KOKKOS_INLINE_FUNCTION
 Real GetRhoFromW(struct torus_pgen torus, Real RHS) {
-
-  auto f = [=](int it){
-    Real var_pt = torus.W(it) - torus.W_edge;
-    return RHS - var_pt;
-  };
-
-  // Find the bracket by scanning through all points
-  // to find where f changes sign (i.e., where lh crosses the target)
-  int ilo = -1;
-  int ihi = -1;
-  Real flo = 0.0;
-  Real fhi = 0.0;
-  Real f_prev = f(0);
-  for (int it = 1; it < torus.npoints; ++it) {
-    Real f_curr = f(it);
-    if (f_prev * f_curr <= 0) {
-      // Found a sign change - this brackets the root
-      ilo = it - 1;
-      ihi = it;
-      flo = f_prev;
-      fhi = f_curr;
-      break;
-    }
-    f_prev = f_curr;
+  Real target = RHS + torus.W_edge;
+  if (target <= torus.W(0)) {
+    return exp(torus.lrho(0));
+  }
+  if (target >= torus.W(torus.npoints - 1)) {
+    return exp(torus.lrho(torus.npoints - 1));
   }
 
-  // If no bracket found, extrapolate from the boundary
-  if (ilo < 0) {
-    Real f0 = f(0);
-    Real fn = f(torus.npoints - 1);
-    if (fabs(f0) < fabs(fn)) {
-      // Target is below the table - return lowest rho
-      return exp(torus.lrho(0));
+  int ilo = 0;
+  int ihi = torus.npoints - 1;
+  while (ihi - ilo > 1) {
+    int imid = ilo + (ihi - ilo)/2;
+    if (torus.W(imid) <= target) {
+      ilo = imid;
     } else {
-      // Target is above the table - return highest rho
-      return exp(torus.lrho(torus.npoints - 1));
+      ihi = imid;
     }
   }
 
-  // We already have adjacent indices (ihi = ilo + 1)
-  Real lrhohi = torus.lrho(ihi);
-  Real lrholo = torus.lrho(ilo);
-
-  if (flo == 0) {
-    return exp(lrholo);
-  }
-  if (fhi == 0) {
-    return exp(lrhohi);
-  }
-
-  Real lrho = lrholo - flo*(lrhohi - lrholo)/(fhi - flo);
+  Real lrho = Interpolate(target, torus.W(ilo), torus.W(ihi),
+                          torus.lrho(ilo), torus.lrho(ihi));
   return exp(lrho);
 }
 
 // Construct a Torus object by evaluating the EOS on a grid of points in log(rho) space.  This is used for interpolation when setting the initial conditions in the torus.
 template<class TorusEOS>
 static void ConstructTorus(torus_pgen& torus, TorusEOS& eos) {
-  std::cout << "ConstructTorus: entering..." << std::flush << std::endl;
 
   if constexpr (std::is_same<TorusEOS, TabulatedEOS>::value) {
-    std::cout << "ConstructTorus: using TabulatedEOS" << std::flush << std::endl;
     torus.use_tabulated_eos = true;
     torus.npoints = eos.template GetNpoints<LocationTag::Host>();
-    std::cout << "ConstructTorus: npoints = " << torus.npoints << std::flush << std::endl;
 
     // Use local DualArrays for host-side construction; only d_views stored in struct
     // to keep the struct lightweight for device kernel captures (important for SYCL).
@@ -2205,24 +2230,24 @@ static void ConstructTorus(torus_pgen& torus, TorusEOS& eos) {
     Real delta_log_rho = eos.template GetDeltaLogRho<LocationTag::Host>();
     torus.eos_log_rho_min = log_rho_min;
     torus.delta_log_rho = delta_log_rho;
-    std::cout << "ConstructTorus: log_rho_min = " << log_rho_min 
-              << ", delta_log_rho = " << delta_log_rho << std::flush << std::endl;
-    for (int i = 0; i < torus.npoints; i++) {
-      lrho(i) = log_rho_min + i * delta_log_rho;
-      Real rho_ = exp(lrho(i));
-      Real s_val = GetEntropy(torus, rho_);
-      Real Ye_val = GetYe(torus, rho_);
-      lye(i) = Ye_val;
-      ls(i) = log(s_val);
-      lt(i) = log(eos.template GetTemperatureFromS<LocationTag::Host>(log(s_val), rho_, Ye_val));
-      le(i) = log(eos.template GetEnergyDensity<LocationTag::Host>(rho_, exp(lt(i)), Ye_val));
-      lp(i) = log(eos.template GetPressure<LocationTag::Host>(rho_, exp(lt(i)), Ye_val));
-      if (i % 50 == 0) {
-        std::cout << "  i=" << i << " lrho=" << lrho(i) << " lt=" << lt(i) 
-                  << " le=" << le(i) << " lp=" << lp(i) << std::flush << std::endl;
-      }
-    }
-    std::cout << "ConstructTorus: loop done" << std::flush << std::endl;
+    auto torus_in = torus;
+    Kokkos::parallel_for("construct_torus_eos",
+      Kokkos::RangePolicy<Kokkos::DefaultHostExecutionSpace>(0, torus.npoints),
+      [=, &eos](const int i) {
+        lrho(i) = log_rho_min + i * delta_log_rho;
+        Real rho_ = exp(lrho(i));
+        Real s_val = GetEntropy(torus_in, rho_);
+        Real Ye_val = GetYe(torus_in, rho_);
+        lye(i) = Ye_val;
+        ls(i) = log(s_val);
+        lt(i) = log(eos.template GetTemperatureFromS<LocationTag::Host>(
+                    log(s_val), rho_, Ye_val));
+        le(i) = log(eos.template GetEnergyDensity<LocationTag::Host>(
+                    rho_, exp(lt(i)), Ye_val));
+        lp(i) = log(eos.template GetPressure<LocationTag::Host>(
+                    rho_, exp(lt(i)), Ye_val));
+      });
+    Kokkos::DefaultHostExecutionSpace().fence();
 
     DualArray1D<Real> W_dual("W", torus.npoints);
     auto &W = W_dual.h_view;
@@ -2244,7 +2269,6 @@ static void ConstructTorus(torus_pgen& torus, TorusEOS& eos) {
       Real dlnp = lp(i) - lp(i-1);
       W(i) = W(i-1) + 0.5 * (f_i + f_im1) * dlnp;
     }
-    std::cout << "ConstructTorus: computed W, range = [" << W(0) << ", " << W(torus.npoints-1) << "]" << std::flush << std::endl;
 
     // Ensure lh is monotonically increasing (required for GetRhoFromW)
     // At low densities where target entropy isn't achievable, lh may be wrong
@@ -2271,7 +2295,6 @@ static void ConstructTorus(torus_pgen& torus, TorusEOS& eos) {
                        (lrho(first_valid+1) - lrho(first_valid));
         lp(i) = lp(i+1) - slope_p * (lrho(i+1) - lrho(i));
       }
-      std::cout << "  Extrapolated W and lp for i < " << first_valid << std::endl;
     }
 
     // Output torus arrays to file
@@ -2284,14 +2307,11 @@ static void ConstructTorus(torus_pgen& torus, TorusEOS& eos) {
                  << ls(i) << " " << le(i) << std::endl;
     }
     torus_file.close();
-    std::cout << "ConstructTorus: wrote torus_arrays.dat" << std::flush << std::endl;
 
     // Compute derived torus quantities while host views are still in scope
     Real gm1 = torus.gamma_adi - 1.0;
 
     torus.log_HAux_edge = LogHAux(torus, torus.r_edge, 1.0);
-    std::cout << "ConstructTorus: log_HAux_edge = " << torus.log_HAux_edge
-              << std::flush << std::endl;
 
     // find "outer edge" of torus (first place log_h > 0)
     Real ra = torus.r_peak;
@@ -2316,7 +2336,6 @@ static void ConstructTorus(torus_pgen& torus, TorusEOS& eos) {
       }
     }
     torus.r_outer_edge = ra;
-    std::cout << "Found torus outer edge: " << torus.r_outer_edge << std::endl;
 
     // Compute W_edge using host views
     {
@@ -2332,8 +2351,6 @@ static void ConstructTorus(torus_pgen& torus, TorusEOS& eos) {
         torus.W_edge = Interpolate(lrho_edge, lrho(lb), lrho(ub), W(lb), W(ub));
       }
     }
-    std::cout << "ConstructTorus: W_edge = " << torus.W_edge
-              << std::flush << std::endl;
 
     torus.log_h_peak = LogHAux(torus, torus.r_peak, 1.0) - torus.log_HAux_edge;
     torus.ptot_over_rho_peak = gm1/torus.gamma_adi * (exp(torus.log_h_peak)-1.0);
@@ -2394,14 +2411,25 @@ void NoInflowTorus(Mesh *pm) {
   int nmb = pm->pmb_pack->nmb_thispack;
   int nvar = u0_.extent_int(1);
 
+  // DynGRMHD recovers primitives in the boundary strips before calling the user BCs and
+  // rebuilds the conserved variables after (dyn_grmhd.cpp), so here only w0 is set. Its
+  // (M)HD EOS object is a no-op that aborts if called.
+  const bool use_dyngr = (pm->pmb_pack->pdyngr != nullptr);
+
   // Determine if radiation is enabled
   const bool is_radiation_enabled = (pm->pmb_pack->prad != nullptr);
-  DvceArray5D<Real> i0_; int nrad1;
+  DvceArray5D<Real> i0_; int nrad1; int nang;
+  DualArray2D<Real> nh_c_;
+  DvceArray5D<Real> t1d1, t2d2, t3d3;
   if (is_radiation_enabled) {
     i0_ = pm->pmb_pack->prad->i0;
+    nang = pm->pmb_pack->prad->prgeo->nangles;
     nrad1 = (pm->pmb_pack->prad->nspecies*
-             pm->pmb_pack->prad->nfreq*
-             pm->pmb_pack->prad->prgeo->nangles) - 1;
+             pm->pmb_pack->prad->nfreq*nang) - 1;
+    nh_c_ = pm->pmb_pack->prad->nh_c;
+    t1d1 = pm->pmb_pack->prad->tet_d1_x1f;
+    t2d2 = pm->pmb_pack->prad->tet_d2_x2f;
+    t3d3 = pm->pmb_pack->prad->tet_d3_x3f;
   }
 
   // X1-Boundary
@@ -2432,7 +2460,9 @@ void NoInflowTorus(Mesh *pm) {
   }
   // ConsToPrim over all X1 ghost zones *and* at the innermost/outermost X1-active zones
   // of Meshblocks, even if Meshblock face is not at the edge of computational domain
-  if (pm->pmb_pack->phydro != nullptr) {
+  if (use_dyngr) {
+    // primitives already recovered by DynGRMHD
+  } else if (pm->pmb_pack->phydro != nullptr) {
     pm->pmb_pack->phydro->peos->ConsToPrim(u0_,w0_,false,is-ng,is,0,(n2-1),0,(n3-1));
     pm->pmb_pack->phydro->peos->ConsToPrim(u0_,w0_,false,ie,ie+ng,0,(n2-1),0,(n3-1));
   } else if (pm->pmb_pack->pmhd != nullptr) {
@@ -2467,20 +2497,29 @@ void NoInflowTorus(Mesh *pm) {
     // Set X1-BCs on i0 if Meshblock face is at the edge of computational domain
     par_for("noinflow_rad_x1", DevExeSpace(),0,(nmb-1),0,nrad1,0,(n3-1),0,(n2-1),
     KOKKOS_LAMBDA(int m, int n, int k, int j) {
+      // Vacuum for rays entering the domain (n^1 at the boundary face, as used for
+      // upwinding in radiation_fluxes.cpp), outflow for rays leaving it
+      int iang = n % nang;
       if (mb_bcs.d_view(m,BoundaryFace::inner_x1) == BoundaryFlag::user) {
+        Real n1 = 0.0;
+        for (int a=0; a<4; ++a) { n1 += t1d1(m,a,k,j,is)*nh_c_.d_view(iang,a); }
         for (int i=0; i<ng; ++i) {
-          i0_(m,n,k,j,is-i-1) = i0_(m,n,k,j,is);
+          i0_(m,n,k,j,is-i-1) = (n1 > 0.0) ? 0.0 : i0_(m,n,k,j,is);
         }
       }
       if (mb_bcs.d_view(m,BoundaryFace::outer_x1) == BoundaryFlag::user) {
+        Real n1 = 0.0;
+        for (int a=0; a<4; ++a) { n1 += t1d1(m,a,k,j,ie+1)*nh_c_.d_view(iang,a); }
         for (int i=0; i<ng; ++i) {
-          i0_(m,n,k,j,ie+i+1) = i0_(m,n,k,j,ie);
+          i0_(m,n,k,j,ie+i+1) = (n1 < 0.0) ? 0.0 : i0_(m,n,k,j,ie);
         }
       }
     });
   }
   // PrimToCons on X1 ghost zones
-  if (pm->pmb_pack->phydro != nullptr) {
+  if (use_dyngr) {
+    // conserved variables rebuilt by DynGRMHD
+  } else if (pm->pmb_pack->phydro != nullptr) {
     pm->pmb_pack->phydro->peos->PrimToCons(w0_,u0_,is-ng,is-1,0,(n2-1),0,(n3-1));
     pm->pmb_pack->phydro->peos->PrimToCons(w0_,u0_,ie+1,ie+ng,0,(n2-1),0,(n3-1));
   } else if (pm->pmb_pack->pmhd != nullptr) {
@@ -2517,7 +2556,9 @@ void NoInflowTorus(Mesh *pm) {
   }
   // ConsToPrim over all X2 ghost zones *and* at the innermost/outermost X2-active zones
   // of Meshblocks, even if Meshblock face is not at the edge of computational domain
-  if (pm->pmb_pack->phydro != nullptr) {
+  if (use_dyngr) {
+    // primitives already recovered by DynGRMHD
+  } else if (pm->pmb_pack->phydro != nullptr) {
     pm->pmb_pack->phydro->peos->ConsToPrim(u0_,w0_,false,0,(n1-1),js-ng,js,0,(n3-1));
     pm->pmb_pack->phydro->peos->ConsToPrim(u0_,w0_,false,0,(n1-1),je,je+ng,0,(n3-1));
   } else if (pm->pmb_pack->pmhd != nullptr) {
@@ -2552,20 +2593,27 @@ void NoInflowTorus(Mesh *pm) {
     // Set X2-BCs on i0 if Meshblock face is at the edge of computational domain
     par_for("noinflow_rad_x2", DevExeSpace(),0,(nmb-1),0,nrad1,0,(n3-1),0,(n1-1),
     KOKKOS_LAMBDA(int m, int n, int k, int i) {
+      int iang = n % nang;  // vacuum for incoming rays, outflow for outgoing ones
       if (mb_bcs.d_view(m,BoundaryFace::inner_x2) == BoundaryFlag::user) {
+        Real n2 = 0.0;
+        for (int a=0; a<4; ++a) { n2 += t2d2(m,a,k,js,i)*nh_c_.d_view(iang,a); }
         for (int j=0; j<ng; ++j) {
-          i0_(m,n,k,js-j-1,i) = i0_(m,n,k,js,i);
+          i0_(m,n,k,js-j-1,i) = (n2 > 0.0) ? 0.0 : i0_(m,n,k,js,i);
         }
       }
       if (mb_bcs.d_view(m,BoundaryFace::outer_x2) == BoundaryFlag::user) {
+        Real n2 = 0.0;
+        for (int a=0; a<4; ++a) { n2 += t2d2(m,a,k,je+1,i)*nh_c_.d_view(iang,a); }
         for (int j=0; j<ng; ++j) {
-          i0_(m,n,k,je+j+1,i) = i0_(m,n,k,je,i);
+          i0_(m,n,k,je+j+1,i) = (n2 < 0.0) ? 0.0 : i0_(m,n,k,je,i);
         }
       }
     });
   }
   // PrimToCons on X2 ghost zones
-  if (pm->pmb_pack->phydro != nullptr) {
+  if (use_dyngr) {
+    // conserved variables rebuilt by DynGRMHD
+  } else if (pm->pmb_pack->phydro != nullptr) {
     pm->pmb_pack->phydro->peos->PrimToCons(w0_,u0_,0,(n1-1),js-ng,js-1,0,(n3-1));
     pm->pmb_pack->phydro->peos->PrimToCons(w0_,u0_,0,(n1-1),je+1,je+ng,0,(n3-1));
   } else if (pm->pmb_pack->pmhd != nullptr) {
@@ -2602,7 +2650,9 @@ void NoInflowTorus(Mesh *pm) {
   }
   // ConsToPrim over all X3 ghost zones *and* at the innermost/outermost X3-active zones
   // of Meshblocks, even if Meshblock face is not at the edge of computational domain
-  if (pm->pmb_pack->phydro != nullptr) {
+  if (use_dyngr) {
+    // primitives already recovered by DynGRMHD
+  } else if (pm->pmb_pack->phydro != nullptr) {
     pm->pmb_pack->phydro->peos->ConsToPrim(u0_,w0_,false,0,(n1-1),0,(n2-1),ks-ng,ks);
     pm->pmb_pack->phydro->peos->ConsToPrim(u0_,w0_,false,0,(n1-1),0,(n2-1),ke,ke+ng);
   } else if (pm->pmb_pack->pmhd != nullptr) {
@@ -2637,20 +2687,27 @@ void NoInflowTorus(Mesh *pm) {
     // Set X3-BCs on i0 if Meshblock face is at the edge of computational domain
     par_for("noinflow_rad_x3", DevExeSpace(),0,(nmb-1),0,nrad1,0,(n2-1),0,(n1-1),
     KOKKOS_LAMBDA(int m, int n, int j, int i) {
+      int iang = n % nang;  // vacuum for incoming rays, outflow for outgoing ones
       if (mb_bcs.d_view(m,BoundaryFace::inner_x3) == BoundaryFlag::user) {
+        Real n3 = 0.0;
+        for (int a=0; a<4; ++a) { n3 += t3d3(m,a,ks,j,i)*nh_c_.d_view(iang,a); }
         for (int k=0; k<ng; ++k) {
-          i0_(m,n,ks-k-1,j,i) = i0_(m,n,ks,j,i);
+          i0_(m,n,ks-k-1,j,i) = (n3 > 0.0) ? 0.0 : i0_(m,n,ks,j,i);
         }
       }
       if (mb_bcs.d_view(m,BoundaryFace::outer_x3) == BoundaryFlag::user) {
+        Real n3 = 0.0;
+        for (int a=0; a<4; ++a) { n3 += t3d3(m,a,ke+1,j,i)*nh_c_.d_view(iang,a); }
         for (int k=0; k<ng; ++k) {
-          i0_(m,n,ke+k+1,j,i) = i0_(m,n,ke,j,i);
+          i0_(m,n,ke+k+1,j,i) = (n3 < 0.0) ? 0.0 : i0_(m,n,ke,j,i);
         }
       }
     });
   }
   // PrimToCons on X3 ghost zones
-  if (pm->pmb_pack->phydro != nullptr) {
+  if (use_dyngr) {
+    // conserved variables rebuilt by DynGRMHD
+  } else if (pm->pmb_pack->phydro != nullptr) {
     pm->pmb_pack->phydro->peos->PrimToCons(w0_,u0_,0,(n1-1),0,(n2-1),ks-ng,ks-1);
     pm->pmb_pack->phydro->peos->PrimToCons(w0_,u0_,0,(n1-1),0,(n2-1),ke+1,ke+ng);
   } else if (pm->pmb_pack->pmhd != nullptr) {
