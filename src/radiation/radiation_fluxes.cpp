@@ -320,6 +320,14 @@ TaskStatus Radiation::CalculateFluxes(Driver *pdriver, int stage) {
 
     bool &is_hydro_enabled_ = is_hydro_enabled;
     bool &is_mhd_enabled_ = is_mhd_enabled;
+    // The fluid primitives as a view: dereferencing pmy_pack inside the device kernel
+    // reads host memory, which is an illegal address on GPUs.
+    DvceArray5D<Real> w0_;
+    if (is_hydro_enabled) {
+      w0_ = pmy_pack->phydro->w0;
+    } else if (is_mhd_enabled) {
+      w0_ = pmy_pack->pmhd->w0;
+    }
 
     Real &arad_ = arad;
     auto &divfa_ = divfa;
@@ -370,14 +378,10 @@ TaskStatus Radiation::CalculateFluxes(Driver *pdriver, int stage) {
 
       // normal velocities
       Real wvx=0, wvy=0, wvz=0;
-      if (is_hydro_enabled_) {
-        wvx = pmy_pack->phydro->w0(m,IVX,k,j,i);
-        wvy = pmy_pack->phydro->w0(m,IVY,k,j,i);
-        wvz = pmy_pack->phydro->w0(m,IVZ,k,j,i);
-      } else if (is_mhd_enabled_) {
-        wvx = pmy_pack->pmhd->w0(m,IVX,k,j,i);
-        wvy = pmy_pack->pmhd->w0(m,IVY,k,j,i);
-        wvz = pmy_pack->pmhd->w0(m,IVZ,k,j,i);
+      if (is_hydro_enabled_ || is_mhd_enabled_) {
+        wvx = w0_(m,IVX,k,j,i);
+        wvy = w0_(m,IVY,k,j,i);
+        wvz = w0_(m,IVZ,k,j,i);
       }
 
       // Lorentz factor
