@@ -1422,14 +1422,18 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   auto &grids = spherical_grids;
   const Real rflux =
     (is_radiation_enabled) ? ceil(r_excise + 1.0) : 1.0 + sqrt(1.0 - SQR(torus.spin));
-  grids.push_back(std::make_unique<SphericalGrid>(pmbp, 5, rflux));
-  grids.push_back(std::make_unique<SphericalGrid>(pmbp, 5, 12.0));
-  grids.push_back(std::make_unique<SphericalGrid>(pmbp, 5, 24.0));
-  grids.push_back(std::make_unique<SphericalGrid>(pmbp, 5, 50.0));
-  grids.push_back(std::make_unique<SphericalGrid>(pmbp, 5, 100.0));
-  grids.push_back(std::make_unique<SphericalGrid>(pmbp, 5, 200.0));
-  grids.push_back(std::make_unique<SphericalGrid>(pmbp, 5, 300.0));
-  grids.push_back(std::make_unique<SphericalGrid>(pmbp, 5, 400.0));
+  // Only spheres that fit inside the mesh: outside it the interpolation returns zeros.
+  auto &msize = pmy_mesh_->mesh_size;
+  const Real rbox = fmin(fmin(fmin(-msize.x1min, msize.x1max), fmin(-msize.x2min, msize.x2max)),
+                         fmin(-msize.x3min, msize.x3max));
+  for (Real rad : {rflux, 12.0, 24.0, 50.0, 100.0, 200.0, 300.0, 400.0}) {
+    if (rad < rbox) {
+      grids.push_back(std::make_unique<SphericalGrid>(pmbp, 5, rad));
+    } else if (global_variable::my_rank == 0) {
+      std::cout << "Torus history: skipping the flux sphere at r = " << rad
+                << " M, outside the mesh" << std::endl;
+    }
+  }
   user_hist_func = TorusFluxes;
 
   // return if restart
@@ -2813,12 +2817,27 @@ void TorusFluxes(HistoryData *pdata, Mesh *pm) {
       interpolated_bcc.template modify<DevExeSpace>();
       interpolated_bcc.template sync<HostMemSpace>();
     }
+    // The CompOSE energy needs the temperature, which DynGRMHD keeps with the primitives:
+    // interpolate it first (each call overwrites interp_vals) instead of inverting p(T),
+    // which fails on floor and atmosphere points.
+    const bool compose_ = (pmbp->pdyngr != nullptr &&
+                           eos_policy == DynGRMHD_EOS::eos_compose);
+    DvceArray1D<Real> dev_T;
+    if (compose_) {
+      int nang = grids[g]->nangles;
+      dev_T = DvceArray1D<Real>("dev_T", nang);
+      grids[g]->InterpolateToSphere(1, pmbp->pdyngr->temperature);
+      auto interp_t = grids[g]->interp_vals.d_view;
+      Kokkos::parallel_for("TorusFluxes_T", nang, KOKKOS_LAMBDA(const int idx) {
+        dev_T(idx) = interp_t(idx, 0);
+      });
+    }
     grids[g]->InterpolateToSphere(nvars, w0_);
 
     // Pre-compute internal energy on device for CompOSE EOS (table lives in device mem)
     HostArray1D<Real> host_int_ie("host_int_ie", grids[g]->nangles);
     HostArray1D<Real> host_int_p("host_int_p", grids[g]->nangles);
-    if (pmbp->pdyngr != nullptr && eos_policy == DynGRMHD_EOS::eos_compose) {
+    if (compose_) {
       int nang = grids[g]->nangles;
       DvceArray1D<Real> dev_int_ie("dev_int_ie", nang);
       DvceArray1D<Real> dev_int_p("dev_int_p", nang);
@@ -2832,8 +2851,9 @@ void TorusFluxes(HistoryData *pdata, Mesh *pm) {
           Real Y[MAX_SPECIES] = {0.0};
           Y[0] = interp_d(idx, IYF);
           Real nb = dn / baryon_mass;
-          Real t = eos_local.GetTemperatureFromP(nb, p, Y);
-          dev_int_ie(idx) = eos_local.GetEnergy(nb, t, Y);
+          Real t = dev_T(idx);
+          // GetEnergy is the total energy density; the flux needs the internal part
+          dev_int_ie(idx) = (dn > 0.0 && t > 0.0) ? eos_local.GetEnergy(nb, t, Y) - dn : 0.0;
           dev_int_p(idx) = p;
         });
       Kokkos::deep_copy(host_int_ie, dev_int_ie);
