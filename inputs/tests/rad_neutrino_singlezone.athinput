@@ -91,7 +91,7 @@ nfreq          = 24         # bins <= x1.4 wide over 1-3000 MeV; 12 is too coars
 nu_min         = 1.0        # MeV; keep well below the spectrum (no [0, nu_min] bin)
 nu_max         = 3000.0     # MeV; keep well above 20 T (the top bin is not a tail catch-all)
 freq_scale     = log        # required with nurates
-freq_fluxes    = false      # required with nurates
+freq_fluxes    = false      # flat space: the redshift rate is zero, nothing to advect
 
 <bns_nurates>
 # The same switches as inputs/tests/rad_m1_singlezone.athinput, all set explicitly so the two

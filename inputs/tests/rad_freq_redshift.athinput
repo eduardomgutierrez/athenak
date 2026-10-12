@@ -8,8 +8,7 @@
 # Build:  cmake -B build-fr -D Athena_ENABLE_NURATES=ON -D PROBLEM=rad_freq_redshift
 # Photon path (default below) or neutrino path:
 #         radiation/radiation_type=neutrino radiation/use_nurates=true
-#         (with freq_fluxes = true the neutrino path needs <radiation> to accept frequency
-#          advection with nurates, which it currently refuses; freq_fluxes = false runs)
+#         (the neutrino grid has open edges: content redshifted below nu_min leaves it)
 # Frequency advection on/off: radiation/freq_fluxes=true|false
 
 <comment>
