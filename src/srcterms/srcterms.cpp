@@ -77,6 +77,9 @@ SourceTerms::SourceTerms(std::string block, MeshBlockPack *pp, ParameterInput *p
     dir3 = pin->GetReal(block, "dir_3");
     width = pin->GetReal(block, "width");
     spread = pin->GetReal(block, "spread");
+    // multifrequency: dii_dt is split over the groups as a Gaussian in ln(nu)
+    beam_e_peak = pin->GetOrAddReal(block, "e_peak", 1.0);
+    beam_sigma_ln = pin->GetOrAddReal(block, "sigma_ln", 0.3);
   }
 }
 
@@ -309,7 +312,10 @@ void SourceTerms::SelfGravity(const DvceArray5D<Real> &w0, const EOS_Data &eos_d
 //----------------------------------------------------------------------------------------
 //! \fn SourceTerms::BeamSource()
 //! \brief Add beam of radiation at position (pos1,pos2,pos3) moving in direction
-//! (dir1,dir2,dir3) with physical width and angular spread (width,spread)
+//! (dir1,dir2,dir3) with physical width and angular spread (width,spread).  With
+//! multifrequency radiation the injection rate dii_dt is split over the groups as a
+//! Gaussian in ln(nu) (peak e_peak, width sigma_ln, tetrad frame); the fractions sum to
+//! one, so the frequency-integrated beam is the grey one.
 
 void SourceTerms::BeamSource(DvceArray5D<Real> &i0, const Real bdt) {
   auto &indcs = pmy_pack->pmesh->mb_indcs;
@@ -320,7 +326,8 @@ void SourceTerms::BeamSource(DvceArray5D<Real> &i0, const Real bdt) {
   int nfreq_ = pmy_pack->prad->nfreq;
   int nang_ = pmy_pack->prad->prgeo->nangles;
   int nang1 = nang_ - 1;
-  int nfr_ang1 = nfreq_*nang_ - 1;
+  int nsp_ = pmy_pack->prad->nspecies;
+  int nfr_ang1 = nsp_*nfreq_*nang_ - 1;     // every species gets the same beam
 
   auto &size = pmy_pack->pmb->mb_size;
   auto &flat = pmy_pack->pcoord->coord_data.is_minkowski;
@@ -332,6 +339,10 @@ void SourceTerms::BeamSource(DvceArray5D<Real> &i0, const Real bdt) {
   Real &width_ = width;
   Real &spread_ = spread;
 
+  bool multi_freq_ = pmy_pack->prad->multi_freq;
+  auto &freq_grid_ = pmy_pack->prad->freq_grid;
+  Real lnep = log(beam_e_peak);
+  Real sig = beam_sigma_ln;
   auto &tc = pmy_pack->prad->tetcov_c;
   auto &nh_c_ = pmy_pack->prad->nh_c;
   auto &tet_c_ = pmy_pack->prad->tet_c;
@@ -391,7 +402,7 @@ void SourceTerms::BeamSource(DvceArray5D<Real> &i0, const Real bdt) {
                  tet_c_(m,3,2,k,j,i)*dc2 + tet_c_(m,3,3,k,j,i)*dc3)/(-dtc0);
 
 
-    if (!pmy_pack->prad->multi_freq) {
+    if (!multi_freq_) {
       // Go through angles
       for (int n=0; n<=nang1; ++n) {
         Real mu = (nh_c_.d_view(n,1) * dtc1
@@ -408,8 +419,8 @@ void SourceTerms::BeamSource(DvceArray5D<Real> &i0, const Real bdt) {
       // Go through frequencies and angles
       for (int n=0; n<=nfr_ang1; ++n) {
         // compute frequency and angle indices
-        int ifr, iang;
-        getFreqAngIndices(n, nang_, ifr, iang);
+        int isp, ifr, iang;
+        getSpecFreqAngIndices(n, nfreq_, nang_, isp, ifr, iang);
 
         Real mu = (nh_c_.d_view(iang,1) * dtc1
                  + nh_c_.d_view(iang,2) * dtc2
@@ -418,8 +429,15 @@ void SourceTerms::BeamSource(DvceArray5D<Real> &i0, const Real bdt) {
           Real n0 = tet_c_(m,0,0,k,j,i);
           Real n_0 = tc(m,0,0,k,j,i)*nh_c_.d_view(iang,0) + tc(m,1,0,k,j,i)*nh_c_.d_view(iang,1)
                    + tc(m,2,0,k,j,i)*nh_c_.d_view(iang,2) + tc(m,3,0,k,j,i)*nh_c_.d_view(iang,3);
-          Real fac = ifr + 1.;
-          i0(m,n,k,j,i) += fac*n0*n_0*dii_dt_*bdt;
+          // fraction of the Gaussian in this group; the top group runs to infinity
+          Real lo = freq_grid_(ifr);
+          Real cdf_lo = (lo > 0.0) ? 0.5*(1.0 + erf((log(lo) - lnep)/(sqrt(2.0)*sig)))
+                                   : 0.0;
+          Real cdf_hi = 1.0;
+          if (ifr < nfreq_ - 1) {
+            cdf_hi = 0.5*(1.0 + erf((log(freq_grid_(ifr+1)) - lnep)/(sqrt(2.0)*sig)));
+          }
+          i0(m,n,k,j,i) += (cdf_hi - cdf_lo)*n0*n_0*dii_dt_*bdt;
         }
       }
 

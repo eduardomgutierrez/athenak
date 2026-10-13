@@ -130,7 +130,8 @@ void ZeroIntensity(Mesh *pm) {
   DvceArray5D<Real> i0_; int nang1;
   if (is_radiation_enabled_) {
     i0_ = pm->pmb_pack->prad->i0;
-    nang1 = pm->pmb_pack->prad->prgeo->nangles - 1;
+    // every (species, group, angle) component, not only the angles of the first group
+    nang1 = static_cast<int>(i0_.extent(1)) - 1;
   }
   int nmb = pm->pmb_pack->nmb_thispack;
 

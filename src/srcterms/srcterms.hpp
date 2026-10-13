@@ -55,6 +55,7 @@ class SourceTerms {
   Real pos1, pos2, pos3;  // position of source
   Real dir1, dir2, dir3;  // direction of source
   Real width, spread;     // spatial width of source region, spread in angles
+  Real beam_e_peak, beam_sigma_ln;  // multifrequency beam: Gaussian in ln(nu)
 
   // functions
   void ApplySrcTerms(const DvceArray5D<Real> &w0, const EOS_Data &eos,
