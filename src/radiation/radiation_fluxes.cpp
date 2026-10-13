@@ -391,16 +391,20 @@ TaskStatus Radiation::CalculateFluxes(Driver *pdriver, int stage) {
       Real gamma = sqrt(1.0 + q);
       Real u0 = gamma/alpha;
 
-      // compute fluid velocity in tetrad frame
-      Real u_tet[4];
-      u_tet[0] = (norm_to_tet_(m,0,0,k,j,i)*gamma + norm_to_tet_(m,0,1,k,j,i)*wvx +
-                  norm_to_tet_(m,0,2,k,j,i)*wvy   + norm_to_tet_(m,0,3,k,j,i)*wvz);
-      u_tet[1] = (norm_to_tet_(m,1,0,k,j,i)*gamma + norm_to_tet_(m,1,1,k,j,i)*wvx +
-                  norm_to_tet_(m,1,2,k,j,i)*wvy   + norm_to_tet_(m,1,3,k,j,i)*wvz);
-      u_tet[2] = (norm_to_tet_(m,2,0,k,j,i)*gamma + norm_to_tet_(m,2,1,k,j,i)*wvx +
-                  norm_to_tet_(m,2,2,k,j,i)*wvy   + norm_to_tet_(m,2,3,k,j,i)*wvz);
-      u_tet[3] = (norm_to_tet_(m,3,0,k,j,i)*gamma + norm_to_tet_(m,3,1,k,j,i)*wvx +
-                  norm_to_tet_(m,3,2,k,j,i)*wvy   + norm_to_tet_(m,3,3,k,j,i)*wvz);
+      // compute fluid velocity in tetrad frame.  Without a fluid, norm_to_tet is never
+      // allocated (radiation.cpp), and the matter is taken at rest in the normal frame,
+      // whose 4-velocity is the tetrad's time leg: u_tet = (1, 0, 0, 0), n0_cm = 1.
+      Real u_tet[4] = {1.0, 0.0, 0.0, 0.0};
+      if (is_hydro_enabled_ || is_mhd_enabled_) {
+        u_tet[0] = (norm_to_tet_(m,0,0,k,j,i)*gamma + norm_to_tet_(m,0,1,k,j,i)*wvx +
+                    norm_to_tet_(m,0,2,k,j,i)*wvy   + norm_to_tet_(m,0,3,k,j,i)*wvz);
+        u_tet[1] = (norm_to_tet_(m,1,0,k,j,i)*gamma + norm_to_tet_(m,1,1,k,j,i)*wvx +
+                    norm_to_tet_(m,1,2,k,j,i)*wvy   + norm_to_tet_(m,1,3,k,j,i)*wvz);
+        u_tet[2] = (norm_to_tet_(m,2,0,k,j,i)*gamma + norm_to_tet_(m,2,1,k,j,i)*wvx +
+                    norm_to_tet_(m,2,2,k,j,i)*wvy   + norm_to_tet_(m,2,3,k,j,i)*wvz);
+        u_tet[3] = (norm_to_tet_(m,3,0,k,j,i)*gamma + norm_to_tet_(m,3,1,k,j,i)*wvx +
+                    norm_to_tet_(m,3,2,k,j,i)*wvy   + norm_to_tet_(m,3,3,k,j,i)*wvz);
+      }
 
       Real n0_cm = (u_tet[0]*nh_c_.d_view(iang,0) - u_tet[1]*nh_c_.d_view(iang,1)
                   - u_tet[2]*nh_c_.d_view(iang,2) - u_tet[3]*nh_c_.d_view(iang,3));
@@ -421,11 +425,16 @@ TaskStatus Radiation::CalculateFluxes(Driver *pdriver, int stage) {
         Real nu_e_code = nu_e*nu_to_code_;
         int ne = sp_off + getFreqAngIndex(nfreq1, iang, nang);
         Real ir_cm_star_e = SQR(SQR(n0_cm))*i0_(m,ne,k,j,i)/(n0*n_0);
-        Real teff = GetEffTemperature(ir_cm_star_e, n0_cm*nu_e_code, arad_);
-        // BBSpectrum is per unit code frequency; the extra factor puts inu_e on the
-        // same per-unit-nu_tet footing as the inu_* built from i0_/(nu_f-nu_fm1)
-        inu_e = fmax(BBSpectrum(n0_cm*nu_e_code, teff, arad_)/(4*M_PI)
-                     /SQR(SQR(n0_cm)), 0.0)*nu_to_code_;
+        // An empty top bin has no tail.  Skipping the solve matters: at ir = 0 the
+        // effective-temperature root finder runs its full bracket search and bisection
+        // (~150 transcendental evaluations) on every ray of every cell.
+        if (ir_cm_star_e > 0.0) {
+          Real teff = GetEffTemperature(ir_cm_star_e, n0_cm*nu_e_code, arad_);
+          // BBSpectrum is per unit code frequency; the extra factor puts inu_e on the
+          // same per-unit-nu_tet footing as the inu_* built from i0_/(nu_f-nu_fm1)
+          inu_e = fmax(BBSpectrum(n0_cm*nu_e_code, teff, arad_)/(4*M_PI)
+                       /SQR(SQR(n0_cm)), 0.0)*nu_to_code_;
+        }
       }
 
       // photon grid: flux through nu_tet[0] = 0 is simply 0
