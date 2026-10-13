@@ -139,23 +139,29 @@ def plot_one(job):
 
 
 def make_movie(frames, movie, fps):
-    """mp4 through ffmpeg when it exists (module load ffmpeg on clusters), else a GIF."""
-    if movie.endswith(".mp4") and shutil.which("ffmpeg"):
+    """Through ffmpeg when it exists: H.264 .mp4, or, where ffmpeg lacks libx264 (the
+    system ffmpeg on Perlmutter), Motion-JPEG .avi.  Without ffmpeg, a GIF."""
+    if shutil.which("ffmpeg"):
         lst = movie + ".frames.txt"
         with open(lst, "w") as fp:
             for f in frames:
                 fp.write(f"file '{os.path.abspath(f)}'\nduration {1.0/fps}\n")
-        subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-f", "concat", "-safe", "0",
-                        "-i", lst, "-vf", "pad=ceil(iw/2)*2:ceil(ih/2)*2",
-                        "-pix_fmt", "yuv420p", "-vcodec", "libx264", movie], check=True)
+        base = ["ffmpeg", "-y", "-loglevel", "error", "-f", "concat", "-safe", "0",
+                "-i", lst, "-vf", "pad=ceil(iw/2)*2:ceil(ih/2)*2"]
+        stem = os.path.splitext(movie)[0]
+        for out, codec in [(stem + ".mp4", ["-pix_fmt", "yuv420p", "-vcodec", "libx264"]),
+                           (stem + ".avi", ["-vcodec", "mjpeg", "-q:v", "3",
+                                            "-r", str(fps)])]:
+            if subprocess.run(base + codec + [out]).returncode == 0:
+                os.remove(lst)
+                return out
         os.remove(lst)
-        return movie
     from PIL import Image
     gif = os.path.splitext(movie)[0] + ".gif"
     imgs = [Image.open(f).convert("P", palette=Image.ADAPTIVE) for f in frames]
     imgs[0].save(gif, save_all=True, append_images=imgs[1:], duration=int(1000/fps), loop=0)
-    if movie.endswith(".mp4"):
-        print("ffmpeg not found: wrote a GIF instead")
+    if not gif == movie:
+        print("no usable ffmpeg encoder: wrote a GIF instead")
     return gif
 
 
@@ -169,7 +175,7 @@ def main():
     ap.add_argument("--extent", type=float, default=32.0, help="half-width shown [M]")
     ap.add_argument("--lim", action="append", default=[],
                     help="fixed colour limits, e.g. dens:1e6:1e12 (repeatable)")
-    ap.add_argument("--movie", help="output movie (.mp4 with ffmpeg, else .gif)")
+    ap.add_argument("--movie", help="output movie: .mp4 (H.264), else .avi (MJPEG), else .gif")
     ap.add_argument("--fps", type=float, default=8.0)
     ap.add_argument("-j", "--jobs", type=int, default=1, help="parallel frames")
     args = ap.parse_args()
