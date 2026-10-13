@@ -1,0 +1,217 @@
+# AthenaK input: Fishbone-Moncrief torus, tabulated CompOSE EOS (SFHo), multifrequency
+# neutrino Boltzmann transport (bns_nurates).  Cluster TEST run: low resolution, but enough to
+# hold the torus and its neutrino field, unlike the 32^3 design run (dx = 2 M), whose
+# eight-cell black hole shock-heated the torus (talk notes, section 15).
+#
+# Torus: as in Miller et al. 2019 (nubhlight; ApJS 241, 30): M = 2.8 Msun, a = 0.8,
+#   r_in = 4 M, r_peak = 9 M, s = 4 kB, Ye = 0.1, SFHo.  At t = 0 the matter sits in
+#   R = 5-17 M, |z| < 4.2 M, with a density-weighted scale height H = 1.07 M at r_peak
+#   (H/r = 0.12); 1 M = 4.135 km.
+#
+# Resolution, against the literature for this kind of torus:
+#   Siegel & Metzger 2018 (ApJ 858, 52), 3D GRMHD + leakage, Cartesian, M = 3 Msun, a = 0.8:
+#     uniform dx = 0.19 M over the whole torus.
+#   Miller et al. 2019, the same torus with Monte Carlo transport: 192x128x66 modified
+#     Kerr-Schild to 1000 M, i.e. about 0.3 M (r, theta) and 0.9 M (phi) at r_peak.
+#   AthenaK radiation GRMHD (White et al. 2023; stellar-mass survey 2025): 42 angles,
+#     at least 20 cells per scale height for thin disks.
+#   Here: dx = 0.25 M over the torus (|x|,|y| < 16 M, |z| < 8 M), about 4 cells per H
+#     and 13 across the horizon, which matches the coarser of the published production
+#     runs.  12 angles (nlevel 1); the NDAF sphere test changed the luminosity by < 1%
+#     between 12 and 42.
+#
+# Mesh: 64^3 root on [-64,64]^3 (dx = 2 M), 16^3 meshblocks, three SMR levels, each nested
+#   with one coarse block of buffer (2:1 balance):
+#     L1 dx = 1    M   |x|,|y| < 64, |z| < 32
+#     L2 dx = 0.5  M   |x|,|y| < 32, |z| < 16
+#     L3 dx = 0.25 M   |x|,|y| < 16, |z| < 8
+#   735 meshblocks, 3.0e6 cells (check with: athena -i <this file> -m).
+# Radiation: nspecies 3, 24 log bins over 0.5-300 MeV (bins x1.31, the nfreq >= 24 rule
+#   for v ~ 0.3), frequency fluxes on, Fermi-Dirac seed where T >= 1 MeV.
+# Cost: ~300 kB per cell with ppm4 ghosts -> ~0.9 TB: 2 Aurora nodes (24 PVC tiles,
+#   ~30 meshblocks each).  dt = 0.3 x 0.25 M = 0.075 M, 6700 cycles to t = 500 M.
+# Table: set mhd/table on the command line to the cluster path of SFHo.athtable.
+
+<comment>
+problem   = FM torus, SFHo, multifreq neutrinos, Fermi-Dirac seed test
+
+<job>
+basename  = torus_nu_smr
+
+<mesh>
+nghost = 4        # ppm4 reconstruction needs 4 ghost zones
+nx1    = 64
+x1min  = -64.0
+x1max  = 64.0
+ix1_bc = user     # NoInflowTorus for the fluid; vacuum/outflow for the radiation
+ox1_bc = user
+
+nx2    = 64
+x2min  = -64.0
+x2max  = 64.0
+ix2_bc = user
+ox2_bc = user
+
+nx3    = 64
+x3min  = -64.0
+x3max  = 64.0
+ix3_bc = user
+ox3_bc = user
+
+<meshblock>
+nx1    = 16
+nx2    = 16
+nx3    = 16
+
+<mesh_refinement>
+refinement = static
+
+<refined_region>
+level = 1         # dx = 1 M
+x1min = -64.0
+x1max = 64.0
+x2min = -64.0
+x2max = 64.0
+x3min = -32.0
+x3max = 32.0
+
+<refined_region>
+level = 2         # dx = 0.5 M
+x1min = -32.0
+x1max = 32.0
+x2min = -32.0
+x2max = 32.0
+x3min = -16.0
+x3max = 16.0
+
+<refined_region>
+level = 3         # dx = 0.25 M: the torus and the hole
+x1min = -16.0
+x1max = 16.0
+x2min = -16.0
+x2max = 16.0
+x3min = -8.0
+x3max = 8.0
+
+<time>
+evolution  = dynamic
+integrator = rk2
+cfl_number = 0.3
+nlim       = -1
+tlim       = 500.0
+ndiag      = 20
+
+<coord>
+general_rel = true       # general relativity
+a           = 0.8        # black hole spin a (0 <= a/M < 1)
+excise      = true       # excise r_ks <= 1.0
+dexcise     = 3.0e-15    # density inside excision
+texcise     = 1.0        # temperature [MeV] inside excision; required once <adm> makes
+                          # this a dynamical-relativistic run (coordinates.cpp reads
+                          # texcise, not pexcise, in that case)
+
+<mhd>
+eos         = ideal      # unused: dyn_eos selects the real (tabulated) EOS
+dyn_eos     = compose
+dyn_error   = reset_floor
+reconstruct = ppm4       # spatial reconstruction method
+rsolver     = hlle       # Riemann solver
+dfloor      = 3.0e-15    # floor on density rho
+pfloor      = 0.333e-12  # floor on gas pressure p_gas
+tfloor      = 0.333e-12
+gamma       = 1.3333333333333333  # unused with dyn_eos=compose
+fofc        = true       # first-order flux correction
+gamma_max   = 20.0       # ceiling on Lorentz factor
+dyn_scratch = 0
+s0_atmosphere = 0.5
+c2p_tol     = 2.49e-13
+enforce_maximum = false
+dmp_M       = 1.2
+nscalars    = 1          # Ye
+
+table       = /home/emgutierrez/work/athenak/tables/SFHo.athtable
+units       = geometric_mass
+M_Msun      = 2.8        # EOS mass unit; the pgen defaults problem/M_Msun to match this
+
+<radiation>
+nlevel         = 1
+radiation_type = neutrino
+nspecies       = 3
+use_nurates    = true
+affect_fluid   = true
+evolve_ye      = true
+multi_freq     = true
+nfreq          = 24
+nu_min         = 0.5
+nu_max         = 300.0
+freq_scale     = log
+freq_fluxes    = true
+
+<bns_nurates>
+use_inelastic_scatt = false
+use_WM_ab           = false
+use_WM_sc           = false
+use_NN_medium_corr  = false
+use_dU              = false
+use_dm_eff          = false
+use_decay           = false
+use_equilibrium_distribution = true
+use_partial_equilibrium = true
+
+<adm>
+
+<problem>
+fm_torus   = true
+chakrabarti_torus = false
+sane       = true
+r_edge     = 4
+r_peak     = 9
+tilt_angle = 0.0
+potential_beta_min = 1e15
+potential_cutoff   = 0.2
+rho_min   = 3.0e-12
+rho_pow   = -1.5
+pgas_min  = 0.333e-14
+pgas_pow  = -2.5
+rho_max   = 1.0
+l         = 0.0
+pert_amp  = 0.0
+user_hist = true
+s_0_param       = 4.0
+s_bar = 0.0
+Ye_0_param = 0.1
+Ye_bar = 0.0
+nu_seed = true
+
+<output1>
+file_type = hst                # mass, energy and angular-momentum fluxes at r = 3, 12, 24 M
+dt        = 5.0
+user_hist_only = true
+
+<output2>
+file_type = bin                # matter, 3D
+variable  = mhd_w_bcc
+dt        = 10.0
+
+<output3>
+file_type = bin                # grey radiation moments, coordinate frame, 3D (luminosity)
+variable  = rad_coord
+dt        = 5.0
+
+<output4>
+file_type = bin                # per species and group, coordinate frame, x-z plane (spectra)
+id        = radnu_coord_xz
+variable  = radnu_coord
+dt        = 25.0
+slice_x2  = 0.0
+
+<output5>
+file_type = bin                # per species and group, coordinate frame, equatorial plane
+id        = radnu_coord_xy
+variable  = radnu_coord
+dt        = 25.0
+slice_x3  = 0.0
+
+<output6>
+file_type = rst
+dt        = 50.0

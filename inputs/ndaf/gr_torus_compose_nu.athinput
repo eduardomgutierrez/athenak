@@ -1,0 +1,161 @@
+# AthenaK input: Fishbone-Moncrief torus, tabulated CompOSE EOS (SFHo), with the
+# multifrequency neutrino Boltzmann solver (bns_nurates rates).  Local design run for the
+# NDAF project: the torus of inputs/ndaf/gr_torus_compose.athinput (M = 2.8 Msun, a = 0.8,
+# r_edge = 4, r_peak = 9, s = 4 kB/baryon, Ye = 0.1) on a coarse mesh that fits one GPU.
+# Production resolution needs Aurora: the fluid input's mesh with this radiation setup is
+# ~720k cells x 864 intensities, ~120 GB.
+#
+# Mesh:      32^3 on [-32,32]^3 (dx = 2 M), one 32^3 meshblock (the fewest ghost cells).
+# Radiation: nspecies 3 (heavy leptons merged), 24 log bins over 0.5-300 MeV, 12 angles,
+#            frequency fluxes on; neutrinos seeded Fermi-Dirac in torus cells with
+#            T >= problem/nu_seed_tmin (default 1 MeV), empty elsewhere.
+#
+# Build:  cmake -B build-torus-cuda -DCMAKE_BUILD_TYPE=Release -D Athena_ENABLE_NURATES=ON \
+#           -D PROBLEM=gr_torus_compose -D Kokkos_ENABLE_CUDA=ON -D Kokkos_ARCH_BLACKWELL120=ON \
+#           -D CMAKE_CXX_COMPILER=$PWD/kokkos/bin/nvcc_wrapper
+#         (or -D Kokkos_ENABLE_OPENMP=ON for the CPU)
+# Run:    ./build-torus-cuda/src/athena -i inputs/ndaf/gr_torus_compose_nu.athinput -d <rundir>
+# Table:  /home/emgutierrez/work/athenak/tables/SFHo.athtable (full SFHo table with Y_p/Y_n)
+
+<comment>
+problem   = FM torus, SFHo, multifreq neutrinos, Fermi-Dirac seed test
+
+<job>
+basename  = torus_nu
+
+<mesh>
+nghost = 3
+nx1    = 32
+x1min  = -32.0
+x1max  = 32.0
+ix1_bc = user
+ox1_bc = user
+
+nx2    = 32
+x2min  = -32.0
+x2max  = 32.0
+ix2_bc = user
+ox2_bc = user
+
+nx3    = 32
+x3min  = -32.0
+x3max  = 32.0
+ix3_bc = user
+ox3_bc = user
+
+<meshblock>
+nx1    = 32
+nx2    = 32
+nx3    = 32
+
+<time>
+evolution  = dynamic
+integrator = rk2
+cfl_number = 0.3
+nlim       = -1
+tlim       = 200.0
+ndiag      = 10
+
+<coord>
+general_rel = true
+a           = 0.8
+excise      = true
+dexcise     = 3.0e-15
+texcise     = 1.0
+
+<mhd>
+eos         = ideal
+dyn_eos     = compose
+dyn_error   = reset_floor
+reconstruct = plm
+rsolver     = hlle
+dfloor      = 3.0e-15
+pfloor      = 0.333e-12
+tfloor      = 0.333e-12
+gamma       = 1.3333333333333333
+fofc        = true
+gamma_max   = 20.0
+dyn_scratch = 0
+s0_atmosphere = 0.5
+c2p_tol     = 2.49e-13
+enforce_maximum = false
+dmp_M       = 1.2
+nscalars    = 1
+
+table       = /home/emgutierrez/work/athenak/tables/SFHo.athtable
+units       = geometric_mass
+M_Msun      = 2.8
+
+<radiation>
+nlevel         = 1
+radiation_type = neutrino
+nspecies       = 3
+use_nurates    = true
+affect_fluid   = true
+evolve_ye      = true
+multi_freq     = true
+nfreq          = 24
+nu_min         = 0.5
+nu_max         = 300.0
+freq_scale     = log
+freq_fluxes    = true
+
+<bns_nurates>
+use_inelastic_scatt = false
+use_WM_ab           = false
+use_WM_sc           = false
+use_NN_medium_corr  = false
+use_dU              = false
+use_dm_eff          = false
+use_decay           = false
+use_equilibrium_distribution = true
+use_partial_equilibrium = true
+
+<adm>
+
+<problem>
+fm_torus   = true
+chakrabarti_torus = false
+sane       = true
+r_edge     = 4
+r_peak     = 9
+tilt_angle = 0.0
+potential_beta_min = 1e15
+potential_cutoff   = 0.2
+rho_min   = 3.0e-12
+rho_pow   = -1.5
+pgas_min  = 0.333e-14
+pgas_pow  = -2.5
+rho_max   = 1.0
+l         = 0.0
+pert_amp  = 0.0
+user_hist = true
+s_0_param       = 4.0
+s_bar = 0.0
+Ye_0_param = 0.1
+Ye_bar = 0.0
+nu_seed = true
+
+<output1>
+file_type = hst                # mass, energy and angular-momentum fluxes at r = 2, 12, 24 M
+dt        = 5.0
+user_hist_only = true
+
+<output2>
+file_type = bin                # matter, 3D
+variable  = mhd_w_bcc
+dt        = 10.0
+
+<output3>
+file_type = bin                # grey radiation moments in the coordinate frame, 3D (luminosity)
+variable  = rad_coord
+dt        = 5.0
+
+<output4>
+file_type = bin                # per species and group, coordinate frame, 3D (spectra)
+variable  = radnu_coord
+dt        = 25.0
+
+<output5>
+file_type = rst
+dt        = 100.0
