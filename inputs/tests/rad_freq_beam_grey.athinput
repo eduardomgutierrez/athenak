@@ -1,0 +1,78 @@
+# Bending of a grey beam in Schwarzschild (M = 1), after Fig. 16 of Stone et al. (2024,
+# AthenaK): a beam of proper width 0.7 M and half-opening 10 deg, aimed along the null
+# direction with k^r = 0 (tangential for the static observer), held in a disc around
+# (problem/x0, 0, 0) on the equatorial plane.  x0 = 3 follows the photon orbit, x0 = 2.5
+# falls in, x0 = 4 escapes.  The paper uses dx = 1/32 and ~144 angles across the beam;
+# this fits a 12 GB GPU at dx = 1/16 and nlevel 26 (~50 angles across the beam).
+# vis/python/plot_nu_beam_deflection.py draws log R^tt with the central geodesic and the
+# four beam-boundary geodesics.  problem/nearest_ordinate = false fills only the nearest
+# ordinate instead (for coarse nlevel, where the cone may hold none).
+#
+# Build:  cmake -B build-fb -D PROBLEM=rad_freq_beam
+# Run:    athena -i rad_freq_beam_grey.athinput problem/x0=3.0 problem/diag_file=beam_x3.txt
+
+<comment>
+problem = grey beam deflection in Schwarzschild
+
+<job>
+basename = beam
+
+<time>
+evolution  = dynamic
+integrator = rk2
+cfl_number = 0.3
+nlim       = -1
+tlim       = 40.0
+
+<mesh>
+nghost = 2
+nx1    = 160
+x1min  = -5.0
+x1max  = 5.0
+ix1_bc = user
+ox1_bc = user
+
+nx2    = 160
+x2min  = -5.0
+x2max  = 5.0
+ix2_bc = user
+ox2_bc = user
+
+nx3    = 1
+x3min  = -0.5
+x3max  = 0.5
+ix3_bc = periodic
+ox3_bc = periodic
+
+<meshblock>
+nx1 = 160
+nx2 = 160
+nx3 = 1
+
+<coord>
+general_rel = true
+minkowski   = false
+a           = 0.0
+excise      = true     # radiation zeroed inside r = 2
+dexcise     = -1.0
+pexcise     = -1.0
+
+<radiation>
+nlevel         = 26
+rotate_geo     = true   # false: unrotated geodesic grid (changes which ordinate is nearest)
+reconstruct    = plm
+radiation_type = photon
+multi_freq     = false
+
+<problem>
+user_srcs        = true
+x0               = 3.0
+nearest_ordinate = false
+width            = 0.7     # proper diameter of the source disc
+spread           = 20.0    # full opening angle of the injected cone, degrees
+diag_file        = beam_spec.txt
+
+<output1>
+file_type = bin
+variable  = rad_coord
+dt        = 1000.0

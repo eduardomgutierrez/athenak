@@ -101,7 +101,10 @@ def read_radnu(filename):
     x3min = float(_get_from_header(header, "<mesh>", "x3min"))
     x3max = float(_get_from_header(header, "<mesh>", "x3max"))
 
-    nspecies = int(_get_from_header(header, "<radiation>", "nspecies"))
+    try:
+        nspecies = int(_get_from_header(header, "<radiation>", "nspecies"))
+    except KeyError:
+        nspecies = 1   # the photon path never reads <radiation>/nspecies
     nfreq = int(_get_from_header(header, "<radiation>", "nfreq"))
     nu_min = float(_get_from_header(header, "<radiation>", "nu_min"))
     nu_max = float(_get_from_header(header, "<radiation>", "nu_max"))

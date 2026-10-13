@@ -1,0 +1,96 @@
+# AthenaK input file: multifrequency neutrino beam along the photon orbit of a
+# Schwarzschild black hole (neutrino version of bh_beam_schw_multifreq.athinput: nspecies 3,
+# each fed the same beam; transport only, no library opacities).  Needs
+# -D Athena_ENABLE_NURATES=ON.  Fig. 16 of Stone et al. (2024) at low resolution: the beam (proper width
+# 0.7 M, spread 10 deg full cone, aimed along coordinate +y from r = 3 M, i.e. k^r = 0) is
+# the <rad_srcterms> beam of bh_beam.athinput; the grey injection rate dii_dt is split over
+# 8 groups as a Gaussian in ln(nu).  The domain is the window of the paper's figure.
+
+<comment>
+problem = multifrequency neutrino beam along the Schwarzschild photon orbit
+
+<job>
+basename = beam_mfnu
+
+<mesh>
+nghost = 2
+nx1    = 32        # dx = 1/8 M (paper: 1/32)
+x1min  = -0.5
+x1max  = 3.5
+ix1_bc = user
+ox1_bc = user
+
+nx2    = 36
+x2min  = -0.5
+x2max  = 4.0
+ix2_bc = user
+ox2_bc = user
+
+nx3    = 1
+x3min  = -0.5
+x3max  = 0.5
+ix3_bc = periodic
+ox3_bc = periodic
+
+<meshblock>
+nx1 = 32
+nx2 = 36
+nx3 = 1
+
+<coord>
+general_rel = true
+a           = 0.0
+excise      = true
+dexcise     = -1.0
+pexcise     = -1.0
+
+<time>
+evolution  = dynamic
+integrator = rk2
+cfl_number = 0.3
+nlim       = -1
+tlim       = 10.0
+
+<radiation>
+nlevel         = 20         # 4002 angles, ~8 inside the beam (paper: N_avg = 144)
+reconstruct    = plm
+radiation_type = neutrino
+nspecies       = 3          # nu_e, anti-nu_e, nu_x (all fed the same beam)
+use_nurates    = true
+nurates_toy_scattering = 0.0   # transport only, no library opacities
+multi_freq     = true
+nfreq          = 8          # geometric over [nu_min, nu_max], top bin [nu_max, nu_max e^dln]
+nu_min         = 3.0        # MeV
+nu_max         = 30.0
+freq_scale     = log
+freq_fluxes    = true
+
+<rad_srcterms>
+rad_beam = true
+dii_dt   = 1.0     # injected I per unit time (frequency integrated)
+pos_1    = 3.0     # beam origin
+pos_2    = 0.0
+pos_3    = 0.0
+dir_1    = 0.0     # coordinate direction: +y, k^r = 0 at the origin
+dir_2    = 1.0
+dir_3    = 0.0
+width    = 0.7     # full proper diameter of beam
+spread   = 10.0    # full spread of beam in direction, degrees
+e_peak   = 10.0    # spectrum: Gaussian in ln(nu), tetrad frame, MeV
+sigma_ln = 0.3
+
+<bns_nurates>
+use_inelastic_scatt = false    # nurates refuses it; overrides cannot add this block
+
+<problem>
+pgen_name = rad_beam
+
+<output1>
+file_type = bin
+variable  = rad_coord
+dt        = 2.0
+
+<output2>
+file_type = bin
+variable  = radnu_coord  # per-group coordinate-frame moments (energy shift)
+dt        = 10.0

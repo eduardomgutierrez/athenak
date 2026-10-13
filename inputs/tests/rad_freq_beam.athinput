@@ -1,0 +1,91 @@
+# Bending and redshift of a multifrequency beam in Schwarzschild (M = 1).
+#
+# A beam with a spectrum Gaussian in ln E (peak problem/e_peak, width problem/sigma_ln) is
+# held in a disc around (problem/x0, 0, 0) on the equatorial plane, aimed at +y in the
+# coordinate sense, i.e. k^r = 0 (tangential for the static observer).  x0 = 3 follows the
+# photon orbit, x0 = 2.5 falls in, x0 = 4 escapes.  No matter coupling.  The final
+# function writes the tetrad-frame (Kerr-Schild normal observer) energy per group in every
+# cell; vis/python/plot_nu_beam_deflection.py compares it with the geodesic.
+#
+# Build:  cmake -B build-fb -D Athena_ENABLE_NURATES=ON -D PROBLEM=rad_freq_beam
+# Run:    athena -i rad_freq_beam.athinput problem/x0=3.0 problem/diag_file=beam_x3.txt
+# Neutrino path (default below) or photon path:
+#         radiation/radiation_type=photon radiation/use_nurates=false
+
+<comment>
+problem = multifrequency beam deflection and redshift
+
+<job>
+basename = beam
+
+<time>
+evolution  = dynamic
+integrator = rk2
+cfl_number = 0.3
+nlim       = -1
+tlim       = 40.0
+
+<mesh>
+nghost = 2
+nx1    = 128
+x1min  = -10.0
+x1max  = 10.0
+ix1_bc = user
+ox1_bc = user
+
+nx2    = 128
+x2min  = -10.0
+x2max  = 10.0
+ix2_bc = user
+ox2_bc = user
+
+nx3    = 1
+x3min  = -0.5
+x3max  = 0.5
+ix3_bc = periodic
+ox3_bc = periodic
+
+<meshblock>
+nx1 = 128
+nx2 = 128
+nx3 = 1
+
+<coord>
+general_rel = true
+minkowski   = false
+a           = 0.0
+excise      = true     # radiation zeroed inside r = 2
+dexcise     = -1.0
+pexcise     = -1.0
+
+<radiation>
+nlevel         = 8
+reconstruct    = plm    # dc / wenoz (nghost = 3) for the reconstruction-order check
+radiation_type = neutrino
+nspecies       = 1
+use_nurates    = true
+nurates_toy_scattering = 0.0   # transport only, no library opacities
+affect_fluid   = false
+multi_freq     = true
+nfreq          = 16
+nu_min         = 2.5
+nu_max         = 40.0
+freq_scale     = log
+freq_fluxes    = true
+
+<bns_nurates>
+use_inelastic_scatt = false    # nurates refuses it; overrides cannot add this block
+
+<problem>
+user_srcs = true
+x0        = 3.0
+width     = 0.6     # proper diameter of the source disc
+spread    = 20.0    # full opening angle of the injected cone, degrees
+e_peak    = 10.0
+sigma_ln  = 0.3
+diag_file = beam_spec.txt
+
+<output1>
+file_type = bin
+variable  = rad_coord
+dt        = 5.0
