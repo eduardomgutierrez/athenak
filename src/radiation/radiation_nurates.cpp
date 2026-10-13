@@ -366,6 +366,8 @@ TaskStatus Radiation::CalcOpacityNurates_(Driver *pdrive, int stage) {
   // Nurates params (captured by value for use inside KOKKOS_LAMBDA)
   auto nurates_params_ = nurates_params;
   const bool peq_on_ = nurates_params_.use_partial_equilibrium;
+  const bool peq_dbg_on_ = peq_debug && multi_freq && peq_on_;
+  auto &peq_dbg_ = peq_dbg;
   // A FULL step, not the stage's beta*dt: this function returns early for stage > 1, so
   // the emissivity it computes serves the whole cycle.  With rk2, beta = {1, 1/2} and
   // gam0 = {0, 1/2}, so the source applied over a cycle is exactly dt.
@@ -919,6 +921,24 @@ TaskStatus Radiation::CalcOpacityNurates_(Driver *pdrive, int stage) {
           mu_e_s = mu_e;
         }
 
+        // peq_debug: score the previous step's prediction against the state it led to,
+        // then record this step's.  T^n+1 here is the state after the full RK step.
+        if (peq_dbg_on_) {
+          if (peq_dbg_(m, 4, k, j, i) > 0.5) {
+            const Real Tn = peq_dbg_(m, 0, k, j, i);
+            const Real Yn = peq_dbg_(m, 1, k, j, i);
+            peq_dbg_(m, 5, k, j, i) = (peq_dbg_(m, 2, k, j, i) - Tn)/Tn;
+            peq_dbg_(m, 6, k, j, i) = (T - Tn)/Tn;
+            peq_dbg_(m, 7, k, j, i) = peq_dbg_(m, 3, k, j, i) - Yn;
+            peq_dbg_(m, 8, k, j, i) = Ye - Yn;
+          }
+          peq_dbg_(m, 0, k, j, i) = T;
+          peq_dbg_(m, 1, k, j, i) = Ye;
+          peq_dbg_(m, 2, k, j, i) = T_star;
+          peq_dbg_(m, 3, k, j, i) = Ye_star;
+          peq_dbg_(m, 4, k, j, i) = 1.0;
+        }
+
         // Kirchhoff's law, bin by bin, and the only place the spectral emissivity is
         // set when the predictor is on -- bns_nurates_spectral_bin skips its own
         // emissivity quadrature entirely in that case.  Exact per bin rather than
@@ -946,6 +966,25 @@ TaskStatus Radiation::CalcOpacityNurates_(Driver *pdrive, int stage) {
       }
     }
   });
+
+  if (peq_dbg_on_) {
+    // One line per step: the cell whose actual T move differs most from the predicted.
+    auto h = Kokkos::create_mirror_view_and_copy(HostMemSpace(), peq_dbg);
+    int bm = 0, bk = ks, bj = js, bi = is;
+    Real worst = -1.0;
+    for (int m = 0; m <= nmb1; ++m)
+      for (int k = ks; k <= ke; ++k)
+        for (int j = js; j <= je; ++j)
+          for (int i = is; i <= ie; ++i) {
+            Real d = std::fabs(h(m, 6, k, j, i) - h(m, 5, k, j, i));
+            if (d > worst) {worst = d; bm = m; bk = k; bj = j; bi = i;}
+          }
+    std::printf("PEQDBG cycle %d t %.6e  dlnT pred %+.4e act %+.4e  dYe pred %+.4e "
+                "act %+.4e  T %.6e Ye %.6e\n", pmy_pack->pmesh->ncycle,
+                pmy_pack->pmesh->time, h(bm, 5, bk, bj, bi), h(bm, 6, bk, bj, bi),
+                h(bm, 7, bk, bj, bi), h(bm, 8, bk, bj, bi), h(bm, 0, bk, bj, bi),
+                h(bm, 1, bk, bj, bi));
+  }
 
   if (debug_opacity_) {
     if (multi_freq_) {

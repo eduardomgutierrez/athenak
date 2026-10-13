@@ -543,6 +543,7 @@ Radiation::Radiation(MeshBlockPack *ppack, ParameterInput *pin) :
         pin->GetOrAddReal("bns_nurates", "peq_dlnT_tol", 1e-4);
     nurates_params.peq_dYe_tol =
         pin->GetOrAddReal("bns_nurates", "peq_dYe_tol", 1e-4);
+    peq_debug = pin->GetOrAddBoolean("bns_nurates", "peq_debug", false);
 
     if (!multi_freq && !nurates_params.use_equilibrium_distribution) {
       std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
@@ -621,6 +622,7 @@ Radiation::Radiation(MeshBlockPack *ppack, ParameterInput *pin) :
       Kokkos::realloc(nurates_f_freq,      nmb, nspecies, nfreq, ncells3, ncells2, ncells1);
       int nwork = NURATES_MF_WORK_SIZE(nfreq, prgeo->nangles);
       Kokkos::realloc(nurates_mf_work, nmb, nwork, ncells3, ncells2, ncells1);
+      if (peq_debug) Kokkos::realloc(peq_dbg, nmb, 9, ncells3, ncells2, ncells1);
     }
   }
 #endif

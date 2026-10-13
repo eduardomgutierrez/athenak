@@ -146,6 +146,12 @@ class Radiation {
   // outright, and a team-scratch allocation shared by several team members would be
   // written by all of them.  See MultiFreqRadFluidCouplingNurates.
   DvceArray5D<Real> nurates_mf_work;
+  // <bns_nurates>/peq_debug (multifrequency only): per cell, at each stage 1, the state
+  // (T, Ye) and the predicted (T*, Ye*), and the previous step's predicted and actual
+  // moves -- (T^n, Ye^n, T*, Ye*, valid, (T*-T^n)/T^n, (T^n+1-T^n)/T^n, Ye*-Ye^n,
+  // Ye^n+1-Ye^n).  Off by default; debugging only.
+  bool peq_debug = false;
+  DvceArray5D<Real> peq_dbg;
 #endif
 
   // Radiation source term parameters
