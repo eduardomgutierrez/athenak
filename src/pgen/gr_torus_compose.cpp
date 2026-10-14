@@ -98,6 +98,9 @@ struct torus_pgen {
   Real Ye_0_param;                            // asymptotic Ye at low density
   Real Ye_bar;                                // Ye variation amplitude
   Real rho_0_Ye;                              // density scale for arctan in Ye(rho)
+  // problem/Ye_beta_eq: Ye(rho) instead from neutrinoless beta equilibrium,
+  // mu_nue = mu_e + mu_p - mu_n = 0, at each table density's own T(s, rho, Ye)
+  bool ye_beta_eq = false;
 
   bool use_tabulated_eos = false;           // flag for tabulated vs ideal EOS
 
@@ -106,6 +109,7 @@ struct torus_pgen {
   DvceArray1D<Real> le;                     // 1D device arrays for EOS interpolation
   DvceArray1D<Real> lp;                     // 1D device arrays for EOS interpolation
   DvceArray1D<Real> W;                      // 1D device arrays for EOS interpolation
+  DvceArray1D<Real> ye_node;                // Ye on the same nodes (Ye_beta_eq)
 };
 
 template<class TorusEOS>
@@ -205,6 +209,7 @@ class TabulatedEOS {
   DualArray3D<Real> m_log_s;
   DualArray3D<Real> m_log_e;
   DualArray3D<Real> m_log_p;
+  DualArray3D<Real> m_q5;      // CompOSE Q5 = mu_le/m_n (Ye_beta_eq only)
 
   Real dlrho, dyq, dlt;
   Real lrho_min, lrho_max, m_id_log_rho;
@@ -306,6 +311,7 @@ class TabulatedEOS {
     Kokkos::realloc(m_log_s, m_nn, m_ny, m_nt);
     Kokkos::realloc(m_log_e, m_nn, m_ny, m_nt);
     Kokkos::realloc(m_log_p, m_nn, m_ny, m_nt);
+    Kokkos::realloc(m_q5, m_nn, m_ny, m_nt);
 
     // read rho
     Real * table_nb = table["nb"];
@@ -337,6 +343,17 @@ class TabulatedEOS {
       lt_min = log(table_t[1]);      // log(T) bounds, offset from edges on purpose
       lt_max = log(table_t[m_nt-2]);
       m_id_log_t = 1.0/dlt;
+    }
+
+    { // Read Q5 = mu_le/m_n: its sign is mu_nue's (mu_nue = mu_e + mu_p - mu_n = mu_le)
+      Real * table_Q5 = table["Q5"];
+      for (size_t in=0; in<m_nn; ++in) {
+        for (size_t iy=0; iy<m_ny; ++iy) {
+          for (size_t it=0; it<m_nt; ++it) {
+            m_q5.h_view(in,iy,it) = table_Q5[it + m_nt*(iy + m_ny*in)];
+          }
+        }
+      }
     }
 
     // Read Q1 -> log(P)
@@ -391,6 +408,7 @@ class TabulatedEOS {
     // Sync the views to the GPU
     m_log_rho.template modify<HostMemSpace>();
     m_log_p.template modify<HostMemSpace>();
+    m_q5.template modify<HostMemSpace>();
     m_log_s.template modify<HostMemSpace>();
     m_log_e.template modify<HostMemSpace>();
     m_log_t.template modify<HostMemSpace>();
@@ -398,6 +416,7 @@ class TabulatedEOS {
 
     m_log_rho.template sync<DevExeSpace>();
     m_log_p.template sync<DevExeSpace>();
+    m_q5.template sync<DevExeSpace>();
     m_log_s.template sync<DevExeSpace>();
     m_log_e.template sync<DevExeSpace>();
     m_log_t.template sync<DevExeSpace>();
@@ -414,6 +433,37 @@ class TabulatedEOS {
   KOKKOS_INLINE_FUNCTION
   Real GetMaxRho() const {
     return exp(lrho_max);
+  }
+
+  template<LocationTag loc>
+  KOKKOS_INLINE_FUNCTION
+  Real GetMinYq() const {
+    return yq_min;
+  }
+
+  template<LocationTag loc>
+  KOKKOS_INLINE_FUNCTION
+  Real GetMaxYq() const {
+    return yq_max;
+  }
+
+  /// mu_le/m_n (CompOSE Q5) at (rho, T, Ye); host only, used to find beta equilibrium
+  template<LocationTag loc>
+  Real GetMuLeOverMn(Real rho, Real t, Real yq) const {
+    static_assert(loc == LocationTag::Host, "GetMuLeOverMn is host-only");
+    int in, iy, it;
+    Real wn0, wn1, wy0, wy1, wt0, wt1;
+    weight_idx_lrho<loc>(&wn0, &wn1, &in, log(rho));
+    weight_idx_yq<loc>(&wy0, &wy1, &iy, yq);
+    weight_idx_lt<loc>(&wt0, &wt1, &it, log(t));
+    return wn0 * (wy0 * (wt0 * m_q5.h_view(in+0, iy+0, it+0)   +
+                         wt1 * m_q5.h_view(in+0, iy+0, it+1))  +
+                  wy1 * (wt0 * m_q5.h_view(in+0, iy+1, it+0)   +
+                         wt1 * m_q5.h_view(in+0, iy+1, it+1))) +
+           wn1 * (wy0 * (wt0 * m_q5.h_view(in+1, iy+0, it+0)   +
+                         wt1 * m_q5.h_view(in+1, iy+0, it+1))  +
+                  wy1 * (wt0 * m_q5.h_view(in+1, iy+1, it+0)   +
+                         wt1 * m_q5.h_view(in+1, iy+1, it+1)));
   }
 
   template<LocationTag loc>
@@ -1692,6 +1742,7 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   torus.Ye_0_param = pin->GetOrAddReal("problem", "Ye_0_param", 0.35);
   torus.Ye_bar = pin->GetOrAddReal("problem", "Ye_bar", 0.15);
   torus.rho_0_Ye = pin->GetOrAddReal("problem", "rho_0_Ye", 0.63e10);
+  torus.ye_beta_eq = pin->GetOrAddBoolean("problem", "Ye_beta_eq", false);
 
   // excision parameters
   torus.dexcise = coord.dexcise;
@@ -2371,8 +2422,22 @@ Real GetTemperatureFromRho(struct torus_pgen torus, Real rho) {
 //----------------------------------------------------------------------------------------
 // Function to compute Ye(rho) from analytic prescription
 // Ye = Ye_0_param - Ye_bar * arctan(rho_cgs / rho_0_Ye)
+// With problem/Ye_beta_eq, Ye(rho) is instead interpolated (linear in ln rho) in ye_node,
+// the beta-equilibrium Ye that ConstructTorus finds on the table density nodes.
 KOKKOS_INLINE_FUNCTION
 Real GetYe(struct torus_pgen pgen, Real rho) {
+  if (pgen.ye_beta_eq && pgen.use_tabulated_eos) {
+    Real lrho = log(rho);
+    if (lrho <= pgen.eos_log_rho_min) {
+      return pgen.ye_node(0);
+    }
+    int lb = static_cast<int>((lrho - pgen.eos_log_rho_min) / pgen.delta_log_rho);
+    if (lb >= pgen.npoints - 1) {
+      return pgen.ye_node(pgen.npoints - 1);
+    }
+    return Interpolate(lrho, pgen.lrho(lb), pgen.lrho(lb + 1),
+                       pgen.ye_node(lb), pgen.ye_node(lb + 1));
+  }
   Real rho_cgs = rho * pgen.rho_code_to_cgs;
   return pgen.Ye_0_param - pgen.Ye_bar * atan(rho_cgs / pgen.rho_0_Ye);
 }
@@ -2457,7 +2522,35 @@ static void ConstructTorus(torus_pgen& torus, TorusEOS& eos) {
         lrho(i) = log_rho_min + i * delta_log_rho;
         Real rho_ = exp(lrho(i));
         Real s_val = GetEntropy(torus_in, rho_);
-        Real Ye_val = GetYe(torus_in, rho_);
+        Real Ye_val;
+        if (torus_in.ye_beta_eq) {
+          // Neutrinoless beta equilibrium: mu_nue = mu_le = 0, with T re-solved from
+          // s(rho) at every trial Ye.  mu_nue rises with Ye, so bisect on the table's Ye
+          // range, and clamp where the root lies outside it.
+          auto mu_le = [&](Real y) {
+            Real T_y = eos.template GetTemperatureFromS<LocationTag::Host>(log(s_val), rho_, y);
+            return eos.template GetMuLeOverMn<LocationTag::Host>(rho_, T_y, y);
+          };
+          Real ylo = eos.template GetMinYq<LocationTag::Host>();
+          Real yhi = eos.template GetMaxYq<LocationTag::Host>();
+          if (mu_le(ylo) >= 0.0) {
+            Ye_val = ylo;
+          } else if (mu_le(yhi) <= 0.0) {
+            Ye_val = yhi;
+          } else {
+            for (int it = 0; it < 50; ++it) {
+              Real ym = 0.5*(ylo + yhi);
+              if (mu_le(ym) < 0.0) {
+                ylo = ym;
+              } else {
+                yhi = ym;
+              }
+            }
+            Ye_val = 0.5*(ylo + yhi);
+          }
+        } else {
+          Ye_val = GetYe(torus_in, rho_);
+        }
         lye(i) = Ye_val;
         ls(i) = log(s_val);
         lt(i) = log(eos.template GetTemperatureFromS<LocationTag::Host>(
@@ -2582,11 +2675,13 @@ static void ConstructTorus(torus_pgen& torus, TorusEOS& eos) {
     le_dual.template modify<HostMemSpace>();
     lp_dual.template modify<HostMemSpace>();
     W_dual.template modify<HostMemSpace>();
+    lye_dual.template modify<HostMemSpace>();
     lrho_dual.template sync<DevExeSpace>();
     lt_dual.template sync<DevExeSpace>();
     le_dual.template sync<DevExeSpace>();
     lp_dual.template sync<DevExeSpace>();
     W_dual.template sync<DevExeSpace>();
+    lye_dual.template sync<DevExeSpace>();
 
     // Store only lightweight device views in struct (not full DualViews)
     torus.lrho = lrho_dual.d_view;
@@ -2594,6 +2689,18 @@ static void ConstructTorus(torus_pgen& torus, TorusEOS& eos) {
     torus.le = le_dual.d_view;
     torus.lp = lp_dual.d_view;
     torus.W = W_dual.d_view;
+    torus.ye_node = lye_dual.d_view;
+    if (torus.ye_beta_eq && global_variable::my_rank == 0) {
+      std::cout << "Torus Ye(rho): beta equilibrium (mu_nue = 0) on the table nodes; Ye = "
+                << lye(torus.npoints - 1) << " at the densest node, ";
+      for (Real rc : {1e11, 1e10, 1e9, 1e8}) {
+        int k = static_cast<int>((log(rc/torus.rho_code_to_cgs) - log_rho_min)/delta_log_rho);
+        if (k >= 0 && k < torus.npoints) {
+          std::cout << lye(k) << " at " << rc << " g/cc, ";
+        }
+      }
+      std::cout << std::endl;
+    }
   }
 }
 
