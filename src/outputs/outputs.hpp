@@ -21,7 +21,7 @@
     #error NHISTORY > NREDUCTION in outputs.hpp
 #endif
 
-#define NOUTPUT_CHOICES 179
+#define NOUTPUT_CHOICES 180
 // choices for output variables used in <ouput> blocks in input file
 // TO ADD MORE CHOICES:
 //   - add more strings to array below, change NOUTPUT_CHOICES above appropriately
@@ -133,6 +133,9 @@ static const char *var_choice[NOUTPUT_CHOICES] = {
 
   // Multi-frequency radiation (176-178)
   "radnu_coord", "radnu_fluid", "radnu_coord_fluid",
+
+  // Multi-frequency neutrino-matter exchange, bns_nurates (179)
+  "radnu_src",
 };
 
 

@@ -207,6 +207,15 @@ BaseTypeOutput::BaseTypeOutput(ParameterInput *pin, Mesh *pm, OutputParameters o
        << " constructed, or corresponding Hydro or MHD object missing" << std::endl;
     exit(EXIT_FAILURE);
   }
+  if (ivar==179 && ((pm->pmb_pack->prad == nullptr) ||
+                    !(pm->pmb_pack->prad->multi_freq &&
+                      pm->pmb_pack->prad->use_nurates))) {
+    std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
+       << "Output of the neutrino-matter exchange (radnu_src) requested in <output> "
+       << "block '" << out_params.block_name << "' but it needs <radiation> with "
+       << "multi_freq = true and use_nurates = true" << std::endl;
+    exit(EXIT_FAILURE);
+  }
   if ((ivar>=176) && (ivar<179) && (!pm->pmb_pack->prad->multi_freq)) {
     std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
        << "Output of Multi-Frequency Radiation moments requested in <output> block '"
@@ -783,6 +792,21 @@ BaseTypeOutput::BaseTypeOutput(ParameterInput *pin, Mesh *pm, OutputParameters o
       outvars_6d.emplace_back("rnu33_ff",moments_offset+9,&(derived_var6d));
     }
   } // endfor variable
+
+#if ENABLE_NURATES
+  // neutrino-matter exchange of the multi-frequency source, per species (see
+  // Radiation::nurates_src_diag)
+  if (out_params.variable.compare("radnu_src") == 0) {
+    for (int isp = 0; isp < pm->pmb_pack->prad->nspecies; ++isp) {
+      std::string sp = ":" + std::to_string(isp);
+      auto *diag = &(pm->pmb_pack->prad->nurates_src_diag);
+      outvars.emplace_back("Qnet" + sp, 4*isp + 0, diag);
+      outvars.emplace_back("etaE" + sp, 4*isp + 1, diag);
+      outvars.emplace_back("Rnet" + sp, 4*isp + 2, diag);
+      outvars.emplace_back("etaN" + sp, 4*isp + 3, diag);
+    }
+  }
+#endif
 
   // particle density binned to mesh
   if (out_params.variable.compare("prtcl_d") == 0) {

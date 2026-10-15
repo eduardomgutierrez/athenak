@@ -432,11 +432,22 @@ TaskStatus Radiation::MultiFreqRadFluidCouplingNurates(Driver *pdriver, int stag
   }
 
   Real dt_ = (pdriver->beta[stage-1])*(pmy_pack->pmesh->dt);
+  auto &eta_0_f_ = nurates_eta_0_freq;
   auto &eta_1_f_ = nurates_eta_1_freq;
   auto &abs_1_f_ = nurates_abs_1_freq;
   auto &scat_1_f_ = nurates_scat_1_freq;
   Real mb_code_ = nurates_baryon_mass;
   Real code_edens_to_eos_ = nurates_code_edens_to_eos;
+  // radnu_src accumulates over the stages with the integrator's own weights, D <- gam0 D
+  // + beta*rate, so that at the end of the step it is the exchange the fluid actually
+  // received, per unit time: u0 = gam0*u0 + gam1*u1 + ... carries the earlier stages'
+  // exchange forward with weight gam0, and gam0 = 0 on the first stage resets it.  A
+  // single stage's rate would not do: in a boosted trapped zone the two RK2 stages
+  // exchange equal and opposite amounts in the steady state, and the fluid sees nothing.
+  auto &diag_ = nurates_src_diag;
+  Real diag_gam0_ = pdriver->gam0[stage-1];
+  Real diag_beta_ = pdriver->beta[stage-1];
+  Real inv_dt_ = (pmy_pack->pmesh->dt > 0.0) ? 1.0/(pmy_pack->pmesh->dt) : 0.0;
 
   // Width of a bin in ln(nu).  Every bin is geometric on the neutrino grid, so this is
   // one number for the whole grid and a ray's Doppler factor becomes a rigid displacement
@@ -549,6 +560,11 @@ TaskStatus Radiation::MultiFreqRadFluidCouplingNurates(Driver *pdriver, int stag
     Real m_old[4] = {0.0}; Real m_new[4] = {0.0};
     Real dN_rad_moment[4] = {0.0};
     for (int isp=0; isp<nsp_; ++isp) {
+      // The moment sums before this species, so its own share of the exchange can be
+      // read off for the radnu_src diagnostic.
+      Real m_old_s[4] = {m_old[0], m_old[1], m_old[2], m_old[3]};
+      Real m_new_s[4] = {m_new[0], m_new[1], m_new[2], m_new[3]};
+      Real eta_e = 0.0, eta_n = 0.0;
       // One species at a time: passes 1-3 all run inside this loop, so the opacity
       // workspace holds the current species only and carries no species index.
       for (int ifr=0; ifr<nfrq_; ++ifr) {
@@ -557,6 +573,8 @@ TaskStatus Radiation::MultiFreqRadFluidCouplingNurates(Driver *pdriver, int stag
         sigma_s(ifr) = scat_1_f_(m, isp, ifr, k, j, i);
         eq_j(ifr) = (sa > 0.0) ? eta_1_f_(m, isp, ifr, k, j, i)/sa : 0.0;
         dt_sig(ifr) = dt_*sa + dt_*sigma_s(ifr);
+        eta_e += eta_1_f_(m, isp, ifr, k, j, i);
+        eta_n += eta_0_f_(m, isp, ifr, k, j, i);
       }
       RemapFillLogs(dt_sig, ldtsig, 0, 0, nfrq_-1);
 
@@ -717,12 +735,35 @@ TaskStatus Radiation::MultiFreqRadFluidCouplingNurates(Driver *pdriver, int stag
           if (excise_ray) { i0_(m,nn,k,j,i) = 0.0; }
         }
       }
+
+      // radnu_src: this species' share of the dm_mu handed to the fluid below, which is
+      // Delta T^t_mu of the fluid, so G_mu = dm_mu/dt (sqrt(-g) = 1, see below) and the
+      // fluid-frame cooling is u^mu G_mu, with u^0 = W/alpha and
+      // u^i = utilde^i - W beta^i/alpha.
+      Real dm_s[4];
+      for (int mu=0; mu<4; ++mu) {
+        dm_s[mu] = (m_old[mu] - m_old_s[mu]) - (m_new[mu] - m_new_s[mu]);
+      }
+      Real q_s = (gamma/alpha)*dm_s[0] + (wvx - gamma*beta_u[0]/alpha)*dm_s[1] +
+                 (wvy - gamma*beta_u[1]/alpha)*dm_s[2] +
+                 (wvz - gamma*beta_u[2]/alpha)*dm_s[3];
+      // q_s is beta*dt times the stage rate, so q_s/dt is beta times it
+      diag_(m, 4*isp + 0, k, j, i) = diag_gam0_*diag_(m, 4*isp + 0, k, j, i) +
+                                     q_s*inv_dt_;
+      diag_(m, 4*isp + 1, k, j, i) = diag_gam0_*diag_(m, 4*isp + 1, k, j, i) +
+                                     diag_beta_*eta_e;
+      diag_(m, 4*isp + 3, k, j, i) = diag_gam0_*diag_(m, 4*isp + 3, k, j, i) +
+                                     diag_beta_*eta_n;
     }
     for (int isp=0; isp<nsp_; ++isp) {
       // the sum above is a code-unit energy density over a bin energy in MeV;
       // rescaling the energy density to MeV/fm^3 makes it a number density in
       // fm^-3, which is the convention throughout the nurates interface
       dN_rad_moment[isp] *= code_edens_to_eos_;
+      // N^t is a coordinate density and sqrt(-g) = 1, so its rate is the invariant
+      // number source
+      diag_(m, 4*isp + 2, k, j, i) = diag_gam0_*diag_(m, 4*isp + 2, k, j, i) +
+                                     dN_rad_moment[isp]*inv_dt_;
     }
 
     if (affect_fluid_) {

@@ -215,3 +215,15 @@ slice_x3  = 0.0
 <output6>
 file_type = rst
 dt        = 50.0
+
+<output7>
+file_type = bin                # neutrino emission, absorption and dYe/dt per species, x-z plane
+id        = radnu_src_xz       # (vis/python/torus_nu_src.py)
+variable  = radnu_src
+dt        = 2.0
+slice_x2  = 0.0
+
+<output8>
+file_type = bin                # the same in 3D, for the volume-integrated rates
+variable  = radnu_src
+dt        = 10.0

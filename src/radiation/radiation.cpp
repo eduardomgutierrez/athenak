@@ -623,6 +623,7 @@ Radiation::Radiation(MeshBlockPack *ppack, ParameterInput *pin) :
       int nwork = NURATES_MF_WORK_SIZE(nfreq, prgeo->nangles);
       Kokkos::realloc(nurates_mf_work, nmb, nwork, ncells3, ncells2, ncells1);
       if (peq_debug) Kokkos::realloc(peq_dbg, nmb, 9, ncells3, ncells2, ncells1);
+      Kokkos::realloc(nurates_src_diag, nmb, 4*nspecies, ncells3, ncells2, ncells1);
     }
   }
 #endif

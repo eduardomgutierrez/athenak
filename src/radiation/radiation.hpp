@@ -152,6 +152,17 @@ class Radiation {
   // Ye^n+1-Ye^n).  Off by default; debugging only.
   bool peq_debug = false;
   DvceArray5D<Real> peq_dbg;
+  // Neutrino-matter exchange of the multi-frequency source, per cell, averaged over the
+  // last step with the integrator's stage weights, [nmb, 4*nspecies, nk, nj, ni];
+  // <output>/variable = radnu_src.  Per species s, all per unit proper volume and proper
+  // time:
+  //   4s+0  net cooling u^mu G_mu: what the fluid hands this species, > 0 when it loses
+  //         energy (code energy density per code time)
+  //   4s+1  comoving energy emissivity, sum over groups of eta_1 (same unit)
+  //   4s+2  net number emission, the change of N^t (fm^-3 per code time)
+  //   4s+3  comoving number emissivity, sum over groups of eta_0 (same unit)
+  // Absorption is emission minus net.  Multi-frequency only.
+  DvceArray5D<Real> nurates_src_diag;
 #endif
 
   // Radiation source term parameters
