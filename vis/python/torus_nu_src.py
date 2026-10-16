@@ -117,9 +117,11 @@ def plot_one(job):
                     LogNorm(*lim["E"])),
               "absf": (r"absorbed fraction $(\eta - Q^-)/\eta$", "viridis",
                        Normalize(0.0, 1.0)),
-              "dye": (r"$dY_e/dt$ [s$^{-1}$]", "PuOr_r",
-                      SymLogNorm(lim["dye"][0], vmin=-lim["dye"][1], vmax=lim["dye"][1]))}
-    names = [n for n in ("Q", "E", "absf", "dye") if n in p]
+              }
+    if "dye" in lim:
+        spec_q["dye"] = (r"$dY_e/dt$ [s$^{-1}$]", "PuOr_r",
+                         SymLogNorm(lim["dye"][0], vmin=-lim["dye"][1], vmax=lim["dye"][1]))
+    names = [n for n in ("Q", "E", "absf", "dye") if n in p and n in spec_q]
     fig, axes = plt.subplots(1, len(names), figsize=(3.7*len(names) + 0.6, 4.3),
                              squeeze=False, constrained_layout=True)
     w, h = horizon(s["spin"])
@@ -169,18 +171,21 @@ def default_limits(s, rho, species):
 
 
 def match_matter(files, matter):
-    """For each slice, the matter slice written at the same time (or None)."""
+    """For each slice, the nearest matter slice within half the matter cadence (or None).
+    The times need not agree exactly: an output block added on a restart starts its own
+    schedule at the restart time, a fraction of a step off the older blocks."""
     if not matter:
         return [None]*len(files)
     times = {}
     for m in matter:
-        times[round(bc.read_binary(m)["time"], 6)] = m
+        times[bc.read_binary(m)["time"]] = m
     keys = np.array(sorted(times))
+    tol = 0.5*np.median(np.diff(keys)) if keys.size > 1 else np.inf
     out = []
     for f in files:
         t = bc.read_binary(f)["time"]
         k = keys[np.argmin(np.abs(keys - t))]
-        out.append(times[k] if abs(k - t) < 1e-6*max(1.0, abs(t)) else None)
+        out.append(times[k] if abs(k - t) <= tol else None)
     return out
 
 
