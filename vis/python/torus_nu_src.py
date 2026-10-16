@@ -164,8 +164,9 @@ def default_limits(s, rho, species):
     lim["Q"] = (qmax*1e-6, qmax)
     lim["E"] = (emax*1e-6, emax)
     if "dye" in p:
-        d = np.abs(p["dye"][np.isfinite(p["dye"])])
-        dmax = d.max() if d.size and d.max() > 0 else 1.0
+        # a percentile, not the maximum: a few cells at the horizon would set the scale
+        d = np.abs(p["dye"][np.isfinite(p["dye"]) & (p["E"] > lim["E"][0])])
+        dmax = np.percentile(d, 99.5) if d.size and d.max() > 0 else 1.0
         lim["dye"] = (dmax*1e-4, dmax)
     return lim
 
