@@ -51,6 +51,8 @@ struct NuratesParams {
   // emissivity is bns_nurates' own.  Same names, same defaults and the same meaning as
   // in radiation_m1/radiation_m1_params.hpp, so one <bns_nurates> block drives both.
   bool use_partial_equilibrium;
+  bool peq_heavy;      // the predictor also sets the heavy-lepton emissivity
+  bool heavy_eps_midpoint;  // heavy emissivity from the bin-centre evaluation, not the quadrature
   Real peq_w_floor;    // tier-0 gate: skip the cell outright below this weight
   Real peq_dlnT_tol;   // tier-1 gate: skip when the predicted |dlnT| is below this
   Real peq_dYe_tol;    // tier-1 gate: ... and the predicted |dYe| below this
@@ -1019,21 +1021,28 @@ void bns_nurates_spectral_bin(NuratesCellState &cell,
                                                      &grey_op_params);
 
   // The emissivity, integrated over the bin.  Skipped outright when the partially-
-  // equilibrated predictor is on: the caller then sets eta from kappa times the
-  // blackbody at (T*, Ye*), so every one of these quadrature points -- a full spectral
-  // opacity evaluation each -- would be thrown away.  eta_* are left at the zeros set
-  // above; the caller overwrites them.
-  if (!nurates_params.use_partial_equilibrium) {
-    for (int iq = 0; iq < quad.nx; ++iq) {
-      const Real x = quad.points[iq];
-      const Real w = quad.w[iq];
-      const Real e = e_lo + de*x;
-      bns_nurates::SpectralOpacities op =
-          RadiationComputeSpectralOpacitiesStimulatedAbs(e, &quad, cell.spec,
-                                                         &grey_op_params);
+  // equilibrated predictor sets the emissivity of every species: the caller then sets
+  // eta from kappa times the blackbody at (T*, Ye*), so every one of these quadrature
+  // points -- a full spectral opacity evaluation each -- would be thrown away.  eta_*
+  // are left at the zeros set above; the caller overwrites them.
+  if (!nurates_params.use_partial_equilibrium || !nurates_params.peq_heavy) {
+    if (nurates_params.heavy_eps_midpoint) {
       for (int idx = 0; idx < 4; ++idx) {
-        eta_0[idx] += w * de * bns_nurates::kBS_FourPi_hc3 * SQR(e) * op.j[idx];
-        eta_1[idx] += w * de * bns_nurates::kBS_FourPi_hc3 * SQR(e) * e * op.j[idx];
+        eta_0[idx] = de * bns_nurates::kBS_FourPi_hc3 * SQR(e_mid) * op_mid.j[idx];
+        eta_1[idx] = de * bns_nurates::kBS_FourPi_hc3 * SQR(e_mid) * e_mid * op_mid.j[idx];
+      }
+    } else {
+      for (int iq = 0; iq < quad.nx; ++iq) {
+        const Real x = quad.points[iq];
+        const Real w = quad.w[iq];
+        const Real e = e_lo + de*x;
+        bns_nurates::SpectralOpacities op =
+            RadiationComputeSpectralOpacitiesStimulatedAbs(e, &quad, cell.spec,
+                                                           &grey_op_params);
+        for (int idx = 0; idx < 4; ++idx) {
+          eta_0[idx] += w * de * bns_nurates::kBS_FourPi_hc3 * SQR(e) * op.j[idx];
+          eta_1[idx] += w * de * bns_nurates::kBS_FourPi_hc3 * SQR(e) * e * op.j[idx];
+        }
       }
     }
 

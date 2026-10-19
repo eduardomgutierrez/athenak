@@ -85,7 +85,7 @@ void PredictPartialEquilibrium(const Primitive::EOS<EOSPolicy, ErrorPolicy> &eos
 
   const Real a_1p = dtau*kap_1[0];
   const Real a_1m = dtau*kap_1[1];
-  const Real a_1x = dtau*kbar_1x;
+  const Real a_1x = nurates_params.peq_heavy ? dtau*kbar_1x : 0.0;
   const Real a_0p = dtau*kap_0[0];
   const Real a_0m = dtau*kap_0[1];
   const Real w_1p = a_1p/(1.0 + a_1p);
@@ -368,6 +368,7 @@ TaskStatus Radiation::CalcOpacityNurates_(Driver *pdrive, int stage) {
   const bool peq_on_ = nurates_params_.use_partial_equilibrium;
   const bool peq_dbg_on_ = peq_debug && multi_freq && peq_on_;
   auto &peq_dbg_ = peq_dbg;
+  const bool peq_heavy_ = nurates_params_.peq_heavy;
   // A FULL step, not the stage's beta*dt: this function returns early for stage > 1, so
   // the emissivity it computes serves the whole cycle.  With rk2, beta = {1, 1/2} and
   // gam0 = {0, 1/2}, so the source applied over a cycle is exactly dt.
@@ -759,9 +760,10 @@ TaskStatus Radiation::CalcOpacityNurates_(Driver *pdrive, int stage) {
                       Kokkos::isfinite(J_eq_s[idx]);
         }
 
-        // Kirchhoff's law, and the only place the emissivity is set on this path --
-        // bns_nurates_gray leaves it alone whenever the predictor is on.
+        // Kirchhoff's law, and the only place the emissivity of the species the
+        // predictor covers is set on this path.
         for (int isp = 0; isp < nspecies_; ++isp) {
+          if (isp >= 2 && !peq_heavy_) { continue; }
           Real my_n = eq_finite ? n_eq_s[isp] : n_eq_loc[isp];
           Real my_J = eq_finite ? J_eq_s[isp] : J_eq_loc[isp];
           loc_eta_0[isp] = (loc_abs_0[isp] > 0.0) ? loc_abs_0[isp]*my_n : loc_eta_0[isp];
@@ -939,12 +941,12 @@ TaskStatus Radiation::CalcOpacityNurates_(Driver *pdrive, int stage) {
           peq_dbg_(m, 4, k, j, i) = 1.0;
         }
 
-        // Kirchhoff's law, bin by bin, and the only place the spectral emissivity is
-        // set when the predictor is on -- bns_nurates_spectral_bin skips its own
-        // emissivity quadrature entirely in that case.  Exact per bin rather than
-        // approximate: the source term reads eq_j = eta_1/kappa back as the spectrum it
-        // relaxes towards, so kappa*J_eq is the only pairing whose fixed point is the
-        // equilibrium it is meant to reach.
+        // Kirchhoff's law, bin by bin, and the only place the spectral emissivity of
+        // the species the predictor covers is set -- bns_nurates_spectral_bin skips its
+        // own emissivity quadrature entirely when that is all of them.  Exact per bin
+        // rather than approximate: the source term reads eq_j = eta_1/kappa back as the
+        // spectrum it relaxes towards, so kappa*J_eq is the only pairing whose fixed
+        // point is the equilibrium it is meant to reach.
         for (int ifr = 0; ifr < nfreq_; ++ifr) {
           Real e_lo = 0.0, e_hi = 0.0;
           FreqBinEdgesMeV(freq_grid_, ifr, nfreq_, freq_scale_, e_lo, e_hi);
@@ -955,6 +957,7 @@ TaskStatus Radiation::CalcOpacityNurates_(Driver *pdrive, int stage) {
                                unit_num_dens_, unit_ene_dens_, n_eq_f, J_eq_f,
                                nurates_params_);
           for (int isp = 0; isp < nspecies_; ++isp) {
+            if (isp >= 2 && !peq_heavy_) { continue; }
             Real ka0 = abs_0_f_(m, isp, ifr, k, j, i);
             Real ka1 = abs_1_f_(m, isp, ifr, k, j, i);
             Real e0 = ka0*n_eq_f[isp];

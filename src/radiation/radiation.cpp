@@ -537,6 +537,20 @@ Radiation::Radiation(MeshBlockPack *ppack, ParameterInput *pin) :
     // frequency-integrated Kirchhoff step for it to gate.
     nurates_params.use_partial_equilibrium =
         pin->GetOrAddBoolean("bns_nurates", "use_partial_equilibrium", true);
+    nurates_params.peq_heavy =
+        pin->GetOrAddBoolean("bns_nurates", "partial_equilibrium_heavy", true);
+    {
+      const std::string heavy_eps =
+          pin->GetOrAddString("bns_nurates", "heavy_emissivity", "quadrature");
+      if (heavy_eps != "quadrature" && heavy_eps != "midpoint") {
+        std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+                  << std::endl
+                  << "<bns_nurates>/heavy_emissivity must be quadrature or midpoint"
+                  << std::endl;
+        std::exit(EXIT_FAILURE);
+      }
+      nurates_params.heavy_eps_midpoint = (heavy_eps == "midpoint");
+    }
     nurates_params.peq_w_floor =
         pin->GetOrAddReal("bns_nurates", "peq_w_floor", 1e-3);
     nurates_params.peq_dlnT_tol =
@@ -544,6 +558,26 @@ Radiation::Radiation(MeshBlockPack *ppack, ParameterInput *pin) :
     nurates_params.peq_dYe_tol =
         pin->GetOrAddReal("bns_nurates", "peq_dYe_tol", 1e-4);
     peq_debug = pin->GetOrAddBoolean("bns_nurates", "peq_debug", false);
+
+    if (!nurates_params.peq_heavy &&
+        (!nurates_params.use_partial_equilibrium || nurates_toy_scattering >= 0.0)) {
+      std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+                << std::endl
+                << "<bns_nurates>/partial_equilibrium_heavy = false selects which "
+                << "species the partial-equilibrium predictor sets the emissivity of, "
+                << "and needs use_partial_equilibrium = true with the bns_nurates "
+                << "library (no nurates_toy_scattering)." << std::endl;
+      std::exit(EXIT_FAILURE);
+    }
+
+    if (nurates_params.heavy_eps_midpoint && nurates_params.peq_heavy) {
+      std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+                << std::endl
+                << "<bns_nurates>/heavy_emissivity = midpoint replaces the emissivity "
+                << "quadrature of the species the predictor does not cover, and needs "
+                << "partial_equilibrium_heavy = false." << std::endl;
+      std::exit(EXIT_FAILURE);
+    }
 
     if (!multi_freq && !nurates_params.use_equilibrium_distribution) {
       std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
