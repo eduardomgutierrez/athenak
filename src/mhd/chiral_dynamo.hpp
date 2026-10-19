@@ -153,7 +153,7 @@ void ChiralEMF(const Real xi, const Real iW,
 //! cooler, more degenerate matter.
 //!
 //! \param mu_e_MeV     electron chemical potential, MeV
-//! \param code_time_s  seconds per code time unit (UnitSystem::time)
+//! \param code_time_s  code time units per second (UnitSystem::time)
 KOKKOS_INLINE_FUNCTION
 Real GammaM(const Real mu_e_MeV, const Real code_time_s, const Real alpha_em) {
   const Real gamma_m_MeV = SQR(alpha_em) * SQR(kElectronMassMeV)
