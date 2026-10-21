@@ -40,7 +40,7 @@ def _get_from_header(header, blockname, keyname):
         if line.startswith("<"):
             block = line
             continue
-        key, value = line.split("=")
+        key, value = line.split("=", 1)
         if block == blockname and key.strip() == keyname:
             return value.strip()
     raise KeyError(f"no parameter called {blockname}/{keyname}")
@@ -72,7 +72,7 @@ def read_radnu(filename):
     pheader_count = int(fp.readline().split(b"=")[-1])
     pheader = {}
     for _ in range(pheader_count - 1):
-        key, val = [x.strip() for x in fp.readline().decode("utf-8").split("=")]
+        key, val = [x.strip() for x in fp.readline().decode("utf-8").split("=", 1)]
         pheader[key] = val
     time = float(pheader["time"])
     cycle = int(pheader["cycle"])

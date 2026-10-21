@@ -260,6 +260,101 @@ void SphereImpl(Mesh *pmesh, ParameterInput *pin, const bool restart) {
     std::cout << "### rad_nu_sphere: exact total luminosity " << ltot
               << " (code units), per bin in sphere_analytic.txt" << std::endl;
   }
+
+  // The continuum solution, for a sphere whose matter moves with uniform velocity v (and
+  // for v = 0, where it differs from the table above only by the binning).  The region is
+  // fixed in the lab, so along a lab ray of direction n the coefficients are uniform:
+  // with D = 1/(W (1 - v.n)), kappa_lab(E) = kappa_0(E/D)/D and I_lab(E) = D^3 I_0(E/D),
+  // where I_0 = u_eq/(4 pi) is the comoving equilibrium intensity per unit energy.  Every
+  // ray then carries I_lab (1 - exp(-kappa_lab s)) out of the chord s, and the sum over
+  // impact parameters is pi R^2 g(kappa_lab R), as in the static case, so
+  //   L_bin = int_bin dE int dOmega pi R^2 I_lab(E, n) g(kappa_lab(E, n) R).
+  // kappa_0 and u_eq are tabulated on a fine log grid with the solver's own functions.
+  constexpr int kNE = 3000;
+  const Real e_min = 0.02, e_max = 5000.0;
+  DvceArray2D<Real> fine("nu_sphere_fine", 4, kNE);
+  Kokkos::parallel_for("pgen_nu_sphere_fine", Kokkos::RangePolicy<>(DevExeSpace(), 0, kNE),
+  KOKKOS_LAMBDA(const int ie) {
+    Real e = e_min*exp(log(e_max/e_min)*ie/(kNE - 1.0));
+    Real nb = rho_in/mb;
+    Real ye = ye_in;
+    Real p = eos.GetPressure(nb, temp_in, &ye);
+    Real T = eos.GetTemperatureFromP(nb, p, &ye);
+    Real yp = eos.GetProtonFraction(nb, T, &ye);
+    Real yn = eos.GetNeutronFraction(nb, T, &ye);
+    Real mu_b = eos.GetBaryonChemicalPotential(nb, T, &ye);
+    Real mu_q = eos.GetChargeChemicalPotential(nb, T, &ye);
+    Real mu_le = eos.GetElectronLeptonChemicalPotential(nb, T, &ye);
+    Real mu_n = mu_b, mu_p = mu_b + mu_q, mu_e = mu_le - mu_q;
+    auto cu = code_units;
+    auto eu = eos_units;
+    radiation::NuratesGroupOccupancy spec = {};
+    radiation::NuratesCellState cell = radiation::NuratesSpectralCellState(
+        nb, T, yp, yn, mu_n, mu_p, mu_e, spec, params, cu, eu);
+    bns_nurates::MyQuadrature quad = params.quadrature;
+    bns_nurates::SpectralOpacities op =
+        radiation::RadiationComputeSpectralOpacitiesStimulatedAbs(e, &quad, cell.spec,
+                                                                  &cell.grey_op_params);
+    Real n_eq[4], J_eq[4];
+    const Real de = 1.0e-3*e;
+    radiation::NuratesEqSpectrumBin(e - 0.5*de, e + 0.5*de, T, mu_n, mu_p, mu_e,
+                                    params.quadrature, cell.unit_num_dens,
+                                    cell.unit_ene_dens, n_eq, J_eq, params);
+    for (int isp = 0; isp < 2; ++isp) {
+      fine(2*isp, ie) = op.kappa[isp]*cell.unit_length;   // kappa_0, code units
+      fine(2*isp + 1, ie) = J_eq[isp]/de;                 // u_eq per MeV, code units
+    }
+  });
+  auto fine_h = Kokkos::create_mirror_view_and_copy(HostMemSpace(), fine);
+
+  if (global_variable::my_rank == 0) {
+    const Real vmag = std::sqrt(vx*vx + vy*vy + vz*vz);
+    const Real dlg = std::log(e_max/e_min)/(kNE - 1.0);
+    // log-log interpolation on the fine grid; zero outside it
+    auto interp = [&](int row, Real e) -> Real {
+      Real x = std::log(e/e_min)/dlg;
+      if (x < 0.0 || x >= kNE - 1.0) return 0.0;
+      int i = static_cast<int>(x);
+      Real a = fine_h(row, i), b = fine_h(row, i + 1);
+      if (a <= 0.0 || b <= 0.0) return (1.0 - (x - i))*a + (x - i)*b;
+      return std::exp((1.0 - (x - i))*std::log(a) + (x - i)*std::log(b));
+    };
+    auto gfun = [](Real tau) -> Real {
+      return (tau > 1.0e-4) ?
+             1.0 - (1.0 - (1.0 + 2.0*tau)*std::exp(-2.0*tau))/(2.0*tau*tau) :
+             4.0*tau/3.0;
+    };
+    constexpr int kNMu = 400, kNSub = 32;
+    FILE *fp = std::fopen("sphere_exact_continuum.txt", "w");
+    std::fprintf(fp, "# continuum solution, |v| = %.6f, R_eff = %.8e\n", vmag, r_eff);
+    std::fprintf(fp, "# species bin e_lo[MeV] e_hi[MeV] L_exact[code]\n");
+    Real ltot = 0.0;
+    for (int isp = 0; isp < 2; ++isp) {
+      for (int ifr = 0; ifr < nfreq; ++ifr) {
+        Real e_lo = tab_h(isp, ifr, 0), e_hi = tab_h(isp, ifr, 1);
+        Real lnr = std::log(e_hi/e_lo);
+        Real lum = 0.0;
+        for (int is = 0; is < kNSub; ++is) {
+          Real e = e_lo*std::exp(lnr*(is + 0.5)/kNSub);
+          Real de = e*lnr/kNSub;
+          for (int im = 0; im < kNMu; ++im) {
+            Real mu = -1.0 + 2.0*(im + 0.5)/kNMu;       // cosine to v
+            Real dd = 1.0/(wlor*(1.0 - vmag*mu));
+            Real e0 = e/dd;
+            Real kap = interp(2*isp, e0)/dd;
+            Real ilab = dd*dd*dd*interp(2*isp + 1, e0)/(4.0*M_PI);
+            lum += (2.0*M_PI*2.0/kNMu)*M_PI*r_eff*r_eff*ilab*gfun(kap*r_eff)*de;
+          }
+        }
+        ltot += lum;
+        std::fprintf(fp, "%d %d %.8e %.8e %.8e\n", isp, ifr, e_lo, e_hi, lum);
+      }
+    }
+    std::fclose(fp);
+    std::cout << "### rad_nu_sphere: continuum solution at |v| = " << vmag
+              << ", total luminosity " << ltot
+              << " (code units), per bin in sphere_exact_continuum.txt" << std::endl;
+  }
 #endif  // ENABLE_NURATES
 }
 
