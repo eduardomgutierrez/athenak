@@ -787,7 +787,7 @@ void bns_nurates_gray(Real nb, Real temp, Real yp, Real yn,
   grey_op_params.eos_pars.mu_p = mu_p;                 // [MeV]
   grey_op_params.eos_pars.mu_n = mu_n;                 // [MeV]
   grey_op_params.eos_pars.dU      = 0.;
-  grey_op_params.eos_pars.dm_eff  = 0.;
+  grey_op_params.eos_pars.dm_eff  = 1.29333251;  // [MeV]
 
   // Full LTE, which is the only distribution the grey variables can support: they carry
   // no independent neutrino number density to reconstruct a non-equilibrium one from,
@@ -967,7 +967,7 @@ NuratesCellState NuratesSpectralCellState(
   grey_op_params.eos_pars.mu_p = mu_p;
   grey_op_params.eos_pars.mu_n = mu_n;
   grey_op_params.eos_pars.dU      = 0.;
-  grey_op_params.eos_pars.dm_eff  = 0.;
+  grey_op_params.eos_pars.dm_eff  = 1.29333251;  // [MeV]
 
   // The one case with no evolved spectrum to take the partner occupancy from.
   if (spec.f == nullptr) {
