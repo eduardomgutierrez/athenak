@@ -5,7 +5,7 @@
 # coordinate sense, i.e. k^r = 0 (tangential for the static observer).  x0 = 3 follows the
 # photon orbit, x0 = 2.5 falls in, x0 = 4 escapes.  No matter coupling.  The final
 # function writes the tetrad-frame (Kerr-Schild normal observer) energy per group in every
-# cell; vis/python/plot_nu_beam_deflection.py compares it with the geodesic.
+# cell; plot_nu_beam_deflection.py (ndaf-nu repo, validation/plots) compares it with the geodesic.
 #
 # Build:  cmake -B build-fb -D Athena_ENABLE_NURATES=ON -D PROBLEM=rad_freq_beam
 # Run:    athena -i rad_freq_beam.athinput problem/x0=3.0 problem/diag_file=beam_x3.txt

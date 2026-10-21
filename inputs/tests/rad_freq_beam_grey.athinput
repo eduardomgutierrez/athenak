@@ -4,7 +4,7 @@
 # (problem/x0, 0, 0) on the equatorial plane.  x0 = 3 follows the photon orbit, x0 = 2.5
 # falls in, x0 = 4 escapes.  The paper uses dx = 1/32 and ~144 angles across the beam;
 # this fits a 12 GB GPU at dx = 1/16 and nlevel 26 (~50 angles across the beam).
-# vis/python/plot_nu_beam_deflection.py draws log R^tt with the central geodesic and the
+# plot_nu_beam_deflection.py (ndaf-nu repo, validation/plots) draws log R^tt with the central geodesic and the
 # four beam-boundary geodesics.  problem/nearest_ordinate = false fills only the nearest
 # ordinate instead (for coarse nlevel, where the cone may hold none).
 #

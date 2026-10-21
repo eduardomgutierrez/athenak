@@ -31,7 +31,7 @@
 //  rays are mixed in angle; what it drifts by is discretization error.  The coordinate-frame
 //  R^tt = sum I dOmega (n^t)^2 is written too, for maps like Fig. 16 of Stone et al. (2024).  The beam's
 //  path and the shift of its spectrum are compared with the geodesic by
-//  vis/python/plot_nu_beam_deflection.py.
+//  plot_nu_beam_deflection.py (ndaf-nu repo, validation/plots).
 
 #include <cmath>
 #include <cstdio>

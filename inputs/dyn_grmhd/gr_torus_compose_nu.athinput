@@ -1,8 +1,12 @@
+# Example input for the gr_torus_compose problem generator (kept in AthenaK as the pgen's
+# reference input). Campaign inputs, templates and analysis tools for the NDAF project live in
+# the separate ndaf-nu repository (sims/templates/torus/).
+#
 # AthenaK input: Fishbone-Moncrief torus, tabulated CompOSE EOS (SFHo), with the
 # multifrequency neutrino Boltzmann solver (bns_nurates rates).  Local design run for the
-# NDAF project: the torus of inputs/ndaf/gr_torus_compose.athinput (M = 2.8 Msun, a = 0.8,
+# NDAF project (M = 2.8 Msun, a = 0.8,
 # r_edge = 4, r_peak = 9, s = 4 kB/baryon, Ye = 0.1) on a coarse mesh that fits one GPU.
-# Production resolution needs Aurora: the fluid input's mesh with this radiation setup is
+# Production resolution needs Aurora: a 3-level SMR mesh (finest dx 0.25 M) with this radiation setup is
 # ~720k cells x 864 intensities, ~120 GB.
 #
 # Mesh:      32^3 on [-32,32]^3 (dx = 2 M), one 32^3 meshblock (the fewest ghost cells).
@@ -14,8 +18,9 @@
 #           -D PROBLEM=gr_torus_compose -D Kokkos_ENABLE_CUDA=ON -D Kokkos_ARCH_BLACKWELL120=ON \
 #           -D CMAKE_CXX_COMPILER=$PWD/kokkos/bin/nvcc_wrapper
 #         (or -D Kokkos_ENABLE_OPENMP=ON for the CPU)
-# Run:    ./build-torus-cuda/src/athena -i inputs/ndaf/gr_torus_compose_nu.athinput -d <rundir>
-# Table:  /home/emgutierrez/work/athenak/tables/SFHo.athtable (full SFHo table with Y_p/Y_n)
+# Run:    ./build-torus-cuda/src/athena -i inputs/dyn_grmhd/gr_torus_compose_nu.athinput -d <rundir>
+# Table:  set mhd/table to the full SFHo .athtable (it needs Y_p/Y_n; the reduced test table
+#         in tst/inputs/tables does not have them)
 
 <comment>
 problem   = FM torus, SFHo, multifreq neutrinos, Fermi-Dirac seed test
@@ -82,7 +87,7 @@ enforce_maximum = false
 dmp_M       = 1.2
 nscalars    = 1
 
-table       = /home/emgutierrez/work/athenak/tables/SFHo.athtable
+table       = SFHo.athtable    # path to the full SFHo table
 units       = geometric_mass
 M_Msun      = 2.8
 
