@@ -27,23 +27,36 @@
 //!
 //! problem/vx, vy, vz give the sphere matter a uniform velocity (the atmosphere stays at
 //! rest); the analytic table is then only the rest-frame reference.
+//!
+//! problem/user_hist = true adds a user history with the energy and number luminosity of
+//! each species through the sphere of radius problem/hist_radius (default 12), computed
+//! as the torus history does (radiation/radiation_nu_hist.hpp).
 
 #include <cmath>
 #include <cstdio>
+#include <iomanip>
 #include <iostream>
+#include <memory>
+#include <sstream>
+#include <string>
+#include <vector>
 
 #include "athena.hpp"
 #include "coordinates/adm.hpp"
 #include "coordinates/cell_locations.hpp"
+#include "coordinates/coordinates.hpp"
 #include "dyn_grmhd/dyn_grmhd.hpp"
 #include "eos/eos.hpp"
 #include "geodesic-grid/geodesic_grid.hpp"
+#include "geodesic-grid/spherical_grid.hpp"
 #include "globals.hpp"
 #include "mesh/mesh.hpp"
 #include "mhd/mhd.hpp"
+#include "outputs/outputs.hpp"
 #include "parameter_input.hpp"
 #include "pgen/pgen.hpp"
 #include "radiation/radiation.hpp"
+#include "radiation/radiation_nu_hist.hpp"
 #if ENABLE_NURATES
 #include "radiation/radiation_nurates.hpp"
 #endif
@@ -51,10 +64,17 @@
 namespace {
 template <class EOSPolicy, class ErrorPolicy>
 void SphereImpl(Mesh *pmesh, ParameterInput *pin, const bool restart);
+void SphereNuHistory(HistoryData *pdata, Mesh *pm);
 }
 
 void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   MeshBlockPack *pmbp = pmy_mesh_->pmb_pack;
+  // user history: neutrino luminosities through a sphere (set up on restarts too)
+  if (user_hist) {
+    const Real rhist = pin->GetOrAddReal("problem", "hist_radius", 12.0);
+    spherical_grids.push_back(std::make_unique<SphericalGrid>(pmbp, 5, rhist));
+    user_hist_func = SphereNuHistory;
+  }
   using NQTPolicy = Primitive::EOSCompOSE<Primitive::NQTLogs>;
   using LogPolicy = Primitive::EOSCompOSE<Primitive::NormalLogs>;
   if (dynamic_cast<dyngr::DynGRMHDPS<NQTPolicy, Primitive::ResetFloor> *>(pmbp->pdyngr)
@@ -71,6 +91,43 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
 }
 
 namespace {
+
+//----------------------------------------------------------------------------------------
+//! \fn void SphereNuHistory
+//! \brief L and Ndot per species through each spherical grid: L<species>_<r> in code
+//!        luminosity, N<species>_<r> in code luminosity per MeV (radiation_nu_hist.cpp)
+
+void SphereNuHistory(HistoryData *pdata, Mesh *pm) {
+  MeshBlockPack *pmbp = pm->pmb_pack;
+  auto &grids = pm->pgen->spherical_grids;
+  const int nradii = grids.size();
+  const int nsp = pmbp->prad->nspecies;
+  pdata->nhist = 2*nsp*nradii;
+  if (pdata->nhist > NHISTORY_VARIABLES) {
+    std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+              << std::endl << "User history function specified pdata->nhist larger than"
+              << " NHISTORY_VARIABLES" << std::endl;
+    std::exit(EXIT_FAILURE);
+  }
+  DvceArray5D<Real> mom;
+  radiation::NuFluxMoments(pmbp, mom);
+  for (int g=0; g<nradii; ++g) {
+    std::stringstream stream;
+    stream << std::fixed << std::setprecision(1) << grids[g]->radius;
+    std::string rad_str = stream.str();
+    std::vector<Real> lum(nsp), ndot(nsp);
+    radiation::NuSphereLuminosities(grids[g].get(), mom, nsp,
+                                    pmbp->pcoord->coord_data.bh_spin,
+                                    lum.data(), ndot.data());
+    for (int isp=0; isp<nsp; ++isp) {
+      std::string tag = radiation::NuHistSpeciesTag(isp, nsp);
+      pdata->label[2*nsp*g+isp] = "L" + tag + "_" + rad_str;
+      pdata->label[2*nsp*g+nsp+isp] = "N" + tag + "_" + rad_str;
+      pdata->hdata[2*nsp*g+isp] = lum[isp];
+      pdata->hdata[2*nsp*g+nsp+isp] = ndot[isp];
+    }
+  }
+}
 
 template <class EOSPolicy, class ErrorPolicy>
 void SphereImpl(Mesh *pmesh, ParameterInput *pin, const bool restart) {
@@ -328,12 +385,17 @@ void SphereImpl(Mesh *pmesh, ParameterInput *pin, const bool restart) {
     FILE *fp = std::fopen("sphere_exact_continuum.txt", "w");
     std::fprintf(fp, "# continuum solution, |v| = %.6f, R_eff = %.8e\n", vmag, r_eff);
     std::fprintf(fp, "# species bin e_lo[MeV] e_hi[MeV] L_exact[code]\n");
+    // number luminosity int_bin L_E/E dE, in a file of its own (the one above keeps its
+    // five columns)
+    FILE *fpn = std::fopen("sphere_exact_continuum_number.txt", "w");
+    std::fprintf(fpn, "# continuum solution, |v| = %.6f, R_eff = %.8e\n", vmag, r_eff);
+    std::fprintf(fpn, "# species bin e_lo[MeV] e_hi[MeV] Ndot_exact[code lum/MeV]\n");
     Real ltot = 0.0;
     for (int isp = 0; isp < 2; ++isp) {
       for (int ifr = 0; ifr < nfreq; ++ifr) {
         Real e_lo = tab_h(isp, ifr, 0), e_hi = tab_h(isp, ifr, 1);
         Real lnr = std::log(e_hi/e_lo);
-        Real lum = 0.0;
+        Real lum = 0.0, num = 0.0;
         for (int is = 0; is < kNSub; ++is) {
           Real e = e_lo*std::exp(lnr*(is + 0.5)/kNSub);
           Real de = e*lnr/kNSub;
@@ -343,14 +405,18 @@ void SphereImpl(Mesh *pmesh, ParameterInput *pin, const bool restart) {
             Real e0 = e/dd;
             Real kap = interp(2*isp, e0)/dd;
             Real ilab = dd*dd*dd*interp(2*isp + 1, e0)/(4.0*M_PI);
-            lum += (2.0*M_PI*2.0/kNMu)*M_PI*r_eff*r_eff*ilab*gfun(kap*r_eff)*de;
+            Real dl = (2.0*M_PI*2.0/kNMu)*M_PI*r_eff*r_eff*ilab*gfun(kap*r_eff)*de;
+            lum += dl;
+            num += dl/e;
           }
         }
         ltot += lum;
         std::fprintf(fp, "%d %d %.8e %.8e %.8e\n", isp, ifr, e_lo, e_hi, lum);
+        std::fprintf(fpn, "%d %d %.8e %.8e %.8e\n", isp, ifr, e_lo, e_hi, num);
       }
     }
     std::fclose(fp);
+    std::fclose(fpn);
     std::cout << "### rad_nu_sphere: continuum solution at |v| = " << vmag
               << ", total luminosity " << ltot
               << " (code units), per bin in sphere_exact_continuum.txt" << std::endl;

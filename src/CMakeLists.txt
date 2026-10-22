@@ -158,6 +158,7 @@ add_executable(
         radiation/radiation_source.cpp
         radiation/radiation_source_nurates.cpp
         radiation/radiation_nurates.cpp
+        radiation/radiation_nu_hist.cpp
         radiation/radiation_tasks.cpp
         radiation/radiation_tetrad.cpp
         radiation/radiation_multi_freq.cpp

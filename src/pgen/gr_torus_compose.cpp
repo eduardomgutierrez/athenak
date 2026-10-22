@@ -46,6 +46,7 @@
 #include "hydro/hydro.hpp"
 #include "mhd/mhd.hpp"
 #include "radiation/radiation.hpp"
+#include "radiation/radiation_nu_hist.hpp"
 #include "dyn_grmhd/dyn_grmhd.hpp"
 #include "utils/tr_table.hpp"
 #if ENABLE_NURATES
@@ -3102,14 +3103,28 @@ void TorusFluxes(HistoryData *pdata, Mesh *pm) {
   // extract grids, number of radii, number of fluxes, and history appending index
   auto &grids = pm->pgen->spherical_grids;
   int nradii = grids.size();
-  int nflux = (is_mhd) ? 5 : 3;
+  // neutrino luminosities only with the multifrequency nurates radiation
+  const bool nu_hist = radiation::NuHistEnabled(pmbp);
+  const int nsp_nu = (nu_hist) ? pmbp->prad->nspecies : 0;
+  const int inu = (is_mhd) ? 5 : 3;   // first neutrino column of a sphere
+  const int iunb = inu + 2*nsp_nu;    // first unbound-outflow column of a sphere
+  const int nflux = iunb + 2;
 
-  // set number of and names of history variables for hydro or mhd
+  // set number of and names of history variables for hydro or mhd, per sphere
   //  (1) mass accretion rate
   //  (2) energy flux
   //  (3) angular momentum flux
   //  (4) magnetic flux (iff MHD)
-  pdata->nhist = nradii*nflux;
+  //  (5) Poynting flux (iff MHD)
+  //  (6) neutrino energy luminosity at infinity per species, L = -oint R^r_t sqrt(-g)
+  //      dOmega (code units, c^5/G; iff multifrequency nurates)
+  //  (7) neutrino number luminosity per species, Ndot = oint N^r sqrt(-g) dOmega, in code
+  //      luminosity per MeV: Ndot[1/s] = value*(c^5/G [erg/s])/(1 MeV [erg])
+  //      (iff multifrequency nurates; see radiation/radiation_nu_hist.cpp)
+  //  (8) outward rest-mass flux of unbound matter, Bernoulli criterion -h u_t > 1
+  //  (9) the same, geodesic criterion -u_t > 1
+  // and once, at the end, the total rest mass M_rest = int D d^3x over the mesh.
+  pdata->nhist = nradii*nflux + 1;
   if (pdata->nhist > NHISTORY_VARIABLES) {
     std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
               << std::endl << "User history function specified pdata->nhist larger than"
@@ -3127,19 +3142,30 @@ void TorusFluxes(HistoryData *pdata, Mesh *pm) {
       pdata->label[nflux*g+3] = "phi_" + rad_str;
       pdata->label[nflux*g+4] = "poynt_" + rad_str;
     }
+    for (int isp=0; isp<nsp_nu; ++isp) {
+      std::string tag = radiation::NuHistSpeciesTag(isp, nsp_nu);
+      pdata->label[nflux*g+inu+isp] = "L" + tag + "_" + rad_str;
+      pdata->label[nflux*g+inu+nsp_nu+isp] = "N" + tag + "_" + rad_str;
+    }
+    pdata->label[nflux*g+iunb] = "mdot_unb_" + rad_str;
+    pdata->label[nflux*g+iunb+1] = "mdot_ugeo_" + rad_str;
+  }
+  pdata->label[nradii*nflux] = "M_rest";
+
+  // zero all fluxes
+  for (int n=0; n<pdata->nhist; ++n) {
+    pdata->hdata[n] = 0.0;
+  }
+
+  // neutrino radial-flux moments, once for all spheres
+  DvceArray5D<Real> nu_mom;
+  if (nu_hist) {
+    radiation::NuFluxMoments(pmbp, nu_mom);
   }
 
   // go through angles at each radii:
   DualArray2D<Real> interpolated_bcc;  // needed for MHD
   for (int g=0; g<nradii; ++g) {
-    // zero fluxes at this radius
-    pdata->hdata[nflux*g+0] = 0.0;
-    pdata->hdata[nflux*g+1] = 0.0;
-    pdata->hdata[nflux*g+2] = 0.0;
-    if (is_mhd) {
-      pdata->hdata[nflux*g+3] = 0.0;
-      pdata->hdata[nflux*g+4] = 0.0;
-    }
 
     // interpolate primitives (and cell-centered magnetic fields iff mhd)
     if (is_mhd) {
@@ -3303,7 +3329,54 @@ void TorusFluxes(HistoryData *pdata, Mesh *pm) {
         Real t1_0_em = b_sq*ur*u_0 - br*b_0;
         pdata->hdata[nflux*g+4] += -1.0*t1_0_em*sqrtmdet*domega;
       }
+
+      // outward rest-mass flux of unbound matter: Bernoulli criterion -h u_t > 1, with
+      // the specific enthalpy h = 1 + (e_int + p)/rho of the energy flux above, and
+      // geodesic criterion -u_t > 1
+      if (int_dn > 0.0 && ur > 0.0) {
+        Real h_spec = 1.0 + (int_ie + int_p)/int_dn;
+        Real dmdot = int_dn*ur*sqrtmdet*domega;
+        if (-h_spec*u_0 > 1.0) pdata->hdata[nflux*g+iunb] += dmdot;
+        if (-u_0 > 1.0) pdata->hdata[nflux*g+iunb+1] += dmdot;
+      }
     }
+
+    // neutrino energy and number luminosities through this sphere
+    if (nu_hist) {
+      Real lum[4], ndot[4];
+      radiation::NuSphereLuminosities(grids[g].get(), nu_mom, nsp_nu, spin, lum, ndot);
+      for (int isp=0; isp<nsp_nu; ++isp) {
+        pdata->hdata[nflux*g+inu+isp] = lum[isp];
+        pdata->hdata[nflux*g+inu+nsp_nu+isp] = ndot[isp];
+      }
+    }
+  }
+
+  // total rest mass on this rank, int D d^3x with D = sqrt(gamma) rho W = u0(IDN)
+  // (densitized conserved density; in Cartesian KS rho u^t sqrt(-g) for GR hydro too)
+  {
+    auto &u0_ = (is_mhd) ? pmbp->pmhd->u0 : pmbp->phydro->u0;
+    auto &size = pmbp->pmb->mb_size;
+    auto &indcs = pm->mb_indcs;
+    const int is = indcs.is, nx1 = indcs.nx1;
+    const int js = indcs.js, nx2 = indcs.nx2;
+    const int ks = indcs.ks, nx3 = indcs.nx3;
+    const int nkji = nx3*nx2*nx1;
+    const int nji = nx2*nx1;
+    const int nmkji = pmbp->nmb_thispack*nkji;
+    Real m_rest = 0.0;
+    Kokkos::parallel_reduce("TorusFluxes_mrest",
+        Kokkos::RangePolicy<>(DevExeSpace(), 0, nmkji),
+    KOKKOS_LAMBDA(const int &idx, Real &sum) {
+      int m = idx/nkji;
+      int k = (idx - m*nkji)/nji;
+      int j = (idx - m*nkji - k*nji)/nx1;
+      int i = (idx - m*nkji - k*nji - j*nx1) + is;
+      k += ks;
+      j += js;
+      sum += u0_(m,IDN,k,j,i)*size.d_view(m).dx1*size.d_view(m).dx2*size.d_view(m).dx3;
+    }, Kokkos::Sum<Real>(m_rest));
+    pdata->hdata[nradii*nflux] = m_rest;
   }
 
   // fill rest of the_array with zeros, if nhist < NHISTORY_VARIABLES
