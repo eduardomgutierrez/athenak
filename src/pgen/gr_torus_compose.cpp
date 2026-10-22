@@ -1245,6 +1245,14 @@ void SetupTorus(ParameterInput* pin, Mesh* pmy_mesh_, torus_pgen& torus) {
                                                 glower[2][2], glower[2][3], glower[3][3]));
     
     Real rho = w0_(m,IDN,k,j,i);
+    // Lorentz factor from the normal-frame velocity u~^i: the conserved rest-mass density is
+    // D = sqrt(gamma) rho W, so the mass is int D d^3x = int rho u^t sqrt(-g) d^3x
+    const Real &uu1 = w0_(m,IVX,k,j,i);
+    const Real &uu2 = w0_(m,IVY,k,j,i);
+    const Real &uu3 = w0_(m,IVZ,k,j,i);
+    Real usq = glower[1][1]*uu1*uu1 + 2.0*glower[1][2]*uu1*uu2 + 2.0*glower[1][3]*uu1*uu3
+             + glower[2][2]*uu2*uu2 + 2.0*glower[2][3]*uu2*uu3 + glower[3][3]*uu3*uu3;
+    Real lorentz = sqrt(1.0 + usq);
     Real p;
     if (!use_dyngr_) {
       p = gm1_*w0_(m,IEN,k,j,i);
@@ -1256,7 +1264,7 @@ void SetupTorus(ParameterInput* pin, Mesh* pmy_mesh_, torus_pgen& torus) {
       T = GetTemperatureFromRho(trs, rho);
     }
 
-    mass_sum += rho * sqrt_gamma * dV;
+    mass_sum += rho * lorentz * sqrt_gamma * dV;
     lmax_rho = fmax(rho, lmax_rho);
     lmax_T   = fmax(T,   lmax_T);
     lmax_p   = fmax(p,   lmax_p);
@@ -1274,7 +1282,8 @@ void SetupTorus(ParameterInput* pin, Mesh* pmy_mesh_, torus_pgen& torus) {
   max_p   = global_max[2];
 #endif
   if (global_variable::my_rank == 0) {
-    std::cout << "Torus mass [M_sun] = " << torus_mass * trs.M_Msun << std::endl;
+    std::cout << "Torus rest mass [M_sun] = " << torus_mass * trs.M_Msun
+              << " (int sqrt(gamma) rho W d^3x over the mesh, atmosphere included)" << std::endl;
     std::cout << "Max rho    = " << max_rho << std::endl;
     std::cout << "Max T      = " << max_T << std::endl;
     std::cout << "Max p      = " << max_p << std::endl;
