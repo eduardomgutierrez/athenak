@@ -8,6 +8,8 @@
 //! \file outputs.hpp
 //  \brief provides classes to handle ALL types of data output
 
+#include <cstdlib>
+#include <iostream>
 #include <string>
 #include <vector>
 
@@ -16,10 +18,13 @@
 #include "athena.hpp"
 #include "io_wrapper.hpp"
 
-#define NHISTORY_VARIABLES 50
-#if NHISTORY_VARIABLES > NREDUCTION_VARIABLES
-    #error NHISTORY > NREDUCTION in outputs.hpp
-#endif
+// Columns of one history data set.  Built-in histories reduce on the device into a
+// GlobalSum of NREDUCTION_VARIABLES entries (athena.hpp) and copy it into hdata, so they
+// are limited to NREDUCTION_VARIABLES (see CheckHistoryReductionSize); user history
+// functions fill hdata on the host and may use all NHISTORY_VARIABLES.
+#define NHISTORY_VARIABLES 128
+static_assert(NHISTORY_VARIABLES >= NREDUCTION_VARIABLES,
+              "a built-in history must fit in HistoryData::hdata");
 
 #define NOUTPUT_CHOICES 180
 // choices for output variables used in <ouput> blocks in input file
@@ -230,6 +235,20 @@ struct HistoryData {
   // constructor
   explicit HistoryData(PhysicsModule name) : physics(name), header_written(false) {}
 };
+
+//----------------------------------------------------------------------------------------
+//! \fn void CheckHistoryReductionSize
+//  \brief Fatal error if a history reduced through array_sum::GlobalSum has more columns
+//  than the reduction array holds (NREDUCTION_VARIABLES < NHISTORY_VARIABLES).
+
+inline void CheckHistoryReductionSize(int nhist, const char *file, int line) {
+  if (nhist > NREDUCTION_VARIABLES) {
+    std::cout << "### FATAL ERROR in " << file << " at line " << line << std::endl
+              << "history with " << nhist << " variables reduced on the device, more "
+              << "than NREDUCTION_VARIABLES = " << NREDUCTION_VARIABLES << std::endl;
+    std::exit(EXIT_FAILURE);
+  }
+}
 
 //----------------------------------------------------------------------------------------
 //! \struct TrackedParticleData

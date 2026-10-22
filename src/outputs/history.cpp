@@ -119,6 +119,7 @@ void HistoryOutput::LoadHydroHistoryData(HistoryData *pdata, Mesh *pm) {
   const int nkji = nx3*nx2*nx1;
   const int nji  = nx2*nx1;
   array_sum::GlobalSum sum_this_mb;
+  CheckHistoryReductionSize(pdata->nhist, __FILE__, __LINE__);
   Kokkos::parallel_reduce("HistSums",Kokkos::RangePolicy<>(DevExeSpace(), 0, nmkji),
   KOKKOS_LAMBDA(const int &idx, array_sum::GlobalSum &mb_sum) {
     // compute n,k,j,i indices of thread
@@ -151,8 +152,8 @@ void HistoryOutput::LoadHydroHistoryData(HistoryData *pdata, Mesh *pm) {
       hvars.the_array[nhydro_+3+s] = vol*u0_(m,nhydro_+s,k,j,i);
     }
 
-    // fill rest of the_array with zeros, if nhist < NHISTORY_VARIABLES
-    for (int n=nhist_; n<NHISTORY_VARIABLES; ++n) {
+    // fill rest of the_array with zeros, if nhist < NREDUCTION_VARIABLES
+    for (int n=nhist_; n<NREDUCTION_VARIABLES; ++n) {
       hvars.the_array[n] = 0.0;
     }
 
@@ -206,6 +207,7 @@ void HistoryOutput::LoadZ4cHistoryData(HistoryData *pdata, Mesh *pm) {
   const int nkji = nx3*nx2*nx1;
   const int nji  = nx2*nx1;
   array_sum::GlobalSum sum_this_mb;
+  CheckHistoryReductionSize(pdata->nhist, __FILE__, __LINE__);
   Kokkos::parallel_reduce("HistSums",Kokkos::RangePolicy<>(DevExeSpace(), 0, nmkji),
   KOKKOS_LAMBDA(const int &idx, array_sum::GlobalSum &mb_sum) {
     // compute n,k,j,i indices of thread
@@ -247,8 +249,8 @@ void HistoryOutput::LoadZ4cHistoryData(HistoryData *pdata, Mesh *pm) {
       hvars.the_array[8] = 0;
     }
 
-    // fill rest of the_array with zeros, if nhist < NHISTORY_VARIABLES
-    for (int n=nhist_; n<NHISTORY_VARIABLES; ++n) {
+    // fill rest of the_array with zeros, if nhist < NREDUCTION_VARIABLES
+    for (int n=nhist_; n<NREDUCTION_VARIABLES; ++n) {
       hvars.the_array[n] = 0.0;
     }
 
@@ -320,6 +322,7 @@ void HistoryOutput::LoadMHDHistoryData(HistoryData *pdata, Mesh *pm) {
   const int nkji = nx3*nx2*nx1;
   const int nji  = nx2*nx1;
   array_sum::GlobalSum sum_this_mb;
+  CheckHistoryReductionSize(pdata->nhist, __FILE__, __LINE__);
   Kokkos::parallel_reduce("HistSums",Kokkos::RangePolicy<>(DevExeSpace(), 0, nmkji),
   KOKKOS_LAMBDA(const int &idx, array_sum::GlobalSum &mb_sum) {
     // compute n,k,j,i indices of thread
@@ -357,8 +360,8 @@ void HistoryOutput::LoadMHDHistoryData(HistoryData *pdata, Mesh *pm) {
       hvars.the_array[nmhd_+6+s] = vol*u0_(m,nmhd_+s,k,j,i);
     }
 
-    // fill rest of the_array with zeros, if nhist < NHISTORY_VARIABLES
-    for (int n=nhist_; n<NHISTORY_VARIABLES; ++n) {
+    // fill rest of the_array with zeros, if nhist < NREDUCTION_VARIABLES
+    for (int n=nhist_; n<NREDUCTION_VARIABLES; ++n) {
       hvars.the_array[n] = 0.0;
     }
 
@@ -429,8 +432,9 @@ void HistoryOutput::WriteOutputFile(Mesh *pm, ParameterInput *pin) {
         std::fprintf(pfile,"# Athena++ history data\n");
         std::fprintf(pfile,"#  [%d]=time      ", iout++);
         std::fprintf(pfile,"[%d]=dt       ", iout++);
+        // full labels: user histories use longer ones (e.g. mdot_unb_100.0)
         for (int n=0; n<data.nhist; ++n) {
-          std::fprintf(pfile,"[%d]=%.10s    ", iout++, data.label[n].c_str());
+          std::fprintf(pfile,"[%d]=%s    ", iout++, data.label[n].c_str());
         }
         std::fprintf(pfile,"\n");                              // terminate line
         data.header_written = true;

@@ -375,6 +375,7 @@ void ShwaveHistory(HistoryData *pdata, Mesh *pm) {
   DvceArray5D<Real> bcc_temp;
   auto &bcc0_ = (is_mhd)? pm->pmb_pack->pmhd->bcc0 : bcc_temp;
 
+  CheckHistoryReductionSize(pdata->nhist, __FILE__, __LINE__);
   Kokkos::parallel_reduce("HistSums",Kokkos::RangePolicy<>(DevExeSpace(), 0, nmkji),
   KOKKOS_LAMBDA(const int &idx, array_sum::GlobalSum &mb_sum) {
     // compute n,k,j,i indices of thread
@@ -410,8 +411,8 @@ void ShwaveHistory(HistoryData *pdata, Mesh *pm) {
       hvars.the_array[0] = vol*2.0*w0_(m,IVY,k,j,i)*cos(kx*x1v + sv.ky*x2v);
     }
 
-    // fill rest of the_array with zeros, if nhist < NHISTORY_VARIABLES
-    for (int n=nhist_; n<NHISTORY_VARIABLES; ++n) {
+    // fill rest of the_array with zeros, if nhist < NREDUCTION_VARIABLES
+    for (int n=nhist_; n<NREDUCTION_VARIABLES; ++n) {
       hvars.the_array[n] = 0.0;
     }
 
