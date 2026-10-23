@@ -16,7 +16,8 @@
 KOKKOS_INLINE_FUNCTION
 void ComputeTetrad(Real x, Real y, Real z, const bool minkowski, const Real a,
                    Real g[][4], Real gi[][4], Real dgx[][4], Real dgy[][4], Real dgz[][4],
-                   Real e[][4], Real ecov[][4], Real omega[][4][4]) {
+                   Real e[][4], Real ecov[][4], Real omega[][4][4],
+                   const bool planar = false) {
   // if (fabs(z) < (SMALL_NUMBER)) z = (SMALL_NUMBER);  // see cartesian_ks.hpp comments
   Real rad = sqrt(SQR(x) + SQR(y) + SQR(z));
   Real r = sqrt((SQR(rad)-SQR(a)+sqrt(SQR(SQR(rad)-SQR(a))+4.0*SQR(a)*SQR(z)))/2.0);
@@ -124,6 +125,21 @@ void ComputeTetrad(Real x, Real y, Real z, const bool minkowski, const Real a,
   de[3][3][2] += (-iwa*iwb*df_dx3 + f*iwasq*iwb*dwa_dx3 + f*iwa*iwbsq*dwb_dx3)*ll2*ll3;
   de[3][3][3]  = iwa*dwb_dx3 - iwasq*wb*dwa_dx3;
 
+  // planar: a 2D run (nx3 = 1) has no z transport, so a ray with n^3 != 0 never moves in z
+  // and never sees the z gradient of |n_t|.  If the connection kept the z derivatives of
+  // the 3D metric, the frequency shift (and angular rate) of such a ray would include a
+  // n^3 d_z ln|n_t| part that the transport cannot balance, and E_inf = nu |n_t| would not
+  // be conserved: a blueshift that grows with |n^3| (rad_freq_beam, ndaf-nu B2 notes).
+  // Dropping them treats the problem as z-independent, which is what a 2D grid represents.
+  // In-plane rays at z = 0 are unchanged: there g^{iz} = 0 for in-plane i and d_z g_ab = 0
+  // for in-plane a, b (only the mixed d_z g_az survive, and they enter the in-plane
+  // geodesic equation multiplied by g^{iz}).
+  if (planar) {
+    for (int b=0; b<4; ++b) {
+      for (int mu=0; mu<4; ++mu) { de[3][b][mu] = 0.0; }
+    }
+  }
+
   // Stow metric derivatives in a temporary array
   Real dg[4][4][4] = {};
   for (int i=0; i<4; ++i) {
@@ -131,7 +147,7 @@ void ComputeTetrad(Real x, Real y, Real z, const bool minkowski, const Real a,
       dg[0][i][j] = 0.0;
       dg[1][i][j] = dgx[i][j];
       dg[2][i][j] = dgy[i][j];
-      dg[3][i][j] = dgz[i][j];
+      dg[3][i][j] = planar ? 0.0 : dgz[i][j];
     }
   }
 

@@ -40,6 +40,9 @@ void Radiation::SetOrthonormalTetrad() {
   auto nh_c_ = nh_c;
 
   auto &coord = pmy_pack->pcoord->coord_data;
+  // 2D runs (nx2 > 1, nx3 = 1) use a z-independent connection: see ComputeTetrad.  1D and
+  // single-zone runs keep the full 3D connection (they lack y transport as well).
+  const bool planar = (indcs.nx2 > 1) && (indcs.nx3 == 1);
   bool &flat = coord.is_minkowski;
   Real &spin = coord.bh_spin;
 
@@ -91,7 +94,7 @@ void Radiation::SetOrthonormalTetrad() {
     Real dgx[4][4], dgy[4][4], dgz[4][4];
     ComputeMetricDerivatives(x1v,x2v,x3v,flat,spin,dgx,dgy,dgz);
     Real e[4][4], e_cov[4][4], omega[4][4][4];
-    ComputeTetrad(x1v,x2v,x3v,flat,spin,glower,gupper,dgx,dgy,dgz,e,e_cov,omega);
+    ComputeTetrad(x1v,x2v,x3v,flat,spin,glower,gupper,dgx,dgy,dgz,e,e_cov,omega,planar);
     for (int d1=0; d1<4; ++d1) {
       for (int d2=0; d2<4; ++d2) {
         tet_c_   (m,d1,d2,k,j,i) = e[d1][d2];
@@ -121,7 +124,7 @@ void Radiation::SetOrthonormalTetrad() {
     Real dgx[4][4], dgy[4][4], dgz[4][4];
     ComputeMetricDerivatives(x1f,x2v,x3v,flat,spin,dgx,dgy,dgz);
     Real e[4][4], e_cov[4][4], omega[4][4][4];
-    ComputeTetrad(x1f,x2v,x3v,flat,spin,glower,gupper,dgx,dgy,dgz,e,e_cov,omega);
+    ComputeTetrad(x1f,x2v,x3v,flat,spin,glower,gupper,dgx,dgy,dgz,e,e_cov,omega,planar);
     for (int d=0; d<4; ++d) { tet_d1_x1f_(m,d,k,j,i) = e[d][1]; }
   });
 
@@ -146,7 +149,7 @@ void Radiation::SetOrthonormalTetrad() {
     Real dgx[4][4], dgy[4][4], dgz[4][4];
     ComputeMetricDerivatives(x1v,x2f,x3v,flat,spin,dgx,dgy,dgz);
     Real e[4][4], e_cov[4][4], omega[4][4][4];
-    ComputeTetrad(x1v,x2f,x3v,flat,spin,glower,gupper,dgx,dgy,dgz,e,e_cov,omega);
+    ComputeTetrad(x1v,x2f,x3v,flat,spin,glower,gupper,dgx,dgy,dgz,e,e_cov,omega,planar);
     for (int d=0; d<4; ++d) { tet_d2_x2f_(m,d,k,j,i) = e[d][2]; }
   });
 
@@ -171,7 +174,7 @@ void Radiation::SetOrthonormalTetrad() {
     Real dgx[4][4], dgy[4][4], dgz[4][4];
     ComputeMetricDerivatives(x1v,x2v,x3f,flat,spin,dgx,dgy,dgz);
     Real e[4][4], e_cov[4][4], omega[4][4][4];
-    ComputeTetrad(x1v,x2v,x3f,flat,spin,glower,gupper,dgx,dgy,dgz,e,e_cov,omega);
+    ComputeTetrad(x1v,x2v,x3f,flat,spin,glower,gupper,dgx,dgy,dgz,e,e_cov,omega,planar);
     for (int d=0; d<4; ++d) { tet_d3_x3f_(m,d,k,j,i) = e[d][3]; }
   });
 
@@ -199,7 +202,7 @@ void Radiation::SetOrthonormalTetrad() {
       Real dgx[4][4], dgy[4][4], dgz[4][4];
       ComputeMetricDerivatives(x1v,x2v,x3v,flat,spin,dgx,dgy,dgz);
       Real e[4][4], e_cov[4][4], omega[4][4][4];
-      ComputeTetrad(x1v,x2v,x3v,flat,spin,glower,gupper,dgx,dgy,dgz,e,e_cov,omega);
+      ComputeTetrad(x1v,x2v,x3v,flat,spin,glower,gupper,dgx,dgy,dgz,e,e_cov,omega,planar);
       for (int n=0; n<=nang1; ++n) {
         for (int nb=0; nb<num_neighbors_.d_view(n); ++nb) {
           Real iszetaf = 1.0/sqrt(1.0 - SQR(nh_f_.d_view(n,nb,3)));
@@ -242,7 +245,7 @@ void Radiation::SetOrthonormalTetrad() {
       Real dgx[4][4], dgy[4][4], dgz[4][4];
       ComputeMetricDerivatives(x1v,x2v,x3v,flat,spin,dgx,dgy,dgz);
       Real e[4][4], e_cov[4][4], omega[4][4][4];
-      ComputeTetrad(x1v,x2v,x3v,flat,spin,glower,gupper,dgx,dgy,dgz,e,e_cov,omega);
+      ComputeTetrad(x1v,x2v,x3v,flat,spin,glower,gupper,dgx,dgy,dgz,e,e_cov,omega,planar);
       for (int iang=0; iang<=nang1; ++iang) {
         nnu_coeff_(m,iang,k,j,i) = nh_c_.d_view(iang,0)*nh_c_.d_view(iang,0)*omega[0][0][0] +
                                    nh_c_.d_view(iang,1)*nh_c_.d_view(iang,0)*omega[0][1][0] +
@@ -286,7 +289,7 @@ void Radiation::SetOrthonormalTetrad() {
       Real dgx[4][4], dgy[4][4], dgz[4][4];
       ComputeMetricDerivatives(x1v,x2v,x3v,flat,spin,dgx,dgy,dgz);
       Real e[4][4], e_cov[4][4], omega[4][4][4];
-      ComputeTetrad(x1v,x2v,x3v,flat,spin,glower,gupper,dgx,dgy,dgz,e,e_cov,omega);
+      ComputeTetrad(x1v,x2v,x3v,flat,spin,glower,gupper,dgx,dgy,dgz,e,e_cov,omega,planar);
 
       // Minkowski metric
       Real eta[4][4] = {};
