@@ -367,6 +367,8 @@ TaskStatus Radiation::CalcOpacityNurates_(Driver *pdrive, int stage) {
   auto nurates_params_ = nurates_params;
   const bool peq_on_ = nurates_params_.use_partial_equilibrium;
   const bool peq_heavy_ = nurates_params_.peq_heavy;
+  const bool peq_pair_lag_ = nurates_params_.peq_pair_lag;
+  const Real peq_D_resolve_steps_ = nurates_params_.peq_D_resolve_steps;
   // A FULL step, not the stage's beta*dt: this function returns early for stage > 1, so
   // the emissivity it computes serves the whole cycle.  With rk2, beta = {1, 1/2} and
   // gam0 = {0, 1/2}, so the source applied over a cycle is exactly dt.
@@ -394,6 +396,7 @@ TaskStatus Radiation::CalcOpacityNurates_(Driver *pdrive, int stage) {
   auto &jf_f_      = nurates_jf_freq;
   auto &nf_f_      = nurates_nf_freq;
   auto &f_f_       = nurates_f_freq;
+  auto &kpb_1_     = nurates_kpb_1;
   const bool evolved_spec_ =
       multi_freq && !nurates_params.use_equilibrium_distribution;
   // Whether the cell needs its spectrum un-shifted onto the fixed comoving grid.  Two
@@ -780,22 +783,6 @@ TaskStatus Radiation::CalcOpacityNurates_(Driver *pdrive, int stage) {
     }
 
     if (multi_freq_) {
-      // Field-weighted mean absorption opacities for the predictor.  kappa varies bin
-      // to bin, so the means run over the bins weighted by the per-bin energy and
-      // number densities -- the spectral generalisation of the grey averages above.
-      // The electron-flavour means are kept PER SPECIES, since each species now carries
-      // its own weight; only the heavy pairs are pooled.  Numerator and denominator are
-      // accumulated from the same per-bin weights, so each result is a mean of the
-      // opacities whatever fraction of the spectrum the un-shift left on the grid.
-      Real J_x = 0.0;
-      for (int isp = 2; isp < nspecies_; ++isp) { J_x += nudens_1[isp]; }
-      Real kJ_e[2] = {0.0, 0.0}, kN_e[2] = {0.0, 0.0};
-      Real sJ_e[2] = {0.0, 0.0}, sN_e[2] = {0.0, 0.0};
-      Real ka1_e[2] = {0.0, 0.0}, ka0_e[2] = {0.0, 0.0};
-      int nka_e[2] = {0, 0};
-      Real kJ_x = 0.0, ka_x = 0.0, sJ_x = 0.0;
-      int nka_x = 0;
-
       NuratesGroupOccupancy nu_spec = {};
       if (evolved_spec_) {
         Real b0_lo = 0.0, b0_hi = 0.0, b1_lo = 0.0, b1_hi = 0.0;
@@ -817,78 +804,112 @@ TaskStatus Radiation::CalcOpacityNurates_(Driver *pdrive, int stage) {
           NuratesSpectralCellState(nb, T, yp, yn, mu_n, mu_p, mu_e, nu_spec,
                                    nurates_params_, code_units_l, eos_units_loc_l);
 
-      // freq_grid is in MeV, which is what bns_nurates_spectral_bin wants
-      for (int ifr = 0; ifr < nfreq_; ++ifr) {
-        Real e_lo = 0.0, e_hi = 0.0;
-        FreqBinEdgesMeV(freq_grid_, ifr, nfreq_, freq_scale_, e_lo, e_hi);
+      // The matter state every rate below is evaluated at: (T*, Ye*) with the
+      // predictor on, (T^n, Ye^n) without it.
+      Real T_r = T;
+      Real mu_n_r = mu_n;
+      Real mu_p_r = mu_p;
+      Real mu_e_r = mu_e;
 
-        Real loc_eta_0_f[4]  = {0.};
-        Real loc_eta_1_f[4]  = {0.};
-        Real loc_abs_0_f[4]  = {0.};
-        Real loc_abs_1_f[4]  = {0.};
-        Real loc_scat_1_f[4] = {0.};
-        bns_nurates_spectral_bin(nu_cell, e_lo, e_hi, freq_scale_,
-                                 loc_eta_0_f, loc_eta_1_f,
-                                 loc_abs_0_f, loc_abs_1_f, loc_scat_1_f,
-                                 nurates_params_);
-        for (int isp = 0; isp < nspecies_; ++isp) {
-          eta_0_f_(m, isp, ifr, k, j, i)  = loc_eta_0_f[isp];
-          eta_1_f_(m, isp, ifr, k, j, i)  = loc_eta_1_f[isp];
-          abs_0_f_(m, isp, ifr, k, j, i)  = loc_abs_0_f[isp];
-          abs_1_f_(m, isp, ifr, k, j, i)  = loc_abs_1_f[isp];
-          scat_1_f_(m, isp, ifr, k, j, i) = loc_scat_1_f[isp];
-        }
-
-      }
-
-      // Partial-equilibrium weights.  A separate pass over the bins: the opacities and
-      // the per-bin angular sums are both in global memory by now, and the loop above is
-      // register-starved.
       if (peq_on_) {
+        // Predictor weights: field-weighted means of the absorption opacity over the
+        // bins, per species for the electron pair and pooled for the heavies, falling
+        // back to the arithmetic mean on an empty field.  The lepton channel takes the
+        // beta processes alone -- the pair and bremsstrahlung kernels carry no mu_nu and
+        // exchange no lepton number with the matter.  The energy channel adds their
+        // opacity lagged from the previous step, since evaluating it now would cost the
+        // kernel integrals this pass is meant to avoid.
+        Real J_x = 0.0;
+        for (int isp = 2; isp < nspecies_; ++isp) { J_x += nudens_1[isp]; }
+        Real kJ_e[2] = {0.0, 0.0}, kN_e[2] = {0.0, 0.0};
+        Real sJ_e[2] = {0.0, 0.0}, sN_e[2] = {0.0, 0.0};
+        Real ka_e[2] = {0.0, 0.0};
+        int nka_e[2] = {0, 0};
+        Real kJ_x = 0.0, ka_x = 0.0, sJ_x = 0.0;
+        int nka_x = 0;
         for (int ifr = 0; ifr < nfreq_; ++ifr) {
+          Real e_lo = 0.0, e_hi = 0.0;
+          FreqBinEdgesMeV(freq_grid_, ifr, nfreq_, freq_scale_, e_lo, e_hi);
+          Real ka_beta[4] = {0.};
+          bns_nurates_spectral_bin_beta(nu_cell, e_lo, e_hi, freq_scale_, ka_beta,
+                                        nurates_params_);
           for (int isp = 0; isp < nspecies_; ++isp) {
             Real J_f = jf_f_(m, isp, ifr, k, j, i)/wght_sum;
             // Same conversion the species totals get: a code-unit energy density over a
             // bin energy in MeV is a number density in fm^-3.
             Real N_f = nf_f_(m, isp, ifr, k, j, i)*code_edens_to_eos/wght_sum;
-            // Each channel takes the opacity it will itself be integrated with: abs_1
-            // weights the energy equation, abs_0 the number equation, exactly as the grey
-            // block above does.  abs_0 and abs_1 hold the same monochromatic kappa today;
-            // they part company only once an energy average is taken over a spectrum, as
-            // they would with the non-thermal separation the M1 path carries.
-            Real ka1 = abs_1_f_(m, isp, ifr, k, j, i);
-            Real ka0 = abs_0_f_(m, isp, ifr, k, j, i);
+            Real ka = ka_beta[isp];
             if (isp < 2) {
-              kJ_e[isp] += ka1*J_f;
-              kN_e[isp] += ka0*N_f;
+              kJ_e[isp] += ka*J_f;
+              kN_e[isp] += ka*N_f;
               sJ_e[isp] += J_f;
               sN_e[isp] += N_f;
-              ka1_e[isp] += ka1;
-              ka0_e[isp] += ka0;
+              ka_e[isp] += ka;
               ++nka_e[isp];
             } else {
-              kJ_x += ka1*J_f;
+              kJ_x += ka*J_f;
               sJ_x += J_f;
-              ka_x += ka1;
+              ka_x += ka;
               ++nka_x;
             }
           }
         }
-      }
 
-      if (peq_on_) {
+        // A negative lag means none has been stored yet (first step, restart): it is
+        // then evaluated here at the start-of-step state, once.  The ternaries also
+        // send a NaN to 0.
+        Real kpb_lag[4] = {0.0, 0.0, 0.0, 0.0};
+        bool seed_lag = false;
+        for (int isp = 0; isp < nspecies_; ++isp) {
+          seed_lag = seed_lag || !(kpb_1_(m, isp, k, j, i) >= 0.0);
+        }
+        if (peq_pair_lag_ && seed_lag) {
+          Real kpbJ0[4] = {0.0, 0.0, 0.0, 0.0};
+          Real kpbS0[4] = {0.0, 0.0, 0.0, 0.0};
+          Real sJ0[4] = {0.0, 0.0, 0.0, 0.0};
+          for (int ifr = 0; ifr < nfreq_; ++ifr) {
+            Real e_lo = 0.0, e_hi = 0.0;
+            FreqBinEdgesMeV(freq_grid_, ifr, nfreq_, freq_scale_, e_lo, e_hi);
+            Real s_eta_0[4], s_eta_1[4], s_abs_0[4], s_abs_1[4], s_scat_1[4];
+            Real s_dev[4], s_kpb[4];
+            bns_nurates_spectral_bin(nu_cell, e_lo, e_hi, freq_scale_,
+                                     s_eta_0, s_eta_1, s_abs_0, s_abs_1, s_scat_1,
+                                     s_dev, s_kpb, nurates_params_);
+            for (int isp = 0; isp < nspecies_; ++isp) {
+              Real J_f = jf_f_(m, isp, ifr, k, j, i)/wght_sum;
+              kpbJ0[isp] += s_kpb[isp]*J_f;
+              kpbS0[isp] += s_kpb[isp];
+              sJ0[isp] += J_f;
+            }
+          }
+          for (int isp = 0; isp < nspecies_; ++isp) {
+            Real kpb = (sJ0[isp] > 0.0) ? kpbJ0[isp]/sJ0[isp] : kpbS0[isp]/nfreq_;
+            kpb_lag[isp] = (kpb > 0.0) ? kpb : 0.0;
+          }
+        } else if (peq_pair_lag_) {
+          for (int isp = 0; isp < nspecies_; ++isp) {
+            Real kpb = kpb_1_(m, isp, k, j, i);
+            kpb_lag[isp] = (kpb > 0.0) ? kpb : 0.0;
+          }
+        }
+
         Real kap_1[2] = {0.0, 0.0};
         Real kap_0[2] = {0.0, 0.0};
         for (int isp = 0; isp < 2; ++isp) {
-          kap_1[isp] = (sJ_e[isp] > 0.0)
-                       ? kJ_e[isp]/sJ_e[isp]
-                       : ((nka_e[isp] > 0) ? ka1_e[isp]/nka_e[isp] : 0.0);
-          kap_0[isp] = (sN_e[isp] > 0.0)
-                       ? kN_e[isp]/sN_e[isp]
-                       : ((nka_e[isp] > 0) ? ka0_e[isp]/nka_e[isp] : 0.0);
+          Real ka_mean = (nka_e[isp] > 0) ? ka_e[isp]/nka_e[isp] : 0.0;
+          kap_1[isp] = ((sJ_e[isp] > 0.0) ? kJ_e[isp]/sJ_e[isp] : ka_mean) +
+                       kpb_lag[isp];
+          kap_0[isp] = (sN_e[isp] > 0.0) ? kN_e[isp]/sN_e[isp] : ka_mean;
         }
-        Real kbar_1x = (sJ_x > 0.0) ? kJ_x/sJ_x
-                                    : ((nka_x > 0) ? ka_x/nka_x : 0.0);
+        Real kpbJ_x = 0.0, kpbs_x = 0.0;
+        for (int isp = 2; isp < nspecies_; ++isp) {
+          kpbJ_x += kpb_lag[isp]*nudens_1[isp];
+          kpbs_x += kpb_lag[isp];
+        }
+        const int n_x = nspecies_ - 2;
+        Real kbar_1x = ((sJ_x > 0.0) ? kJ_x/sJ_x
+                                     : ((nka_x > 0) ? ka_x/nka_x : 0.0)) +
+                       ((J_x > 0.0) ? kpbJ_x/J_x : ((n_x > 0) ? kpbs_x/n_x : 0.0));
 
         const Real J_nu[2] = {nudens_1[0], nudens_1[1]};
         const Real N_nu[2] = {nudens_0[0], nudens_0[1]};
@@ -905,45 +926,142 @@ TaskStatus Radiation::CalcOpacityNurates_(Driver *pdrive, int stage) {
                                   nurates_params_, code_units_l, eos_units_loc_l,
                                   T_star, Ye_star);
 
-        Real Ye_arr[3] = {Ye_star, 0.0, 0.0};
-        Real mu_b_s  = eos.GetBaryonChemicalPotential(nb, T_star, Ye_arr);
-        Real mu_q_s  = eos.GetChargeChemicalPotential(nb, T_star, Ye_arr);
-        Real mu_le_s = eos.GetElectronLeptonChemicalPotential(nb, T_star, Ye_arr);
-        Real mu_n_s = mu_b_s;
-        Real mu_p_s = mu_b_s + mu_q_s;
-        Real mu_e_s = mu_le_s - mu_q_s;
-        bool mu_finite = Kokkos::isfinite(T_star) && Kokkos::isfinite(mu_n_s) &&
-                         Kokkos::isfinite(mu_p_s) && Kokkos::isfinite(mu_e_s);
-        if (!mu_finite) {
-          T_star = T;
-          mu_n_s = mu_n;
-          mu_p_s = mu_p;
-          mu_e_s = mu_e;
+        // A cell the predictor leaves where it is keeps the start-of-step state bit for
+        // bit; any non-finite EOS answer falls back to it too.
+        if (T_star != T || Ye_star != Ye) {
+          Real Ye_arr[3] = {Ye_star, 0.0, 0.0};
+          Real yp_s   = eos.GetProtonFraction(nb, T_star, Ye_arr);
+          Real yn_s   = eos.GetNeutronFraction(nb, T_star, Ye_arr);
+          Real mu_b_s = eos.GetBaryonChemicalPotential(nb, T_star, Ye_arr);
+          Real mu_q_s = eos.GetChargeChemicalPotential(nb, T_star, Ye_arr);
+          Real mu_le_s = eos.GetElectronLeptonChemicalPotential(nb, T_star, Ye_arr);
+          Real mu_n_s = mu_b_s;
+          Real mu_p_s = mu_b_s + mu_q_s;
+          Real mu_e_s = mu_le_s - mu_q_s;
+          bool star_finite = Kokkos::isfinite(T_star) && Kokkos::isfinite(yp_s) &&
+                             Kokkos::isfinite(yn_s) && Kokkos::isfinite(mu_n_s) &&
+                             Kokkos::isfinite(mu_p_s) && Kokkos::isfinite(mu_e_s);
+          if (star_finite) {
+            T_r = T_star;
+            mu_n_r = mu_n_s;
+            mu_p_r = mu_p_s;
+            mu_e_r = mu_e_s;
+            nu_cell = NuratesSpectralCellState(nb, T_star, yp_s, yn_s,
+                                               mu_n_s, mu_p_s, mu_e_s, nu_spec,
+                                               nurates_params_, code_units_l,
+                                               eos_units_loc_l);
+          }
         }
+      }
 
-        // Kirchhoff's law, bin by bin, and the only place the spectral emissivity of
-        // the species the predictor covers is set -- bns_nurates_spectral_bin skips its
-        // own emissivity quadrature entirely when that is all of them.  Exact per bin
-        // rather than approximate: the source term reads eq_j = eta_1/kappa back as the
-        // spectrum it relaxes towards, so kappa*J_eq is the only pairing whose fixed
-        // point is the equilibrium it is meant to reach.
-        for (int ifr = 0; ifr < nfreq_; ++ifr) {
-          Real e_lo = 0.0, e_hi = 0.0;
-          FreqBinEdgesMeV(freq_grid_, ifr, nfreq_, freq_scale_, e_lo, e_hi);
+      // Every rate at the state above, with the evolved partner spectrum.  With the
+      // predictor on, the emissivity of the species it covers is eta = kappa*D*B_bin:
+      // the fixed point is bns_nurates' own target occupancy j/(c kappa*) at the bin
+      // centre, given the frequency profile of the equilibrium spectrum across the bin.
+      // B_bin alone would relax pair and bremsstrahlung toward beta equilibrium with a
+      // partner that is not in it, and would make pair annihilation exchange lepton
+      // number with the matter.  j_mid times the bin's phase space instead of D*B_bin
+      // biases the fixed point by 5-8% at the peak and far more in the Wien tail.
+      //
+      // D holds the partner fixed, so it describes the target only while the step
+      // resolves the relaxation; where it does not, the end state is the equilibrium
+      // the predictor solved for, D = 1.  Each clock is a time to fill one equilibrium
+      // spectrum, sum(J_eq)/sum(rate*J_eq), set by the state rather than by the field
+      // being relaxed.
+      //  - heavies: rate kappa*D, which shortens by exactly the large D of an empty
+      //    partner that breaks the frozen-partner picture.
+      //  - nu_e, nubar_e: the beta rate alone.  Only beta exchanges lepton number with
+      //    the matter, so beta equilibrium is the right end state only where beta is
+      //    unresolved; pair and bremsstrahlung alone must keep D.
+      Real rate_sum[4] = {0.0, 0.0, 0.0, 0.0};
+      Real Jeq_sum[4] = {0.0, 0.0, 0.0, 0.0};
+      Real kpbJ[4] = {0.0, 0.0, 0.0, 0.0};
+      Real kpbS[4] = {0.0, 0.0, 0.0, 0.0};
+      Real sJ[4] = {0.0, 0.0, 0.0, 0.0};
+      // freq_grid is in MeV, which is what bns_nurates_spectral_bin wants
+      for (int ifr = 0; ifr < nfreq_; ++ifr) {
+        Real e_lo = 0.0, e_hi = 0.0;
+        FreqBinEdgesMeV(freq_grid_, ifr, nfreq_, freq_scale_, e_lo, e_hi);
+
+        Real loc_eta_0_f[4]  = {0.};
+        Real loc_eta_1_f[4]  = {0.};
+        Real loc_abs_0_f[4]  = {0.};
+        Real loc_abs_1_f[4]  = {0.};
+        Real loc_scat_1_f[4] = {0.};
+        Real loc_dev_f[4]    = {0.};
+        Real loc_kpb_f[4]    = {0.};
+        bns_nurates_spectral_bin(nu_cell, e_lo, e_hi, freq_scale_,
+                                 loc_eta_0_f, loc_eta_1_f,
+                                 loc_abs_0_f, loc_abs_1_f, loc_scat_1_f,
+                                 loc_dev_f, loc_kpb_f,
+                                 nurates_params_);
+
+        if (peq_on_) {
           Real n_eq_f[4] = {0., 0., 0., 0.};
           Real J_eq_f[4] = {0., 0., 0., 0.};
-          NuratesEqSpectrumBin(e_lo, e_hi, T_star, mu_n_s, mu_p_s, mu_e_s,
+          NuratesEqSpectrumBin(e_lo, e_hi, T_r, mu_n_r, mu_p_r, mu_e_r,
                                nurates_params_.quadrature,
                                unit_num_dens_, unit_ene_dens_, n_eq_f, J_eq_f,
                                nurates_params_);
           for (int isp = 0; isp < nspecies_; ++isp) {
+            Real J_f = jf_f_(m, isp, ifr, k, j, i)/wght_sum;
+            kpbJ[isp] += loc_kpb_f[isp]*J_f;
+            kpbS[isp] += loc_kpb_f[isp];
+            sJ[isp] += J_f;
             if (isp >= 2 && !peq_heavy_) { continue; }
-            Real ka0 = abs_0_f_(m, isp, ifr, k, j, i);
-            Real ka1 = abs_1_f_(m, isp, ifr, k, j, i);
-            Real e0 = ka0*n_eq_f[isp];
-            Real e1 = ka1*J_eq_f[isp];
-            eta_0_f_(m, isp, ifr, k, j, i) = Kokkos::isfinite(e0) ? e0 : 0.0;
-            eta_1_f_(m, isp, ifr, k, j, i) = Kokkos::isfinite(e1) ? e1 : 0.0;
+            Real e0 = loc_abs_0_f[isp]*loc_dev_f[isp]*n_eq_f[isp];
+            Real e1 = loc_abs_1_f[isp]*loc_dev_f[isp]*J_eq_f[isp];
+            loc_eta_0_f[isp] = Kokkos::isfinite(e0) ? e0 : 0.0;
+            loc_eta_1_f[isp] = Kokkos::isfinite(e1) ? e1 : 0.0;
+            Real J_eq_ok = Kokkos::isfinite(J_eq_f[isp]) ? J_eq_f[isp] : 0.0;
+            rate_sum[isp] += (isp < 2)
+                ? (loc_abs_1_f[isp] - loc_kpb_f[isp])*J_eq_ok : loc_eta_1_f[isp];
+            Jeq_sum[isp] += J_eq_ok;
+          }
+        }
+
+        for (int isp = 0; isp < nspecies_; ++isp) {
+          eta_0_f_(m, isp, ifr, k, j, i)  = loc_eta_0_f[isp];
+          eta_1_f_(m, isp, ifr, k, j, i)  = loc_eta_1_f[isp];
+          abs_0_f_(m, isp, ifr, k, j, i)  = loc_abs_0_f[isp];
+          abs_1_f_(m, isp, ifr, k, j, i)  = loc_abs_1_f[isp];
+          scat_1_f_(m, isp, ifr, k, j, i) = loc_scat_1_f[isp];
+        }
+      }
+
+      if (peq_on_) {
+        for (int isp = 0; isp < nspecies_; ++isp) {
+          kpb_1_(m, isp, k, j, i) = (sJ[isp] > 0.0) ? kpbJ[isp]/sJ[isp]
+                                                    : kpbS[isp]/nfreq_;
+        }
+
+        // Species the step does not resolve go back to D = 1.
+        const Real dtau = dt_*alpha_cell/w_lorentz;
+        bool unresolved[4] = {false, false, false, false};
+        bool any_unresolved = false;
+        for (int isp = 0; isp < nspecies_; ++isp) {
+          const bool covered = (isp < 2) || peq_heavy_;
+          unresolved[isp] = covered &&
+                            (dtau*rate_sum[isp]*peq_D_resolve_steps_ > Jeq_sum[isp]);
+          any_unresolved = any_unresolved || unresolved[isp];
+        }
+        if (any_unresolved) {
+          for (int ifr = 0; ifr < nfreq_; ++ifr) {
+            Real e_lo = 0.0, e_hi = 0.0;
+            FreqBinEdgesMeV(freq_grid_, ifr, nfreq_, freq_scale_, e_lo, e_hi);
+            Real n_eq_f[4] = {0., 0., 0., 0.};
+            Real J_eq_f[4] = {0., 0., 0., 0.};
+            NuratesEqSpectrumBin(e_lo, e_hi, T_r, mu_n_r, mu_p_r, mu_e_r,
+                                 nurates_params_.quadrature,
+                                 unit_num_dens_, unit_ene_dens_, n_eq_f, J_eq_f,
+                                 nurates_params_);
+            for (int isp = 0; isp < nspecies_; ++isp) {
+              if (!unresolved[isp]) { continue; }
+              Real e0 = abs_0_f_(m, isp, ifr, k, j, i)*n_eq_f[isp];
+              Real e1 = abs_1_f_(m, isp, ifr, k, j, i)*J_eq_f[isp];
+              eta_0_f_(m, isp, ifr, k, j, i) = Kokkos::isfinite(e0) ? e0 : 0.0;
+              eta_1_f_(m, isp, ifr, k, j, i) = Kokkos::isfinite(e1) ? e1 : 0.0;
+            }
           }
         }
       }
