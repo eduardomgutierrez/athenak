@@ -270,9 +270,9 @@ void SphereImpl(Mesh *pmesh, ParameterInput *pin, const bool restart) {
     for (int ifr = 0; ifr < nfreq; ++ifr) {
       Real e_lo = 0.0, e_hi = 0.0;
       radiation::FreqBinEdgesMeV(freq_grid, ifr, nfreq, freq_scale, e_lo, e_hi);
-      Real eta_0[4], eta_1[4], abs_0[4], abs_1[4], scat_1[4];
+      Real eta_0[4], eta_1[4], abs_0[4], abs_1[4], scat_1[4], dev[4], kpb_1[4];
       radiation::bns_nurates_spectral_bin(cell, e_lo, e_hi, freq_scale, eta_0, eta_1,
-                                          abs_0, abs_1, scat_1, params);
+                                          abs_0, abs_1, scat_1, dev, kpb_1, params);
       for (int isp = 0; isp < nspecies; ++isp) {
         tab(isp, ifr, 0) = e_lo;
         tab(isp, ifr, 1) = e_hi;

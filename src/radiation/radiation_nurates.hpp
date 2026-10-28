@@ -46,16 +46,22 @@ struct NuratesParams {
   bool use_equilibrium_distribution;  // assume neutrinos in thermal equilibrium
 
   // Partially-equilibrated (T*, Ye*) emissivity predictor, and the only equilibrium
-  // closure this module has: Kirchhoff's law against the blackbody at the state the
-  // matter is predicted to reach over the step, not the state it starts from.  Off, the
-  // emissivity is bns_nurates' own.  Same names, same defaults and the same meaning as
-  // in radiation_m1/radiation_m1_params.hpp, so one <bns_nurates> block drives both.
+  // closure this module has: the emissivity relaxes toward the state the matter is
+  // predicted to reach over the step, not the state it starts from.  Grey, that is
+  // Kirchhoff's law against the blackbody there; multi-frequency, the rates are
+  // evaluated there and the blackbody is scaled by bns_nurates' own detailed-balance
+  // target (the deviation factor D of bns_nurates_spectral_bin).  Off, the emissivity is
+  // bns_nurates' own.  Same names, same defaults and the same meaning as in
+  // radiation_m1/radiation_m1_params.hpp, so one <bns_nurates> block drives both.
   bool use_partial_equilibrium;
   bool peq_heavy;      // the predictor also sets the heavy-lepton emissivity
   bool heavy_eps_midpoint;  // heavy emissivity from the bin-centre evaluation, not the quadrature
   Real peq_w_floor;    // tier-0 gate: skip the cell outright below this weight
   Real peq_dlnT_tol;   // tier-1 gate: skip when the predicted |dlnT| is below this
   Real peq_dYe_tol;    // tier-1 gate: ... and the predicted |dYe| below this
+  Real peq_D_max;      // cap on D; <radiation> multi-frequency only
+  Real peq_D_resolve_steps;  // D only where 1/kappa* spans this many steps; ditto
+  bool peq_pair_lag;   // lagged pair/brem opacity in the energy weight; ditto
 
   int quad_nx;               // number of quadrature points for 1d integration
   int quad_nx_2;             // number of quadrature points for 2d integration (-1 = same)
@@ -90,8 +96,8 @@ struct NuratesParams {
 //!               both ids the merged mean fbar costs (em_x - em_xbar)(f_x - f_xbar)/2
 //!
 //! The second reaches the emissivity even under use_partial_equilibrium, where
-//! eta = kappa*J_eq: J_eq[2] == J_eq[3] identically (both carry eta_t = 0), so J_eq is
-//! untouched, but kappa is not.  It is inert only when the occupancy comes from the
+//! eta = kappa*D*J_eq: J_eq[2] == J_eq[3] identically (both carry eta_t = 0), so J_eq is
+//! untouched, but kappa and D are not.  It is inert only when the occupancy comes from the
 //! equilibrium distribution rather than the evolved field.
 //!
 //! Fold* writes this module's slots; Mirror writes bns_nurates' species ids.  The two
@@ -452,12 +458,16 @@ bns_nurates::MyQuadratureIntegrand RadiationIntegrateSpectral1D(
 //! block below -- so `j_s` is left at zero and nothing adds it back.  `kappa` is the one
 //! coefficient still missing its stimulated correction, which
 //! RadiationComputeSpectralOpacitiesStimulatedAbs supplies.
+//!
+//! `kappa_pb_stim`, when given, receives the pair + bremsstrahlung part of the
+//! stimulated absorption coefficient alone, per bns_nurates species id.
 
 KOKKOS_INLINE_FUNCTION
 bns_nurates::SpectralOpacities RadiationComputeSpectralOpacities(
     const bns_nurates::BS_REAL nu, bns_nurates::MyQuadrature* quad_1d,
     const NuratesGroupOccupancy &spec,
-    bns_nurates::GreyOpacityParams* grey_op_params) {
+    bns_nurates::GreyOpacityParams* grey_op_params,
+    bns_nurates::BS_REAL *kappa_pb_stim = nullptr) {
   constexpr bns_nurates::BS_REAL zero    = 0.0;
   constexpr bns_nurates::BS_REAL four_pi = 4.0 * bns_nurates::kBS_Pi;
   constexpr bns_nurates::BS_REAL c_light = bns_nurates::kBS_Clight;
@@ -477,6 +487,13 @@ bns_nurates::SpectralOpacities RadiationComputeSpectralOpacities(
   if (grey_op_params->opacity_flags.use_pair || grey_op_params->opacity_flags.use_brem) {
     integrals_pair_1d =
         RadiationIntegrateSpectral1D(quad_1d, local_grey_params, spec, s_pair);
+  }
+  if (kappa_pb_stim != nullptr) {
+    for (int k = 0; k < total_num_species; ++k) {
+      kappa_pb_stim[k] =
+          bns_nurates::kBS_FourPi_hc3 *
+          (integrals_pair_1d.integrand[k] + integrals_pair_1d.integrand[4 + k]) / c_light;
+    }
   }
 
   bns_nurates::MyQuadratureIntegrand integrals_neps_1d = {0};
@@ -553,10 +570,12 @@ KOKKOS_INLINE_FUNCTION
 bns_nurates::SpectralOpacities RadiationComputeSpectralOpacitiesStimulatedAbs(
     const bns_nurates::BS_REAL nu, bns_nurates::MyQuadrature* quad_1d,
     const NuratesGroupOccupancy &spec,
-    bns_nurates::GreyOpacityParams* grey_op_params) {
+    bns_nurates::GreyOpacityParams* grey_op_params,
+    bns_nurates::BS_REAL *kappa_pb_stim = nullptr) {
   constexpr bns_nurates::BS_REAL c_light = bns_nurates::kBS_Clight;
   bns_nurates::SpectralOpacities op =
-      RadiationComputeSpectralOpacities(nu, quad_1d, spec, grey_op_params);
+      RadiationComputeSpectralOpacities(nu, quad_1d, spec, grey_op_params,
+                                        kappa_pb_stim);
 
   for (int idx = 0; idx < total_num_species; ++idx) {
     op.kappa[idx] += op.j[idx] / c_light;
@@ -641,11 +660,9 @@ void NuratesEqDensities(Real temp, Real mu_n, Real mu_p, Real mu_e,
 //!        counterpart of NuratesEqDensities.
 //!
 //! Deliberately the same bin, the same quadrature and the same 4pi/(hc)^3 E^2 measure
-//! that bns_nurates_spectral_bin integrates the emissivity over, so that
-//! eta_1 = kappa*J_eq holds bin by bin instead of only in the frequency-integrated sense.
-//! That exactness is the point: the source term reads back eq_j = eta_1/kappa as the
-//! spectrum it relaxes towards, so any mismatch between the two is a shift of the
-//! equilibrium it converges to.
+//! that bns_nurates_spectral_bin integrates the emissivity over.  The source term reads
+//! back eq_j = eta_1/kappa = D*J_eq as the spectrum it relaxes towards, so any mismatch
+//! between the two is a shift of the equilibrium it converges to.
 //!
 //! \param[in]  e_lo_mev  lower bin edge (MeV)
 //! \param[in]  e_hi_mev  upper bin edge (MeV)
@@ -979,17 +996,56 @@ NuratesCellState NuratesSpectralCellState(
 }
 
 //----------------------------------------------------------------------------------------
+//! \fn void bns_nurates_spectral_bin_beta
+//! \brief Bin-centred stimulated absorption coefficient of the beta processes alone, in
+//!        code units.  Closed form per energy, with no kernel integral, so it is cheap
+//!        enough to evaluate at the start-of-step state for the predictor's weights.
+
+KOKKOS_INLINE_FUNCTION
+void bns_nurates_spectral_bin_beta(NuratesCellState &cell,
+                                   Real e_lo_mev, Real e_hi_mev, int freq_scale,
+                                   Real abs_beta[4],
+                                   NuratesParams const &nurates_params) {
+  for (int idx = 0; idx < 4; ++idx) {
+    abs_beta[idx] = 0.;
+  }
+  if (!cell.active || (e_hi_mev <= e_lo_mev) ||
+      !cell.grey_op_params.opacity_flags.use_abs_em) {
+    return;
+  }
+
+  constexpr bns_nurates::BS_REAL c_light = bns_nurates::kBS_Clight;
+  const Real e_mid = (freq_scale == 1 && e_lo_mev > 0.0) ? sqrt(e_lo_mev*e_hi_mev) :
+                                                           0.5*(e_lo_mev + e_hi_mev);
+  bns_nurates::MyOpacity op = StimAbsOpacity(e_mid, &cell.grey_op_params.opacity_pars,
+                                             &cell.grey_op_params.eos_pars);
+  for (int idx = 0; idx < 4; ++idx) {
+    abs_beta[idx] = op.abs[idx] / c_light * cell.unit_length;
+  }
+  NuratesFoldHeavyMean(nurates_params.nspecies, abs_beta);
+}
+
+//----------------------------------------------------------------------------------------
 //! \fn void bns_nurates_spectral_bin
 //! \brief Midpoint/quadrature wrapper for bns_nurates spectral opacity coefficients.
 //!        The frequency bin bounds are in MeV, as freq_grid holds them; outputs are
 //!        bin-integrated emissivities and bin-centered opacities in code units, except
 //!        the number emissivity eta_0, which is in fm^-3 per code time.
+//!
+//! \param[out] dev    deviation factor D = j/(c kappa* f_eq) at the bin centre: the ratio
+//!                    of bns_nurates' detailed-balance target occupancy to the
+//!                    equilibrium Fermi-Dirac one at the cell state.  1 where the partner
+//!                    occupancy is thermal; set to 1 where f_eq underflows or D is not
+//!                    finite, and capped at peq_D_max.
+//! \param[out] kpb_1  pair + bremsstrahlung part of the stimulated absorption
+//!                    coefficient at the bin centre (code units)
 
 KOKKOS_INLINE_FUNCTION
 void bns_nurates_spectral_bin(NuratesCellState &cell,
                               Real e_lo_mev, Real e_hi_mev, int freq_scale,
                               Real eta_0[4], Real eta_1[4],
                               Real abs_0[4], Real abs_1[4], Real scat_1[4],
+                              Real dev[4], Real kpb_1[4],
                               NuratesParams const &nurates_params) {
   for (int idx = 0; idx < 4; ++idx) {
     eta_0[idx]  = 0.;
@@ -997,6 +1053,8 @@ void bns_nurates_spectral_bin(NuratesCellState &cell,
     abs_0[idx]  = 0.;
     abs_1[idx]  = 0.;
     scat_1[idx] = 0.;
+    dev[idx]    = 1.;
+    kpb_1[idx]  = 0.;
   }
 
   if (!cell.active || (e_hi_mev <= e_lo_mev)) {
@@ -1016,13 +1074,28 @@ void bns_nurates_spectral_bin(NuratesCellState &cell,
                                                          0.5*(e_lo + e_hi);
 
   bns_nurates::MyQuadrature quad = nurates_params.quadrature;
+  bns_nurates::BS_REAL kpb_mid[total_num_species] = {0};
   bns_nurates::SpectralOpacities op_mid =
       RadiationComputeSpectralOpacitiesStimulatedAbs(e_mid, &quad, cell.spec,
-                                                     &grey_op_params);
+                                                     &grey_op_params, kpb_mid);
+
+  // Only an f_eq above this gives a D worth keeping; below it the blackbody the caller
+  // multiplies D by is negligible anyway.
+  constexpr Real f_eq_min = 1.0e-250;
+  constexpr bns_nurates::BS_REAL c_light = bns_nurates::kBS_Clight;
+  bns_nurates::NuDistributionParams eq_distr_pars =
+      NuEquilibriumParams(&grey_op_params.eos_pars);
+  for (int idx = 0; idx < 4; ++idx) {
+    const Real f_eq = TotalNuF(e_mid, &eq_distr_pars, &grey_op_params.eos_pars, idx);
+    const Real d = op_mid.j[idx] / (c_light * op_mid.kappa[idx] * f_eq);
+    const Real d_ok = (f_eq > f_eq_min && Kokkos::isfinite(d)) ? d : 1.0;
+    dev[idx] = (d_ok < nurates_params.peq_D_max) ? d_ok : nurates_params.peq_D_max;
+    kpb_1[idx] = kpb_mid[idx];
+  }
 
   // The emissivity, integrated over the bin.  Skipped outright when the partially-
   // equilibrated predictor sets the emissivity of every species: the caller then sets
-  // eta from kappa times the blackbody at (T*, Ye*), so every one of these quadrature
+  // eta from kappa, D and the blackbody at (T*, Ye*), so every one of these quadrature
   // points -- a full spectral opacity evaluation each -- would be thrown away.  eta_*
   // are left at the zeros set above; the caller overwrites them.
   if (!nurates_params.use_partial_equilibrium || !nurates_params.peq_heavy) {
@@ -1062,6 +1135,7 @@ void bns_nurates_spectral_bin(NuratesCellState &cell,
     abs_0[idx]   = op_mid.kappa[idx] * kap_to_code;
     abs_1[idx]   = op_mid.kappa[idx] * kap_to_code;
     scat_1[idx]  = op_mid.kappa_s[idx] * kap_to_code;
+    kpb_1[idx]  *= kap_to_code;
   }
 
   NuratesFoldHeavySum(nurates_params.nspecies, eta_0);
@@ -1069,6 +1143,8 @@ void bns_nurates_spectral_bin(NuratesCellState &cell,
   NuratesFoldHeavyMean(nurates_params.nspecies, abs_0);
   NuratesFoldHeavyMean(nurates_params.nspecies, abs_1);
   NuratesFoldHeavyMean(nurates_params.nspecies, scat_1);
+  NuratesFoldHeavyMean(nurates_params.nspecies, dev);
+  NuratesFoldHeavyMean(nurates_params.nspecies, kpb_1);
 }
 
 } // namespace radiation

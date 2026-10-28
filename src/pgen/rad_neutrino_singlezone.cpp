@@ -222,6 +222,22 @@ void SingleZoneImpl(Mesh *pmesh, ParameterInput *pin, const bool restart) {
   // any residual this seed can be used to measure.
   const Real spec_norm = (spec_temp > 0.0) ?
                          erad/(6.0*SQR(SQR(spec_temp))) : 0.0;
+  // Every bin at the equilibrium spectrum of the initial matter state, the fixed point
+  // of every process, so the zone should not move.  Overrides erad and spec_temp.
+  // The comoving and lab bins coincide only at rest.
+  const bool init_eq = pin->GetOrAddBoolean("problem", "init_equilibrium", false);
+  if (init_eq && (vx != 0.0 || vy != 0.0 || vz != 0.0)) {
+    std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+              << std::endl
+              << "problem/init_equilibrium requires vx = vy = vz = 0" << std::endl;
+    std::exit(EXIT_FAILURE);
+  }
+  auto nurates_params = pmbp->prad->nurates_params;
+  auto nurates_units = radiation::MakeNuratesUnitSystem();
+  auto eos_units = eos.GetEOSUnitSystem();
+  auto code_units = eos.GetCodeUnitSystem();
+  const Real unit_num_dens = eos_units.NumberDensityConversion(nurates_units);
+  const Real unit_ene_dens = code_units.EnergyDensityConversion(nurates_units);
 #else
   // problem/spec_temp needs FreqBinEdgesMeV, which only exists with nurates.
   if (spec_temp > 0.0) {
@@ -254,6 +270,12 @@ void SingleZoneImpl(Mesh *pmesh, ParameterInput *pin, const bool restart) {
                        norm_to_tet(m,3,3,k,j,i)*wlor*vz;
 
             Real erad_freq = erad/static_cast<Real>(nfreq);
+#if ENABLE_NURATES
+            Real ye_ = ye;
+            Real mu_b = eos.GetBaryonChemicalPotential(nb, temp, &ye_);
+            Real mu_q = eos.GetChargeChemicalPotential(nb, temp, &ye_);
+            Real mu_le = eos.GetElectronLeptonChemicalPotential(nb, temp, &ye_);
+#endif
             for (int isp = 0; isp < nspecies; ++isp) {
               // problem/erad is the seed energy density of ONE heavy-flavour slot at
               // nspecies = 4.  A merged slot holds twice the states, so it takes twice
@@ -280,6 +302,17 @@ void SingleZoneImpl(Mesh *pmesh, ParameterInput *pin, const bool restart) {
                     intensity_cm = spec_norm*
                         (PlanckLikeIntegral(n0_f*e_hi, spec_temp) -
                          PlanckLikeIntegral(n0_f*e_lo, spec_temp));
+                  }
+                  if (init_eq) {
+                    Real e_lo = 0.0, e_hi = 0.0;
+                    radiation::FreqBinEdgesMeV(freq_grid, ifr, nfreq, freq_scale,
+                                               e_lo, e_hi);
+                    Real n_eq_f[4], J_eq_f[4];
+                    radiation::NuratesEqSpectrumBin(
+                        e_lo, e_hi, temp, mu_b, mu_b + mu_q, mu_le - mu_q,
+                        nurates_params.quadrature, unit_num_dens, unit_ene_dens,
+                        n_eq_f, J_eq_f, nurates_params);
+                    intensity_cm = J_eq_f[isp]/mult;
                   }
 #endif
                   i0(m, nn, k, j, i) =

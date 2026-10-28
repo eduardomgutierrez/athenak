@@ -140,6 +140,10 @@ class Radiation {
   DvceArray6D<Real> nurates_nf_freq;   // number   the same, over the bin mid energy
   // Per-bin evolved occupancy, clamped to [0, 1], [nmb, nspecies, nfreq, nk, nj, ni].
   DvceArray6D<Real> nurates_f_freq;
+  // Pair + bremsstrahlung stimulated absorption coefficient from the previous step,
+  // J-weighted over bins, for the predictor's energy weight [nmb, nspecies, nk, nj, ni].
+  // Negative means none yet.  Not remapped on regrid: reset it to -1 there.
+  DvceArray5D<Real> nurates_kpb_1;
   // Per-cell workspace for the multi-frequency source term, [nmb, nwork, nk, nj, ni].
   // It lives here rather than in team scratch because the kernel is dispatched with a
   // flat par_for: the body is serial over the whole cell, so it must own its cell
